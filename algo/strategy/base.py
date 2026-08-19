@@ -26,6 +26,25 @@ class Strategy(ABC):
 
     strategy_id: str = "unnamed"
 
+    def __init__(self) -> None:
+        self._notes: list[str] = []
+
+    def note(self, message: str) -> None:
+        """Record why this bar produced no signal, or produced the one it did.
+
+        Brief §8 requires a skipped trade to be logged rather than silently
+        dropped. A strategy cannot log — it has no I/O — so it leaves a note
+        and the engine collects it. Without this, "no strike was quoted at
+        0.25 delta" and "the strategy chose not to trade" look identical in
+        the output, and they are not remotely the same thing.
+        """
+        self._notes.append(message)
+
+    def drain_notes(self) -> list[str]:
+        """Take the notes recorded since the last call."""
+        notes, self._notes = self._notes, []
+        return notes
+
     @abstractmethod
     def on_bar(self, ctx: BarContext) -> list[Signal]:
         """Called once per closed bar. Returns zero or more intents."""

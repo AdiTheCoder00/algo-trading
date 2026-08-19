@@ -13,6 +13,7 @@ to the future; such an assignment raises at the point it is written.
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from contextlib import suppress
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
@@ -22,11 +23,12 @@ from pydantic import BaseModel, ConfigDict
 from algo.core.bar import Bar, BarWindow, Timeframe
 from algo.core.chain import OptionChainSnapshot
 from algo.core.enums import Exchange
-from algo.core.errors import DataError, DomainError
+from algo.core.errors import CalendarError, DataError, DomainError
 from algo.core.instrument import InstrumentId, InstrumentSpec
 from algo.core.position import Position
 from algo.core.timeutil import ist_date, minutes_between
 from algo.exchange.calendar import MarketCalendar
+from algo.exchange.expiries import ExpiryCalendar, ExpirySet
 from algo.exchange.specs import ContractSpecStore
 
 
@@ -93,6 +95,7 @@ class BarContext:
     __slots__ = (
         "_chain_provider",
         "_exchange",
+        "_expiries",
         "_positions",
         "_session",
         "_specs",
@@ -110,6 +113,7 @@ class BarContext:
         timeframe: Timeframe,
         exchange: Exchange = Exchange.MCX,
         chain_provider: ChainProvider | None = None,
+        expiries: ExpiryCalendar | None = None,
     ) -> None:
         if len(window) == 0:
             raise DomainError("BarContext requires at least one closed bar")
@@ -120,6 +124,7 @@ class BarContext:
         self._timeframe = timeframe
         self._exchange = exchange
         self._chain_provider = chain_provider
+        self._expiries = expiries
 
     # ------------------------------------------------------------------ time
     @property
@@ -178,6 +183,41 @@ class BarContext:
                 f"no {underlying} chain snapshot for expiry {option_expiry} at {self.now}"
             )
         return snapshot
+
+    # --------------------------------------------------------------- expiries
+    def option_expiries(self, underlying: str) -> tuple[date, ...]:
+        """Option expiry dates known for `underlying`, ascending.
+
+        Read from the instrument master via the expiry calendar (D-023) — never
+        computed from a weekday rule inside a strategy.
+        """
+        if self._expiries is None:
+            raise DataError(
+                "no expiry calendar is wired into this context; option expiry "
+                "access needs one"
+            )
+        today = ist_date(self.now)
+        found: list[date] = []
+        year, month = today.year, today.month
+        for _ in range(3):
+            # A contract month the instrument master has never heard of is not
+            # an error here — it simply is not listed yet. Anything else still
+            # raises.
+            with suppress(CalendarError):
+                found.append(self._expiries.option_expiry(underlying, year, month))
+            month += 1
+            if month > 12:
+                year, month = year + 1, 1
+        return tuple(sorted(d for d in found if d >= today))
+
+    def nearest_expiry(self, underlying: str) -> ExpirySet:
+        """The first cycle whose option expiry is on or after this bar's date."""
+        if self._expiries is None:
+            raise DataError("no expiry calendar is wired into this context")
+        return self._expiries.nearest_expiry_on_or_after(underlying, ist_date(self.now))
+
+    def days_to_expiry(self, underlying: str) -> int:
+        return self.nearest_expiry(underlying).days_to_option_expiry(ist_date(self.now))
 
     # ----------------------------------------------------------------- specs
     def spec(self, underlying: str) -> InstrumentSpec:

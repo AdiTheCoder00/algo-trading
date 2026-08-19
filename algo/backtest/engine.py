@@ -5,42 +5,59 @@ series at once and then shift by one", because that pattern hides look-ahead and
 cannot model intrabar stops. This loop processes one bar at a time and hands the
 strategy a context built from `[0..i]` only.
 
-The order of operations within a bar is the part worth reading carefully, because
-it is where a backtest becomes either honest or flattering:
+The order of operations within a bar is where a backtest becomes either honest or
+flattering:
 
-    1. Fill orders queued on the previous bar, at **this** bar's open.
-    2. Mark positions at this bar's close and record the equity point.
-    3. Build the context from bars `[0..i]` and ask the strategy.
-    4. Size the resulting signals and queue the orders for the *next* bar's open.
+    1. Fill orders queued on the previous bar, priced at **this** bar.
+    2. Apply the risk layer's own exits — forced pre-expiry closes first, then the
+       combo stop and target.
+    3. Mark every open position and record the equity point.
+    4. Build the context from bars `[0..i]` and ask the strategy.
+    5. Size the resulting signals and queue the orders for the *next* bar.
 
-A signal produced from bar `i` therefore cannot execute inside bar `i`. That one
-rule removes the most common and most flattering backtest bug — deciding from a
-bar's close and then filling somewhere inside that same bar.
+A signal produced from bar `i` therefore cannot execute inside bar `i` (D-038).
+That one rule removes the most common and most flattering backtest bug.
 
-The portfolio identity is re-checked after every fill and every mark. It is cheap,
-and drift caught on the bar it happened is a five-minute fix.
+Step 2 runs before step 4 deliberately. **The risk layer outranks the strategy.**
+A forced pre-expiry exit is not a suggestion the strategy may decline, and a
+tripped kill switch has to stop new orders on the bar it trips rather than the
+one after.
+
+One engine serves both the single-instrument futures case and the multi-leg
+options case. The difference lives entirely in the `PriceSource` (brief §4).
+
+The portfolio identity is re-checked after every fill and every mark.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
+from typing import Any
 
+from algo.backtest.prices import BarPriceSource, PriceSource, require_mark
 from algo.core.bar import Bar, BarWindow, Timeframe
-from algo.core.enums import Exchange, RejectReason, SignalAction
-from algo.core.errors import DomainError
+from algo.core.enums import Exchange, RejectReason, Side, SignalAction
+from algo.core.errors import AlgoError, DomainError
 from algo.core.fill import Fill
 from algo.core.ids import stable_hash
-from algo.core.instrument import InstrumentId
+from algo.core.instrument import InstrumentId, OptionId
 from algo.core.order import Order
+from algo.core.signal import PriceIntent, Signal, SignalLeg
 from algo.core.timeutil import iso, ist_date
+from algo.costs.margin import MarginModel
 from algo.exchange.calendar import MarketCalendar
+from algo.exchange.expiries import ExpiryCalendar, ExpirySet
 from algo.exchange.specs import ContractSpecStore
 from algo.execution.fills import FillSimulator
 from algo.portfolio.book import EquityPoint, Portfolio
+from algo.risk.devolvement import DevolvementGuard
 from algo.risk.engine import Accepted, Rejected, RiskEngine, RiskSnapshot
+from algo.risk.exits import ExitLevels, ExitReason, resolve_levels
+from algo.risk.killswitch import KillSwitch
 from algo.strategy.base import Strategy
-from algo.strategy.context import BarContext, PositionView, build_session_info
+from algo.strategy.context import BarContext, ChainProvider, PositionView, build_session_info
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,25 +71,45 @@ class Rejection:
 
 
 @dataclass(frozen=True, slots=True)
+class Note:
+    """A diagnostic from the strategy — usually why it did *not* trade."""
+
+    ts_iso: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExitEvent:
+    """A close driven by the risk layer rather than by the strategy."""
+
+    ts_iso: str
+    reason: ExitReason
+    detail: str
+    combo_pnl: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class BacktestResult:
     """Everything one run produced, plus what it is and is not evidence of."""
 
     equity_curve: tuple[EquityPoint, ...]
     fills: tuple[Fill, ...]
     rejections: tuple[Rejection, ...]
-
     starting_equity: Decimal
     final_equity: Decimal
     net_pnl: Decimal
     total_charges: Decimal
     spread_cost: Decimal
     round_trips: int
-
     predicted_cost: Decimal
     dataset_hash: str
     config_hash: str
     costs_verified: bool
     spread_measured: bool
+    notes: tuple[Note, ...] = field(default_factory=tuple)
+    exits: tuple[ExitEvent, ...] = field(default_factory=tuple)
+    margin_calibrated: bool = True
+    kill_switch_tripped: bool = False
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -93,21 +130,25 @@ class BacktestResult:
 
 
 class BacktestEngine:
-    """Single-instrument bar-by-bar backtest.
-
-    Multi-instrument runs arrive with the chain feed at Milestone 4. Building the
-    single-instrument case first is what makes the falsification strategies
-    meaningful — their expected results are computable by hand.
-    """
+    """Bar-by-bar backtest, single instrument or multi-leg options."""
 
     __slots__ = (
+        "_bar_counts",
         "_bars",
         "_calendar",
+        "_chain_provider",
         "_config_hash",
+        "_devolvement",
+        "_entry_credit",
         "_exchange",
+        "_expiries",
         "_instrument",
         "_is_option",
+        "_kill_switch",
+        "_levels",
+        "_margin",
         "_portfolio",
+        "_prices",
         "_risk",
         "_sim",
         "_specs",
@@ -130,6 +171,12 @@ class BacktestEngine:
         is_option: bool = False,
         config_hash: str = "",
         exchange: Exchange = Exchange.MCX,
+        price_source: PriceSource | None = None,
+        chain_provider: ChainProvider | None = None,
+        expiries: ExpiryCalendar | None = None,
+        devolvement: DevolvementGuard | None = None,
+        kill_switch: KillSwitch | None = None,
+        margin: MarginModel | None = None,
     ) -> None:
         if not bars:
             raise DomainError("cannot run a backtest with no bars")
@@ -145,125 +192,389 @@ class BacktestEngine:
         self._timeframe = timeframe
         self._config_hash = config_hash
         self._exchange = exchange
+        self._prices = price_source or BarPriceSource(instrument, bars)
+        self._chain_provider = chain_provider
+        self._expiries = expiries
+        self._devolvement = devolvement
+        self._kill_switch = kill_switch
+        self._margin = margin
+        self._levels: ExitLevels | None = None
+        self._entry_credit = Decimal("0")
+        self._bar_counts: dict[date, int] = {}
 
+    # -------------------------------------------------------------------- run
     def run(self) -> BacktestResult:
         pending: list[Order] = []
         fills: list[Fill] = []
         rejections: list[Rejection] = []
+        notes: list[Note] = []
+        exits: list[ExitEvent] = []
         round_trips = 0
         spread_cost = Decimal("0")
-
-        seen_in_session: dict[object, int] = {}
+        session_started: set[date] = set()
 
         for index, bar in enumerate(self._bars):
             session_day = ist_date(bar.ts)
-            spec = self._specs.spec_for(self._instrument.underlying, self._exchange, session_day)
-            key = self._instrument.key
+            was_open = not self._portfolio.is_flat
 
-            # ---- 1. orders queued on the previous bar fill at THIS bar's open
+            # ---- 1. orders queued on the previous bar transact against this one
+            bar_fills: list[Fill] = []
             for order_index, order in enumerate(pending):
-                before = self._portfolio.position(self._instrument)
-                was_open = before is not None and not before.is_flat
-
-                fill = self._sim.fill(
-                    fill_id=f"{order.client_order_id}#{index}.{order_index}",
-                    client_order_id=order.client_order_id,
-                    signal_id=order.signal_id,
-                    instrument_key=key,
-                    instrument=order.instrument,
-                    side=order.side,
-                    lots=order.lots,
-                    reference_price=bar.open,
-                    spec=spec,
-                    ts_utc=bar.ts,
-                    session_day=session_day,
-                    is_option=self._is_option,
-                )
-                self._portfolio.apply_fill(fill, multiplier=spec.multiplier)
-                fills.append(fill)
-                spread_cost += fill.slippage * fill.qty * spec.multiplier
-
-                after = self._portfolio.position(self._instrument)
-                if was_open and after is not None and after.is_flat:
-                    round_trips += 1
-
-                self._portfolio.check_identity({key: bar.open})
+                fill = self._execute(order, bar, index, order_index, session_day)
+                bar_fills.append(fill)
+                spread_cost += fill.slippage * fill.qty * self._spec_for(
+                    order.instrument, session_day
+                ).multiplier
+            fills.extend(bar_fills)
             pending = []
 
-            # ---- 2. mark at the close and record the equity point
-            marks = {key: bar.close}
+            if was_open and self._portfolio.is_flat:
+                round_trips += 1
+                self._levels = None
+                self._entry_credit = Decimal("0")
+            elif not was_open and not self._portfolio.is_flat and bar_fills:
+                self._open_levels(bar_fills, bar, session_day)
+
+            marks = self._marks(bar)
             self._portfolio.check_identity(marks)
+
+            if self._kill_switch is not None and session_day not in session_started:
+                session_started.add(session_day)
+                self._kill_switch.start_session(session_day, self._portfolio.equity(marks))
+
+            # ---- 2. the risk layer acts before the strategy is consulted
+            exit_orders, exit_event = self._risk_exits(bar, session_day, marks)
+            if exit_event is not None:
+                exits.append(exit_event)
+
+            # ---- 3. mark and record
             self._portfolio.record(bar.ts, marks)
+            if self._kill_switch is not None:
+                self._kill_switch.observe_equity(self._portfolio.equity(marks), bar.ts)
 
-            # ---- 3. the strategy sees bars [0..i] and nothing else
-            bar_index = seen_in_session.get(session_day, 0)
-            seen_in_session[session_day] = bar_index + 1
-            ctx = BarContext(
-                window=BarWindow.of(tuple(self._bars[: index + 1])),
-                session=build_session_info(
-                    bar=bar,
-                    session_close=self._calendar.session_close(session_day),
-                    is_us_dst=self._calendar.is_us_dst_session(session_day),
-                    bar_index=bar_index,
-                    bars_in_session=len(
-                        self._calendar.bar_boundaries(session_day, self._timeframe)
-                    ),
-                ),
-                specs=self._specs,
-                positions=PositionView(self._portfolio.positions_by_key()),
-                timeframe=self._timeframe,
-                exchange=self._exchange,
+            # ---- 4. the strategy sees bars [0..i] and nothing else
+            signals = self._ask_strategy(bar, index, session_day)
+            notes.extend(
+                Note(ts_iso=iso(bar.ts), message=message)
+                for message in self._strategy.drain_notes()
             )
-            signals = self._strategy.on_bar(ctx)
 
-            # ---- 4. size, and queue for the NEXT bar's open
             if index == len(self._bars) - 1:
                 # Nothing can execute after the last bar; queuing would silently
                 # drop the orders instead of saying so.
                 continue
 
-            position = self._portfolio.position(self._instrument)
-            snapshot = RiskSnapshot(
-                now=bar.ts,
-                session_day=session_day,
-                equity=self._portfolio.equity(marks),
-                open_position_count=len(self._portfolio.open_positions()),
-                lots_held=abs(position.lots) if position else 0,
-            )
-            for signal in signals:
-                is_closing = signal.action is SignalAction.CLOSE
-                decision = self._risk.evaluate(
-                    signal,
-                    RiskSnapshot(
-                        now=snapshot.now,
-                        session_day=snapshot.session_day,
-                        equity=snapshot.equity,
-                        # A closing signal must never be refused for a position
-                        # cap it is itself reducing.
-                        open_position_count=0 if is_closing else snapshot.open_position_count,
-                        lots_held=0 if is_closing else snapshot.lots_held,
-                    ),
-                    spec=spec,
-                )
-                if isinstance(decision, Rejected):
-                    rejections.append(
-                        Rejection(
-                            ts_iso=iso(bar.ts),
-                            signal_id=signal.signal_id,
-                            reason=decision.reason,
-                            detail=decision.detail,
-                        )
-                    )
-                    continue
-                if isinstance(decision, Accepted):
-                    pending.extend(decision.orders)
+            # ---- 5. a risk-layer exit outranks anything the strategy asked for
+            if exit_orders:
+                pending.extend(exit_orders)
+                continue
+            pending.extend(self._size(signals, bar, session_day, rejections))
 
-        final_marks = {self._instrument.key: self._bars[-1].close}
+        return self._finish(fills, rejections, notes, exits, round_trips, spread_cost)
+
+    # --------------------------------------------------------------- internals
+    def _spec_for(self, instrument: InstrumentId, on: date) -> Any:
+        return self._specs.spec_for(instrument.underlying, self._exchange, on)
+
+    def _marks(self, bar: Bar) -> dict[str, Decimal]:
+        return {
+            position.instrument.key: require_mark(self._prices, position.instrument.key, bar.ts)
+            for position in self._portfolio.open_positions()
+        }
+
+    def _execute(
+        self, order: Order, bar: Bar, index: int, order_index: int, session_day: date
+    ) -> Fill:
+        reference = self._prices.fill_reference(order.instrument.key, bar.ts)
+        if reference is None:
+            raise DomainError(
+                f"no price available to fill {order.instrument.key} at {bar.ts} — "
+                "an order cannot be filled against a price nobody quoted"
+            )
+        spec = self._spec_for(order.instrument, session_day)
+        fill = self._sim.fill(
+            fill_id=f"{order.client_order_id}#{index}.{order_index}",
+            client_order_id=order.client_order_id,
+            signal_id=order.signal_id,
+            instrument_key=order.instrument.key,
+            instrument=order.instrument,
+            side=order.side,
+            lots=order.lots,
+            reference_price=reference,
+            spec=spec,
+            ts_utc=bar.ts,
+            session_day=session_day,
+            is_option=isinstance(order.instrument, OptionId),
+        )
+        self._portfolio.apply_fill(fill, multiplier=spec.multiplier)
+        # The strategy learns what actually happened, never what it asked for
+        # (D-041). Cycle-cadence state depends on this being a fill.
+        self._strategy.on_fill(fill)
+        return fill
+
+    def _open_levels(self, entry_fills: list[Fill], bar: Bar, session_day: date) -> None:
+        """Freeze take-profit and stop levels at entry (D-025).
+
+        The margin figure comes from the margin model, and the configured exits
+        are a percentage *of that margin* — so an approximate margin makes an
+        approximate stop. The run reports that rather than hiding it.
+        """
+        take_profit = getattr(self._strategy, "_take_profit", None)
+        stop_loss = getattr(self._strategy, "_stop_loss", None)
+        if self._margin is None or take_profit is None or stop_loss is None:
+            return
+
+        notional = Decimal("0")
+        credit = Decimal("0")
+        for fill in entry_fills:
+            spec = self._spec_for(fill.instrument, session_day)
+            notional += fill.price * fill.qty * spec.multiplier
+            if fill.side is Side.SELL:
+                credit += fill.price * fill.qty * spec.multiplier
+
+        # Margin is taken for the COMBO, not summed across legs. SPAN nets a
+        # strangle's two legs against each other — they cannot both go wrong at
+        # once — so summing per-leg margin roughly doubles it. That matters far
+        # more than it sounds: the configured stop is 1% OF MARGIN, so an
+        # overstated margin silently doubles the stop distance and turns the
+        # strategy into a different one. Found by the end-to-end test asserting
+        # a 1,000 stop and getting 2,000.
+        lots = max((abs(p.lots) for p in self._portfolio.open_positions()), default=1)
+        margin = self._margin.margin_for(
+            notional=notional, lots=max(lots, 1), is_short_option=True
+        )
+        self._entry_credit = credit
+        self._levels = resolve_levels(
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            margin=margin,
+            equity=self._portfolio.equity(self._marks(bar)),
+            credit=credit,
+        )
+
+    def _risk_exits(
+        self, bar: Bar, session_day: date, marks: dict[str, Decimal]
+    ) -> tuple[list[Order], ExitEvent | None]:
+        """Forced pre-expiry closes first, then the combo stop and target."""
+        if self._portfolio.is_flat:
+            return [], None
+
+        reason: ExitReason | None = None
+        detail = ""
+
+        cycle = self._current_cycle()
+        if self._devolvement is not None and cycle is not None:
+            verdict = self._devolvement.requires_option_exit(cycle, session_day)
+            if verdict is not None:
+                reason, detail = ExitReason.FORCED_PRE_EXPIRY, verdict.detail
+
+        combo = self._portfolio.unrealised_pnl(marks)
+        if reason is None and self._levels is not None:
+            fired = self._levels.check(combo)
+            if fired is not None:
+                reason = fired
+                detail = (
+                    f"combo P&L {combo} against take profit {self._levels.take_profit} "
+                    f"and stop {self._levels.stop_loss}"
+                )
+
+        if reason is None:
+            return [], None
+        return self._flatten_orders(bar), ExitEvent(
+            ts_iso=iso(bar.ts), reason=reason, detail=detail, combo_pnl=combo
+        )
+
+    def _current_cycle(self) -> ExpirySet | None:
+        if self._expiries is None:
+            return None
+        for position in self._portfolio.open_positions():
+            option = position.instrument
+            if isinstance(option, OptionId):
+                try:
+                    return self._expiries.expiry_set(
+                        option.underlying,
+                        option.option_expiry.year,
+                        option.option_expiry.month,
+                    )
+                except AlgoError as exc:
+                    # Brief §12: never swallow. Without the cycle the devolvement
+                    # guard cannot act, and that has to be visible.
+                    self._strategy.note(
+                        f"expiry cycle for {option.key} could not be resolved ({exc}); "
+                        "the devolvement guard is blind for this position"
+                    )
+                    return None
+        return None
+
+    def _flatten_orders(self, bar: Bar) -> list[Order]:
+        """Closing orders for every open position, sized to what is actually held."""
+        orders: list[Order] = []
+        for position in self._portfolio.open_positions():
+            closing = Side.SELL if position.qty > 0 else Side.BUY
+            signal = Signal(
+                signal_id=stable_hash({"flatten": position.instrument.key, "at": iso(bar.ts)}),
+                strategy_id=self._strategy.strategy_id,
+                ts=bar.ts,
+                action=SignalAction.CLOSE,
+                legs=(
+                    SignalLeg(
+                        instrument=position.instrument,
+                        direction=closing,
+                        entry=PriceIntent.market(),
+                    ),
+                ),
+                reason="risk layer flattening the position",
+            )
+            decision = self._risk.evaluate(
+                signal,
+                RiskSnapshot(
+                    now=bar.ts,
+                    session_day=ist_date(bar.ts),
+                    equity=self._portfolio.starting_equity,
+                    open_position_count=0,
+                    lots_held=0,
+                ),
+                spec=self._spec_for(position.instrument, ist_date(bar.ts)),
+            )
+            if isinstance(decision, Accepted):
+                orders.extend(
+                    order.model_copy(
+                        update={"lots": abs(position.lots), "qty": abs(position.qty)}
+                    )
+                    for order in decision.orders
+                )
+        return orders
+
+    def _ask_strategy(self, bar: Bar, index: int, session_day: date) -> list[Signal]:
+        bar_index = self._bar_counts.get(session_day, 0)
+        self._bar_counts[session_day] = bar_index + 1
+        ctx = BarContext(
+            window=BarWindow.of(tuple(self._bars[: index + 1])),
+            session=build_session_info(
+                bar=bar,
+                session_close=self._calendar.session_close(session_day),
+                is_us_dst=self._calendar.is_us_dst_session(session_day),
+                bar_index=bar_index,
+                bars_in_session=len(self._calendar.bar_boundaries(session_day, self._timeframe)),
+            ),
+            specs=self._specs,
+            positions=PositionView(self._portfolio.positions_by_key()),
+            timeframe=self._timeframe,
+            exchange=self._exchange,
+            chain_provider=self._chain_provider,
+            expiries=self._expiries,
+        )
+        return self._strategy.on_bar(ctx)
+
+    def _size(
+        self,
+        signals: list[Signal],
+        bar: Bar,
+        session_day: date,
+        rejections: list[Rejection],
+    ) -> list[Order]:
+        if not signals:
+            return []
+
+        marks = self._marks(bar)
+        position = self._portfolio.position(self._instrument)
+        equity = self._portfolio.equity(marks)
+        open_count = len(self._portfolio.open_positions())
+        lots_held = abs(position.lots) if position else 0
+
+        queued: list[Order] = []
+        for signal in signals:
+            blocked = self._pre_trade_block(signal, session_day)
+            if blocked is not None:
+                rejections.append(
+                    Rejection(
+                        ts_iso=iso(bar.ts),
+                        signal_id=signal.signal_id,
+                        reason=blocked[0],
+                        detail=blocked[1],
+                    )
+                )
+                continue
+
+            is_closing = signal.action is SignalAction.CLOSE
+            decision = self._risk.evaluate(
+                signal,
+                RiskSnapshot(
+                    now=bar.ts,
+                    session_day=session_day,
+                    equity=equity,
+                    open_position_count=0 if is_closing else open_count,
+                    lots_held=0 if is_closing else lots_held,
+                ),
+                spec=self._spec_for(signal.legs[0].instrument, session_day),
+            )
+            if isinstance(decision, Rejected):
+                rejections.append(
+                    Rejection(
+                        ts_iso=iso(bar.ts),
+                        signal_id=signal.signal_id,
+                        reason=decision.reason,
+                        detail=decision.detail,
+                    )
+                )
+                continue
+            if isinstance(decision, Accepted):
+                queued.extend(decision.orders)
+        return queued
+
+    def _pre_trade_block(
+        self, signal: Signal, session_day: date
+    ) -> tuple[RejectReason, str] | None:
+        """Checks that outrank sizing entirely."""
+        if signal.action is not SignalAction.OPEN:
+            return None
+
+        if self._kill_switch is not None and not self._kill_switch.allows_new_orders():
+            state = self._kill_switch.state
+            return (
+                RejectReason.KILL_SWITCH_TRIPPED,
+                f"kill switch tripped: {state.reason} — {state.detail}",
+            )
+
+        if self._devolvement is None or self._expiries is None:
+            return None
+
+        for leg in signal.legs:
+            option = leg.instrument
+            if not isinstance(option, OptionId):
+                continue
+            try:
+                cycle = self._expiries.expiry_set(
+                    option.underlying, option.option_expiry.year, option.option_expiry.month
+                )
+            except AlgoError as exc:
+                return (
+                    RejectReason.DEVOLVEMENT_WINDOW,
+                    f"cannot verify the expiry cycle for {option.key} ({exc}); refusing "
+                    "to open a short option the devolvement guard cannot see",
+                )
+            verdict = self._devolvement.blocks_entry(cycle, session_day)
+            if verdict is not None:
+                return verdict.reason, verdict.detail
+        return None
+
+    def _finish(
+        self,
+        fills: list[Fill],
+        rejections: list[Rejection],
+        notes: list[Note],
+        exits: list[ExitEvent],
+        round_trips: int,
+        spread_cost: Decimal,
+    ) -> BacktestResult:
+        last = self._bars[-1]
+        final_marks = {
+            position.instrument.key: require_mark(self._prices, position.instrument.key, last.ts)
+            for position in self._portfolio.open_positions()
+        }
         final_equity = self._portfolio.equity(final_marks)
 
-        spec = self._specs.spec_for(
-            self._instrument.underlying, self._exchange, ist_date(self._bars[0].ts)
-        )
+        spec = self._spec_for(self._instrument, ist_date(self._bars[0].ts))
         spread_predicted, charges_predicted = self._sim.predicted_round_trip_cost(
             price=self._bars[0].close,
             lots=1,
@@ -273,21 +584,27 @@ class BacktestEngine:
         )
 
         warnings: list[str] = []
-        costs_verified = self._sim.costs_verified
-        if not costs_verified:
+        if not self._sim.costs_verified:
             warnings.append(
                 "CHARGE RATES ARE PLACEHOLDERS — net P&L is not calibrated (D-011, Q6)"
             )
-        spread_measured = self._sim.spread_measured
-        if not spread_measured:
+        if not self._sim.spread_measured:
             warnings.append(
                 "SPREAD IS MODELLED, NOT MEASURED — the recorder replaces this at M1.5"
+            )
+        margin_calibrated = self._margin is None or self._margin.is_calibrated
+        if not margin_calibrated:
+            warnings.append(
+                "MARGIN IS APPROXIMATED — and the stop is a percentage of margin, so "
+                "the stop level is approximate too (Q18)"
             )
 
         return BacktestResult(
             equity_curve=self._portfolio.curve,
             fills=tuple(fills),
             rejections=tuple(rejections),
+            notes=tuple(notes),
+            exits=tuple(exits),
             starting_equity=self._portfolio.starting_equity,
             final_equity=final_equity,
             net_pnl=final_equity - self._portfolio.starting_equity,
@@ -297,8 +614,12 @@ class BacktestEngine:
             predicted_cost=(spread_predicted + charges_predicted.total) * Decimal(round_trips),
             dataset_hash=dataset_hash(self._bars),
             config_hash=self._config_hash,
-            costs_verified=costs_verified,
-            spread_measured=spread_measured,
+            costs_verified=self._sim.costs_verified,
+            spread_measured=self._sim.spread_measured,
+            margin_calibrated=margin_calibrated,
+            kill_switch_tripped=(
+                self._kill_switch.is_tripped if self._kill_switch is not None else False
+            ),
             warnings=tuple(warnings),
         )
 

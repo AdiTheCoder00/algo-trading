@@ -39,6 +39,7 @@ class CoinFlip(Strategy):
     strategy_id = "coin_flip"
 
     def __init__(self, instrument: InstrumentId, *, seed: int = 0, config_hash: str = "") -> None:
+        super().__init__()
         self._instrument = instrument
         self._seed = seed
         self._config_hash = config_hash

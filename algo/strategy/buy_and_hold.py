@@ -25,6 +25,7 @@ class BuyAndHold(Strategy):
     strategy_id = "buy_and_hold"
 
     def __init__(self, instrument: InstrumentId, *, config_hash: str = "") -> None:
+        super().__init__()
         self._instrument = instrument
         self._config_hash = config_hash
         self._entered = False

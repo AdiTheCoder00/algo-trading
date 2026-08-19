@@ -410,6 +410,74 @@ note is a blocking question (Q6) rather than a nicety.
 
 ---
 
+## Decisions made while building Milestone 4
+
+### D-044 — Margin is taken for the **combo**, not summed across legs
+**How it was found:** the end-to-end test asserted a ₹1,000 stop (1% of a ₹1 lakh
+margin) and got ₹2,000. The engine was summing per-leg margin across the two legs.
+**Why it matters far more than it sounds:** SPAN nets a strangle's legs against each
+other — they cannot both go wrong at once — so summing them roughly doubles the
+margin figure. And the configured stop is **1% of margin**, so an overstated margin
+silently doubles the stop distance and turns the strategy into a different one. A
+margin model is normally a capacity constraint; here it sets the exit.
+
+### D-045 — The strategy's cadence is recorded from **fills**, not from emitted signals
+"One strangle per expiry cycle" needs the strategy to remember which cycles it has
+traded. That set is populated in `on_fill`, not when the signal is emitted.
+**Why:** the risk layer can refuse an entry — the devolvement guard and the kill
+switch both do. A cadence counter that ticked on *intent* would mark a cycle as
+traded that the account never entered, and skip it. Same failure class as D-041,
+caught by the end-to-end test finding six sell fills where it expected two.
+**Consequence for live:** the traded-cycle set is genuine strategy state and must be
+persisted for a restart to behave correctly. Carried into Milestone 6.
+
+### D-046 — The devolvement exit deadline is the session the exit **happens on**
+**How it was found:** the forced-exit tests never fired. `requires_option_exit` used
+`on > exit_deadline`, so with a Thursday deadline the position was still open through
+Thursday and only demanded an exit on Friday — the expiry session itself.
+**The fix:** `on >= exit_deadline`. The deadline is the day the exit is placed, not
+the last day of grace. Reading it the other way leaves a short option open through
+its own expiry session, which is exactly the state that devolves. Applied to the
+tender guard too.
+**Worth noting:** the unit tests passed with the wrong semantics, because they
+encoded the same misreading. Only the end-to-end run — which actually had to close a
+position before a real date — exposed it.
+
+### D-047 — The risk layer is evaluated before the strategy, within each bar
+Forced pre-expiry exits and kill-switch checks run at step 2 of the bar; the strategy
+is consulted at step 4; and a risk-layer exit discards whatever the strategy asked
+for.
+**Why:** a forced exit is not a suggestion the strategy may decline, and a kill switch
+that only takes effect on the next bar has not stopped the bar it tripped on.
+
+### D-048 — A missing mark is an error, never a zero
+`require_mark` raises when an open position has no price at a bar.
+**Why:** marking a missing price at zero shows a **short** option as fully profitable
+on exactly the bar the feed dropped out — the most dangerous possible direction for
+that error. This fired during development when the chain generator stopped quoting
+deep out-of-the-money strikes near expiry; the generator was wrong (real exchanges
+quote them at the minimum tick), and the check caught it rather than producing a
+plausible, wrong equity curve.
+
+### D-049 — One engine, two price sources
+The single-instrument futures path and the multi-leg options path differ only in a
+`PriceSource`. `BarPriceSource` marks at the close and fills at the open;
+`ChainPriceSource` reads both from chain snapshots.
+**Why:** brief §4 — "if backtest and live use different code paths for anything
+except I/O, you have built two systems that will disagree." A second engine loop for
+options would have been easier and would have started drifting immediately. The M3
+falsification suite still passes unchanged through the generalised engine, which is
+the evidence that the abstraction did not change behaviour.
+
+### D-050 — Strategies leave notes; the engine logs them
+`Strategy.note()` and `drain_notes()`, surfaced on the result as `notes`.
+**Why:** brief §8 requires a skipped trade to be logged, and a strategy has no I/O.
+Without this, "no strike was quoted at 0.25 delta" and "the strategy chose not to
+trade" are indistinguishable in the output — and for this strategy on this book, the
+first is the case that actually matters.
+
+---
+
 ## Judgement calls made because the brief was silent or self-conflicting
 
 | # | Call | Question |
