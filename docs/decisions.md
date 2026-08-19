@@ -527,6 +527,77 @@ checked against different cadences and window sizes.
 
 ---
 
+## Decisions made while building Milestone 6
+
+### D-056 — The journal records SENT **before** the network call, never after
+This single ordering is the whole crash-safety design.
+
+* Write SENT, then call. A crash in between leaves an ambiguous SENT, and
+  reconciliation asks the broker what actually happened.
+* Call, then write SENT. A crash in between leaves JOURNALLED while the broker
+  holds a live order — and the obvious recovery ("not sent yet, send it") doubles
+  the position.
+
+**The safe ambiguity is "might have been sent". The unsafe one is "looks unsent".**
+A test asserts the journal reads SENT at the moment the broker is entered, so the
+ordering cannot be quietly inverted later.
+
+### D-057 — An unconfirmable order halts trading; it is never resent
+When an order is marked SENT but the broker has neither the order nor an execution
+for it, the reconciler raises `UNCONFIRMED_ORDER` and the router refuses to trade
+until a human resolves it.
+**Why:** an order missing from the broker's open-order list may never have arrived
+**or** may have filled and been cleared. Those look identical from outside, and
+resending on that ambiguity doubles the position — for a short strangle, doubling
+an unbounded risk. This is a deliberately inconvenient default; the convenient one
+loses money.
+
+### D-058 — A retryable error does not trigger a retry
+`RetryableBrokerError` leaves the order in SENT and reports `UNCONFIRMED`. Nothing
+retries automatically.
+**Why:** retrying a request that may already have been accepted is the same mistake
+as resending, dressed up as resilience. The classification is still useful — it
+tells the operator the venue is reachable-but-unhappy rather than rejecting — but
+the action is to reconcile, not to try again.
+
+### D-059 — Trading is blocked until a reconciliation has run **and come back clean**
+`is_safe_to_trade` is false on a fresh router, not just after a detected problem.
+**Why:** §2.3 says reconcile before sending anything, and "anything" includes the
+first order after a restart — precisely when local state is least trustworthy. A
+router that trusted itself until proven wrong would have exactly one unguarded
+order, at the worst possible moment.
+
+### D-060 — The paper broker keeps its own books, persisted separately
+`PaperBroker.save()` / `restore()` write to their own file, independent of the
+journal.
+**Why:** a real broker remembers your orders when your process dies. A paper broker
+living only in engine memory would make crash recovery untestable, because the
+thing recovery has to reconcile *against* would vanish at the same moment. Saving
+separately reproduces the asymmetry a real crash creates — broker remembers, engine
+forgets — which is the only version of the scenario worth testing.
+
+### D-061 — The paper broker rejects a duplicate client order id
+Mirroring what a real venue does, rather than silently accepting a second order.
+**Why:** it turns the router's idempotency from an assumption into something the
+tests can actually falsify. If the router ever did resend, the broker would say so
+rather than quietly opening a second position.
+
+### D-062 — Fill adoption is idempotent on `fill_id`
+Every reconnect replays the day's executions; `record_fill` returns False for one
+already stored.
+**Why:** this is the specific mechanism behind brief §11's "assert no duplicate
+fills". A test reconciles three times in a row and asserts the fill count stays at
+one.
+
+### D-063 — Position drift blocks trading
+The reconciler compares the broker's positions against the positions our recorded
+fills imply, and any difference is a blocking drift.
+**Why:** an order discrepancy can be resolved by hand at leisure. A position we do
+not know about is risk we are not managing, and every downstream calculation —
+margin, stop level, kill-switch equity — is wrong while it stands.
+
+---
+
 ## Judgement calls made because the brief was silent or self-conflicting
 
 | # | Call | Question |
