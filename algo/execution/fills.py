@@ -104,7 +104,7 @@ def check_exit(
 class FillSimulator:
     """Turns an intended trade into a `Fill`, with the costs attached."""
 
-    __slots__ = ("_spread", "_slippage", "_charges")
+    __slots__ = ("_charges", "_slippage", "_spread")
 
     def __init__(
         self,
@@ -116,6 +116,16 @@ class FillSimulator:
         self._spread = spread
         self._slippage = slippage
         self._charges = charges
+
+    @property
+    def costs_verified(self) -> bool:
+        """Whether the charge rates behind this simulator are calibrated."""
+        return self._charges.is_verified
+
+    @property
+    def spread_measured(self) -> bool:
+        """Whether the spread came from a real book rather than a model."""
+        return self._spread.is_measured
 
     def fill(
         self,

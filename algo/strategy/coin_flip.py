@@ -3,20 +3,21 @@
     "The coin-flip should lose approximately the spread x trade count. If it
      doesn't, the engine is wrong — fix it before continuing."
 
-The design is chosen so the expected loss is computable by hand rather than
-merely plausible: on every bar it closes whatever is open and opens a fresh
-position in a seeded random direction. That is exactly one round trip per bar, so
-the predicted cost is `bars x round-trip cost` with no estimation involved.
+The strategy reads its position **from the context**, never from its own memory
+of what it asked for. That distinction is not pedantry: the first version tracked
+its own intent, and when the risk layer refused an order the strategy carried on
+as though it had been filled — emitting closes for positions that did not exist
+and quietly accumulating a three-lot position that then tripped a rounding error
+deep in the cost basis. In live trading the same divergence arrives via rejections
+and partial fills, and it would be far harder to spot.
 
-Run against a flat price series, gross P&L is exactly zero and the net must equal
-the predicted cost to the paisa. Run against a random walk, gross P&L is a
-zero-drift random variable and the net should sit near it. The first is a proof;
-the second is a sanity check.
+So the rule, which every strategy from here on follows: **the portfolio is the
+source of truth about what is held. A strategy's memory of its own intentions is
+not.**
 
-Seeded from the bar timestamp rather than a running counter, so a shorter run
-produces the same decisions on the same dates. A counter would make the strategy
-depend on where the backtest window started — an easy thing to miss and an
-impossible one to debug later.
+The behaviour is therefore: flat, so open; open, so close. One round trip every
+two bars, seeded from the bar timestamp so a shorter run makes the same decisions
+on the same dates.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from algo.strategy.context import BarContext
 
 
 class CoinFlip(Strategy):
-    """Flat every bar, then long or short at random. One round trip per bar."""
+    """Open at random when flat; close when open. No edge, by construction."""
 
     strategy_id = "coin_flip"
 
@@ -41,7 +42,6 @@ class CoinFlip(Strategy):
         self._instrument = instrument
         self._seed = seed
         self._config_hash = config_hash
-        self._side: Side | None = None
 
     def warmup_bars(self) -> int:
         return 0
@@ -54,25 +54,28 @@ class CoinFlip(Strategy):
         return Side.BUY if rng.random() < 0.5 else Side.SELL
 
     def on_bar(self, ctx: BarContext) -> list[Signal]:
-        signals: list[Signal] = []
+        held = ctx.positions().get(self._instrument)
 
-        if self._side is not None:
-            closing = self._side.opposite
-            signals.append(
-                self._signal(ctx, SignalAction.CLOSE, closing, "coin flip: flattening")
-            )
+        if held is not None and not held.is_flat:
+            closing = Side.SELL if held.qty > 0 else Side.BUY
+            return [
+                self._signal(
+                    ctx,
+                    SignalAction.CLOSE,
+                    closing,
+                    f"coin flip: flattening a {held.side} position of {held.lots} lot(s)",
+                )
+            ]
 
         entering = self._flip(ctx)
-        signals.append(
+        return [
             self._signal(
                 ctx,
                 SignalAction.OPEN,
                 entering,
-                f"coin flip: seeded draw chose {entering}",
+                f"coin flip: flat, seeded draw chose {entering}",
             )
-        )
-        self._side = entering
-        return signals
+        ]
 
     def _signal(
         self, ctx: BarContext, action: SignalAction, side: Side, reason: str

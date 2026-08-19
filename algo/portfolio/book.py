@@ -51,7 +51,7 @@ class EquityPoint(BaseModel):
 class Portfolio:
     """Cash, positions and the equity curve."""
 
-    __slots__ = ("_starting_equity", "_cash", "_positions", "_charges", "_realised", "_curve")
+    __slots__ = ("_cash", "_charges", "_curve", "_positions", "_realised", "_starting_equity")
 
     def __init__(self, starting_equity: Decimal) -> None:
         if starting_equity <= 0:
@@ -90,7 +90,9 @@ class Portfolio:
     def open_positions(self) -> tuple[Position, ...]:
         """Sorted by instrument key, so iteration order is reproducible."""
         return tuple(
-            self._positions[key] for key in sorted(self._positions) if not self._positions[key].is_flat
+            self._positions[key]
+            for key in sorted(self._positions)
+            if not self._positions[key].is_flat
         )
 
     @property

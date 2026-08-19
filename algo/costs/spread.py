@@ -70,7 +70,7 @@ class PctOfPriceSpread:
     the recorder measures the real thing.
     """
 
-    __slots__ = ("_pct", "_min_ticks")
+    __slots__ = ("_min_ticks", "_pct")
 
     def __init__(self, pct: Decimal, *, min_ticks: int = 1) -> None:
         if pct < 0:

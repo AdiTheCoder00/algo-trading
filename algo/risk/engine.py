@@ -19,9 +19,9 @@ from decimal import Decimal
 from algo.core.enums import OrderType, ProductType, RejectReason, TimeInForce
 from algo.core.ids import client_order_id
 from algo.core.instrument import InstrumentSpec
+from algo.core.money import round_down_to_lot_step
 from algo.core.order import Order
 from algo.core.signal import Signal
-from algo.core.money import round_down_to_lot_step
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +100,7 @@ class FixedLotSizer:
 class RiskEngine:
     """Sizes signals and applies the caps."""
 
-    __slots__ = ("_sizer", "_spec_for", "_max_concurrent", "_max_lots_per_underlying")
+    __slots__ = ("_max_concurrent", "_max_lots_per_underlying", "_sizer", "_spec_for")
 
     def __init__(
         self,

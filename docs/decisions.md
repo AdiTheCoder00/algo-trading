@@ -342,6 +342,74 @@ different machines is not reproducible, and reproducibility here is a hard requi
 
 ---
 
+## Decisions made while building Milestone 3
+
+### D-038 — A signal from bar `i` executes at bar `i+1`'s **open**
+**Why:** filling at bar `i`'s own close would let a decision taken from a bar
+profit from that same bar. It is the subtlest look-ahead there is, because every
+number stays plausible. The alternative costs a little realism on fast markets and
+buys a structural guarantee, which is the right trade for a system whose §1 is
+"this cannot silently produce a wrong number." Asserted directly:
+`test_no_order_fills_on_the_bar_that_produced_it`.
+
+### D-039 — Fills round **against** us; limit placement rounds **for** us
+Two functions, deliberately opposite. `quantize_to_tick` places a limit
+conservatively (a BUY limit rounds down, so it cannot accidentally cross the
+market). `worst_tick_for_fill` prices a fill we already have, where conservative
+means the worse side of the tick (a BUY fills higher).
+**Why:** rounding a fill the friendly way is a free fraction of a tick on every
+single trade. On a strategy that pays the spread twice per round trip that is
+exactly the sort of quiet flattery a backtest should not contain.
+
+### D-040 — Positions store an exact **cost basis**, not an average price
+**How it was found:** `Portfolio.check_identity` — which re-checks equity two
+independent ways after every fill and every mark — failed on its first run against
+the coin-flip strategy with a discrepancy of **1e-21**. The cause was
+`(p1·q1 + p2·q2) / total` in the weighted-average calculation: `2000/3` has no
+exact decimal representation, so a position built from three fills carried a
+rounding error into every subsequent P&L figure.
+**The fix:** store the exact total paid or received and derive an average only for
+display. `unrealised_pnl` is computed as `(mark·|qty| − cost_basis) · direction ·
+multiplier`, with no division anywhere in the money path. On a partial close the
+basis is split proportionally and the **remainder taken by subtraction**, so the
+two parts always sum back to the original exactly — the realised/unrealised split
+can round by a paisa, but their total cannot drift.
+**Worth noting:** the identity check found this on the day it was written. Without
+it the drift would have sat in the equity curve indefinitely, far too small to
+notice and far too strange to explain.
+
+### D-041 — A strategy reads its position from the context, never from its own memory
+**How it was found:** the first coin-flip tracked which side it had asked for. When
+the risk layer refused an order — as it did, because the reopen half of a
+close-and-reopen pair tripped the concurrency cap — the strategy carried on as
+though it had been filled, emitted closes for positions that did not exist, and
+quietly accumulated a three-lot position. That accumulation is what tripped D-040.
+**The rule, now applying to every strategy:** the portfolio is the source of truth
+about what is held; a strategy's memory of its own intentions is not. In live
+trading the same divergence arrives through rejections and partial fills, where it
+would be considerably harder to see.
+
+### D-042 — A metric that cannot be computed returns `None`, never zero
+Sharpe below four observations, Sortino with no losing periods, Calmar with no
+drawdown, cost drag on zero gross P&L.
+**Why:** a Sharpe ratio of 0.0 reads as "no edge"; `None` reads as "not enough
+data", and with ~12 trades a year the second is almost always the truthful one.
+`Metrics.summary()` also prints the trade count beside every ratio and appends an
+explicit caveat below thirty trades.
+
+### D-043 — Observation: on futures, charges dwarf the spread at GOLDM notional
+Running the falsification with the placeholder MCX rates, a 29-bar session cost
+**₹140 in spread and ₹4,690 in charges**. The reason is the base: futures CTT and
+exchange charges apply to *notional* (~₹15.7 lakh per lot), while option charges
+apply to *premium* (~₹15,000 per lot). Same rates, a hundredfold difference in
+what they are charged on.
+**Consequence:** the option-vs-futures distinction in the charge model is not
+cosmetic, and the `is_option` flag must never be defaulted. Also a reminder that
+the placeholder rates make these dominate — which is precisely why a real contract
+note is a blocking question (Q6) rather than a nicety.
+
+---
+
 ## Judgement calls made because the brief was silent or self-conflicting
 
 | # | Call | Question |

@@ -4,10 +4,11 @@ An event-driven trading system for a short strangle on **MCX GOLDM options** —
 ~0.25-delta call and one ~0.25-delta put, one cycle per monthly expiry, traded through
 Angel One.
 
-**Status: Milestone 1 complete.** Domain models, configuration, the MCX calendar, the
-feeds, the resampler and the look-ahead guarantees are built and tested. There is no
-backtest engine yet and no strategy — those are Milestones 3 and 4. Nothing here has been
-connected to a broker.
+**Status: Milestones 1-3 complete.** Domain models, configuration, the MCX calendar, the
+feeds and resampler, the look-ahead guarantees, option pricing (Black-76 + IV solver), the
+backtest engine and the MCX cost model are built and tested. The strangle strategy itself
+is Milestone 4. Nothing here has been connected to a broker, and no real market data has
+been recorded yet.
 
 Live trading is off by default and cannot be reached by accident. See [Modes](#modes).
 
@@ -54,13 +55,26 @@ To see exactly what configuration a run would use, and its hash:
 .venv/Scripts/algo.exe config
 ```
 
+The Milestone 3 falsification — a coin flip on a market that never moves, which must
+make exactly nothing before costs and lose exactly the costs:
+
+```bash
+.venv/Scripts/algo.exe backtest
+```
+
+```
+  FALSIFICATION: gross P&L on a flat market = 0.00 (must be exactly 0)
+  ! CHARGE RATES ARE PLACEHOLDERS - net P&L is not calibrated (D-011, Q6)
+  ! SPREAD IS MODELLED, NOT MEASURED - the recorder replaces this at M1.5
+```
+
 ## Tests
 
 ```bash
 .venv/Scripts/python.exe -m pytest
 ```
 
-160 tests. The suite includes the look-ahead canaries required by the brief: cheating
+310 tests. The suite includes the look-ahead canaries required by the brief: cheating
 strategies that try to read the next bar, reach for a dataframe, reach for the feed, or
 bolt an attribute onto the context — each must raise. It also runs the whole pipeline
 twice, once against a dataset whose future bars have been replaced with randomised
@@ -98,13 +112,20 @@ algo/
 ├── config/      schema, loader, the live-trading gate
 ├── exchange/    MCX calendar, expiry resolution, contract specs
 ├── data/        feeds, resampler, synthetic fixtures, quality gates
-├── strategy/    the Strategy contract and BarContext — the look-ahead firewall
-└── cli/         verify, config
+├── pricing/     Black-76, IV solver, greeks, forward cross-check
+├── costs/       MCX charge stack, spread and slippage models
+├── execution/   the fill simulator, shared by backtest and paper
+├── portfolio/   position book, cash, the equity identity
+├── risk/        sizing and the caps
+├── backtest/    the bar-by-bar event loop
+├── reporting/   metrics
+├── strategy/    the Strategy contract, BarContext, and the two reference strategies
+└── cli/         verify, config, backtest
 ```
 
-Still to come, in order: the chain recorder (M1.5), indicators (M2), the backtest engine
-and cost model (M3), the strategy and risk layer (M4), walk-forward (M5), the paper
-adapter (M6), the Angel One adapter (M7), and the dashboard (M8).
+Still to come, in order: the chain recorder (M1.5), the strangle strategy and the full
+risk layer (M4), walk-forward (M5), the paper adapter (M6), the Angel One adapter (M7),
+and the dashboard (M8).
 
 ## Design notes worth knowing before reading the code
 
@@ -124,6 +145,17 @@ adapter (M6), the Angel One adapter (M7), and the dashboard (M8).
 - **Expiry dates are read, never computed.** A derived expiry rule was wrong once in this
   project already. The instrument master is authoritative; the last-Friday rule is only a
   cross-check, and a mismatch halts rather than picking a side.
+- **A signal from bar `i` executes at bar `i+1`'s open.** Filling at bar `i`'s own close
+  would let a decision taken from a bar profit from that same bar — the subtlest
+  look-ahead there is, because every number stays plausible.
+- **Fills round against you; limit placement rounds for you.** Two opposite functions,
+  deliberately. Rounding a fill the friendly way is a free fraction of a tick per trade.
+- **Positions store an exact cost basis, not an average price.** Dividing to get an
+  average is not exact in decimal, and the error propagates into every later P&L figure.
+  The equity identity is re-checked two independent ways after every event — it caught a
+  1e-21 drift on its first run.
+- **A metric that cannot be computed returns nothing, not zero.** A Sharpe of 0.0 reads
+  as "no edge"; `None` reads as "not enough data", which is usually the truth here.
 - **Devolvement is a hard rule, not a setting.** An in-the-money short leg left at option
   expiry becomes a GOLDM futures position, and GOLDM futures go to compulsory physical
   delivery of gold. The risk layer will force-exit before expiry and refuse to carry

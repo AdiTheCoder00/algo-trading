@@ -90,6 +90,12 @@ class ChargeRates(BaseModel):
 class ChargeModel(Protocol):
     """Anything that can price the cost of one fill."""
 
+    @property
+    def is_verified(self) -> bool:
+        """False while the rates are placeholders. Reported on every run so a
+        net P&L figure is never mistaken for a calibrated one (D-011)."""
+        ...
+
     def charges_for(
         self,
         *,
