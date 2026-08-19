@@ -69,6 +69,40 @@ def is_on_tick(price: Decimal, tick: Decimal) -> bool:
     return (price % tick) == ZERO
 
 
+def round_down_to_tick(price: Decimal, tick: Decimal) -> Decimal:
+    """Largest tick-grid price at or below `price`."""
+    _require_positive(tick, "tick")
+    units = (price / tick).to_integral_value(rounding=ROUND_FLOOR)
+    return units * tick
+
+
+def round_up_to_tick(price: Decimal, tick: Decimal) -> Decimal:
+    """Smallest tick-grid price at or above `price`."""
+    _require_positive(tick, "tick")
+    units = price / tick
+    floored = units.to_integral_value(rounding=ROUND_FLOOR)
+    stepped = floored if floored == units else floored + 1
+    return stepped * tick
+
+
+def worst_tick_for_fill(price: Decimal, tick: Decimal, *, side: str) -> Decimal:
+    """Snap a simulated fill price onto the grid, against us.
+
+    Note this is the OPPOSITE direction to `quantize_to_tick`, and deliberately.
+    That function places a limit conservatively, so a BUY limit rounds *down* and
+    cannot accidentally cross the market. This one prices a fill we already have,
+    where conservative means assuming the worse side of the tick: a BUY fills
+    higher, a SELL fills lower. Rounding a fill the friendly way is a free
+    fraction of a tick per trade, which on a high-turnover strategy is exactly
+    the kind of quiet flattery brief §1 is written against.
+    """
+    if side == "BUY":
+        return round_up_to_tick(price, tick)
+    if side == "SELL":
+        return round_down_to_tick(price, tick)
+    raise DomainError(f"side must be BUY or SELL, got {side!r}")
+
+
 def quantize_to_tick(price: Decimal, tick: Decimal, *, side: str) -> Decimal:
     """Snap a price onto the tick grid, conservatively for `side`.
 
