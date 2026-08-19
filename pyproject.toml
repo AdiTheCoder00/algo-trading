@@ -1,0 +1,87 @@
+[project]
+name = "algo"
+version = "0.1.0"
+description = "Short-strangle trading engine for MCX GOLDM options"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "pyarrow>=16.0",
+    "structlog>=24.1",
+    "PyYAML>=6.0",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "hypothesis>=6.100",
+    "mypy>=1.10",
+    "ruff>=0.4",
+    "pandas-stubs",
+    "types-PyYAML",
+]
+
+[project.scripts]
+algo = "algo.cli.main:app"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["algo*"]
+
+[tool.setuptools.package-data]
+algo = ["exchange/data/*.yaml"]
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = ["error"]
+
+# ---------------------------------------------------------------- mypy
+# Brief §3: mypy --strict on core modules.
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+disallow_any_explicit = false
+show_error_codes = true
+files = ["algo", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["pyarrow.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort
+    "UP",        # pyupgrade
+    "B",         # bugbear
+    "A",         # builtin shadowing
+    "C4",        # comprehensions
+    "DTZ",       # naive datetime  <- §2.6
+    "T20",       # no print()
+    "SIM",       # simplify
+    "RUF",
+    "BLE",       # blind except    <- §12
+    "TRY",       # exception antipatterns
+]
+ignore = ["TRY003", "TRY400"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately construct edge-case datetimes and assert on internals.
+"tests/*" = ["DTZ001", "DTZ005", "S101"]
+# The clock module is the ONE place allowed to read wall-clock time (D-015).
+"algo/core/clock.py" = ["DTZ003", "DTZ005"]

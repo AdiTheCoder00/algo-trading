@@ -1,0 +1,254 @@
+# Decision log
+
+Every judgement call, with its reason. Append-only; superseded entries are marked, not
+deleted. D-001..D-022 were made during Milestone 0 and are **provisional until the open
+questions are answered**.
+
+---
+
+## Corrections
+
+### C-001 — I was wrong that London/NY sessions do not apply
+**What I wrote:** in the first draft of the plan, that §2.6's London/NY kill zones had no
+analogue and were "replaced by a single IST session".
+**Why it was wrong:** that was written while assuming NSE index options. For MCX gold it is
+backwards. Gold's price discovery is COMEX/LBMA, MCX gold is close to a currency-adjusted
+derivative of international gold, and the MCX evening session exists precisely to overlap the
+US session. Session-of-day is probably the most informative filter available for this
+instrument. **§2.6 stands as written.**
+
+### C-002 — I was wrong about the session and about which DST matters
+**What I wrote:** 09:15–15:30 IST, and that IST having no DST made §2.6's DST warning
+inapplicable.
+**Why it was wrong:** MCX non-agri runs 09:00–23:30/23:55 IST, and the close time keys off
+**US** daylight saving, not Indian. A session model written only in `Asia/Kolkata` would be
+wrong for roughly eight months of every year — exactly the failure the brief predicted, just
+sourced from a different country's clock.
+
+### C-003 — I over-stated the trade-count problem
+**What I wrote:** GOLDM follows a Feb/Apr/Jun/Aug/Oct/Dec cycle giving ~6 expiry cycles a
+year, and that n≈6/year makes validation impossible.
+**Why it was wrong:** that is the **GOLD (1 kg)** cycle. **GOLDM futures are monthly**,
+expiring on the 5th of each contract month, so there are ~12 option cycles a year. The concern
+is halved, not eliminated — ~24 trades from two years of recording is still thin — but I
+stated it more strongly than the facts supported.
+
+---
+
+### D-001 — Single top-level package `algo/`, layered inward
+Dependencies point inward; `core/` imports nothing from the project.
+**Why:** §4 requires backtest, paper and live to share one `Strategy` and one `Portfolio`. A
+flat layout makes it easy to import a broker type into domain code, which is how the
+two-systems-that-disagree failure starts.
+
+### D-002 — Modules added beyond §4: `exchange/`, `pricing/`, `persistence/`, `risk/devolvement.py`
+**Why:** `exchange/` — MCX venue facts (session times, expiry rules, lot specs, circuits)
+change over time; scattering them guarantees a stale constant. `pricing/` — Black-76 is pure
+but not `(Series) -> Series`, so `indicators/` would be the wrong home. `persistence/` — keeps
+`portfolio/` free of I/O. `risk/devolvement.py` — physical-delivery risk has no analogue in
+the brief and is too dangerous to leave implicit in a strategy's exit logic.
+
+### D-003 — Synchronous engine, I/O isolated in adapter threads
+**Why:** determinism is a hard requirement (§7.4) and asyncio schedules
+non-deterministically. Throughput needs here are trivial. Sync lets backtest and live share
+one engine, which async would not without duplicating the loop. **Revisit if** tick volume
+ever becomes the bottleneck. Q8.
+
+### D-004 — `Decimal` for money, `float` for greeks, explicit boundary
+**Why:** IV comes out of an iterative solver; forcing `Decimal` through Newton iterations
+buys no accuracy and costs determinism. Allowed only because **greeks never touch money** —
+delta selects a strike, and the strike itself is a `Decimal` read from the chain. Enforced by
+annotations plus a CI grep banning `float(` in money paths.
+**Risk accepted:** a float delta of 0.2499 vs 0.2501 could select a different strike across
+machines. Mitigated by rounding delta to fixed precision before comparison and by D-005.
+
+### D-005 — Deterministic IV solver
+Bracketed bisection to fixed tolerance, fixed max iterations, bounded Newton polish, no
+random or adaptive initial guess.
+**Why:** §7.4 requires byte-identical trade logs. Non-convergence returns an explicit failure
+that marks the row untradeable rather than a silent fallback.
+
+### D-006 — Look-ahead prevented by physically slicing history
+`BarContext` receives a copy of `[0..i]`; there is no future data in the object graph.
+Reinforced by the future-poisoning test.
+**Why:** §7 says structurally, not by convention. An accessor guard can be bypassed by a
+determined strategy author (including me, six months from now); absent data cannot.
+**Cost accepted:** O(n·w) copying. Irrelevant at this scale.
+
+### D-007 — Indicators pure + causality property test, no incremental state in v1
+**Why:** the causality test only works if the function can be called on both `[0..i]` and
+`[0..n]`. Incremental state would make the test meaningless. A faster path later must pass an
+equivalence test against the pure function.
+
+### D-008 — Multi-leg `Signal` (deviation from §5)
+**Why:** a strangle is not two independent trades. A call leg that fills while the put leg
+rejects is a naked short call — a completely different risk. Atomicity must be expressible in
+the intent, or the execution layer has to guess. **Awaiting approval, Q7.**
+
+### D-009 — Broker tokens never enter `core/`
+`OptionId` is `(underlying_future, option_expiry, strike, right, exchange)`. Angel One's
+`symboltoken` / `tradingsymbol` live only in `execution/angelone/instruments.py`.
+**Why:** §4's inward rule. A second broker becomes an adapter rather than a refactor, and a
+reissued token cannot corrupt historical records.
+
+### D-010 — Provenance mandatory on every venue constant
+Every entry in `exchange/data/*.yaml` carries `effective_from` and `source`.
+**Why:** §1. Session close times, lot specs, expiry rules and charge rates all change. A
+number without a date and a source is an unfalsifiable claim.
+
+### D-011 — Charge rates come from a real contract note, not from memory or blog posts
+**Why:** while planning I found indicative MCX figures in secondary sources. I do not trust
+them to the paisa, and CTT on the sell side of premium is a *per-entry* cost for a strategy
+whose every entry is a sale. Being 30% wrong there would quietly bias every result. Until a
+contract note is supplied, M3 does not report net P&L as authoritative. Q6.
+
+### D-012 — Kill switch halts by default, does not flatten
+**Why:** market-closing a short strangle during the fast move that tripped the limit can cost
+more than the breach. Flattening is available and explicit, never the default.
+
+### D-013 — Two stores: SQLite (WAL) live, DuckDB research
+**Why:** the live path needs durable small writes and crash recovery; the research path needs
+columnar scans over millions of recorded depth rows. One store doing both would be worse at
+the one that matters more. Q13.
+
+### D-014 — The winter stub bar is kept and flagged
+US-DST months give exactly 29 bars; winter gives 29 plus a 25-minute stub.
+**Why:** dropping it hides the last 25 minutes from square-off logic; merging distorts the
+prior bar's OHLC. Flagging keeps both the data and the honesty. Q9.
+
+### D-015 — `datetime.now()` banned outside `core/clock.py`
+CI grep gate fails the build on `datetime.now`, `datetime.utcnow`, `time.time()` elsewhere.
+**Why:** one stray wall-clock call makes backtests non-reproducible and makes replay diverge.
+Enforcement beats discipline.
+
+---
+
+## Decisions arising from your answers (GOLDM / MCX / record-forward / fixed lots / NRML)
+
+### D-016 — Devolvement and tender rules are hard rules, not configuration
+No short option may be carried into its expiry session. No futures position may be carried
+into the tender period. Both enforced in `risk/devolvement.py`, identically in backtest,
+paper and live.
+**Why:** an ITM short leg at MCX option expiry devolves into a GOLDM futures position, and
+GOLDM futures go to compulsory physical delivery of 100 g of gold. That is not a P&L event,
+it is a delivery obligation. A config toggle that can accidentally take delivery of gold is
+not a feature. A test proves that disabling the rule is what produces the obligation — so the
+rule is demonstrably what prevents it, not luck.
+
+### D-017 — Session calendar keys off `America/New_York`, expresses in `Asia/Kolkata`
+**Why:** the MCX evening close moves between 23:30 and 23:55 IST with **US** daylight saving.
+Both zones are named; no offset is hardcoded. A dedicated calendar canary test asserts correct
+bar counts and close times across both 2026 transitions, because this bug would otherwise
+present as a silent one-bar-per-day error for eight months.
+
+### D-018 — `pricing/forward.py` replaced by `pricing/underlying.py`
+MCX options are options **on futures**, so `F` is directly observed.
+**Why:** no synthetic forward, no put-call-parity reconstruction, no carry or dividend term.
+The module shrinks to resolving an option's underlying futures contract. One of the few
+things GOLDM made simpler. Requirement: the futures quote must be captured **synchronously**
+with the chain snapshot, since a stale `F` silently corrupts every delta.
+
+### D-019 — Milestone 1.5 inserted: read-only chain recorder
+**Why:** you chose record-forward, so every day without a running recorder is data
+permanently lost. The §9 build order assumes data exists at M1–M3; it does not. The recorder
+is read-only — no order-placement code exists until M7 — so this does not weaken §2.1.
+M2–M5 proceed against synthetic fixtures meanwhile.
+
+### D-020 — The recorder captures depth and raw payloads, not just candles
+Full bid/ask depth snapshots, the synchronous futures quote, every listed strike well beyond
+0.25 delta, raw payloads archived verbatim, and both exchange and receipt timestamps.
+**Why:** on a thin book the spread *is* the strategy's cost, and OHLC cannot reconstruct it.
+Recording the wrong fields for six months is indistinguishable from not recording at all, and
+unlike a code bug it cannot be fixed retroactively. Raw archives make a parser bug repairable.
+
+### D-021 — Circuit (DPR) limits and book depth are modelled in the fill simulator
+**Why:** a circuit-locked strike cannot be filled at any price, and a thin book cannot absorb
+arbitrary size. A backtest that fills through a locked circuit or an empty book is lying at
+precisely the moment the answer matters most.
+
+### D-022 — Sample size is reported next to every metric
+**Why:** a Feb/Apr/Jun/Aug/Oct/Dec cycle implies ~6 expiry cycles a year. At n≈6/year no
+metric distinguishes skill from luck, and a Sharpe ratio printed alone implies a confidence
+the data cannot support. If walk-forward has too few cycles to be meaningful, the report says
+so rather than drawing the chart anyway.
+
+### C-004 — The expiry rule is "last Friday of the month". I was wrong to dispute it.
+**What I wrote:** that "last Friday" did not match the sources, which described option expiry
+as 3 business days before the first tender day of a futures contract expiring on the 5th, and
+that a weekday rule risked a two-day devolvement gap.
+**What the terminal shows:** GOLDM option chain, expiry **28 Aug 2026** — which is a Friday,
+and the last Friday of August 2026. The stated rule is correct.
+**Why I got it wrong:** I derived a rule from secondary sources describing the tender-period
+chain, and treated the derivation as more authoritative than the user's direct observation of
+the instrument. The derivation may describe an older regime, a different contract, or I may
+simply have chained it wrong. Either way the terminal is the exchange's own answer.
+**What does not change:** D-023 stands and is, if anything, reinforced — a derived rule was
+wrong here, which is exactly why the system reads expiry from the instrument master rather
+than computing it. "Last Friday" becomes the *cross-check heuristic* (one confirmed data
+point, to be validated across more months as the recorder runs), not the source of truth.
+
+### D-023 — Expiry dates are **read**, never computed from a weekday rule
+`exchange/expiries.py` sources option and futures expiry dates from the Angel One instrument
+master. The derived rule (futures expire 5th of month → tender starts ~3 business days prior →
+option expires 3 business days before the first tender day) exists **only as a cross-check
+that raises an alarm on mismatch**, never as the source of truth.
+**Why:** the stated rule "last Friday of every month" appears to be wrong. For May 2026 the
+sources point to option expiry on Wednesday 27 May, while the last Friday is the 29th. A
+system exiting on the 29th would be acting on a contract that expired two days earlier — and
+those two days are exactly the devolvement window, where an ITM short leg has already become a
+GOLDM futures position bound for physical delivery. A weekday rule is precisely how the worst
+failure this system can have would occur. The instrument master is what the exchange acts on;
+a rule is an opinion about what the exchange will do.
+**Follow-on:** if the instrument master and the derived rule ever disagree, the engine halts
+new entries and alerts rather than picking one.
+
+### D-024 — Stop-viability check: refuse a stop that is smaller than the cost of trading
+At startup and at every entry, the risk layer compares the configured stop against modelled
+round-trip cost (4 spread crossings + brokerage + CTT + exchange + stamp + GST) and **rejects
+the configuration** if the ratio is below a configurable multiple, default 3×, logging both
+numbers.
+**Why:** on the tightest reading of "1% of investment" the stop lands near ₹1,000/lot while
+round-trip friction on a thin GOLDM option book plausibly runs ₹500–1,500/lot, dominated
+entirely by the spread. A position that opens at its stop is not a strategy. This is exactly
+the class of error §1 of the brief exists to prevent, and it is cheap to detect at startup and
+expensive to discover in an equity curve.
+
+**Amended after Q4a was answered.** The margin basis was chosen explicitly, with the cost
+arithmetic in front of the decision. So the check **defaults to `warn`, not `refuse`**: it
+logs the stop and the modelled round-trip cost and their ratio at startup and on every entry,
+and proceeds. Reasons: (i) the decision was made informedly and it is not the engine's place
+to veto it; (ii) my ₹500–1,500 friction figure is a placeholder — the recorder will replace it
+with a measured spread within weeks, and blocking a system on an estimate I invented would be
+worse than reporting the ratio honestly. `refuse` remains available in config. The ratio is
+recorded on every trade so cost drag can be attributed later rather than argued about.
+
+### D-026 — Entry at the 09:30 bar close, one bar, time-based
+Entry is evaluated only at the close of the first 30-minute bar (09:00–09:30 IST). No filter.
+**Why:** stated requirement. Worth recording alongside it that this is the **quiet** part of
+the GOLDM day — international gold price discovery happens in the evening session that
+overlaps COMEX (C-001), so a 09:30 entry deliberately sells premium into the Indian morning
+rather than into the session where the instrument actually moves. It also means the entry
+absorbs the overnight gap before acting, which cuts both ways. Neither observation is an
+objection; both belong in the record so the backtest's session-of-day attribution can be read
+against them.
+
+### D-025 — Exit levels are resolved to absolute ₹ once, at entry, and frozen
+A `ComboExit` expressed as a percentage is converted to an absolute rupee level at entry,
+written into the `Signal.context`, and never recomputed.
+**Why:** a level that floats with live equity would make the same trade exit at a different
+price because of unrelated P&L elsewhere in the account, which breaks reproducibility and
+makes the trade log impossible to reason about after the fact.
+
+---
+
+## Judgement calls made because the brief was silent or self-conflicting
+
+| # | Call | Question |
+|---|---|---|
+| 1 | §6's spread/swap/rollover model replaced wholesale with an MCX commodity-options cost stack | plan §2 |
+| 2 | §8's stop-distance sizing formula not used — you chose fixed lots; implied risk still reported | answered |
+| 3 | No entry filter and no within-cycle re-entry in v1 | Q3, Q5 |
+| 4 | Greeks float, everything monetary Decimal | D-004 |
+| 5 | Backtest evaluates stops at bar granularity and is therefore optimistic vs live | Q15 |
+| 6 | Mandatory pre-expiry exit overrides any strategy intent | D-016, Q4 |
+| 7 | Build order changed — M1.5 inserted before M2 | D-019 |
