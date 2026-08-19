@@ -42,6 +42,12 @@ class ChainRow(BaseModel):
     quote: Quote
     iv: float | None = None
     delta: float | None = None
+    priced_from: str = ""
+    """Which price was inverted: "MID" where the book was two-sided, "LTP"
+    otherwise, empty when the row could not be priced at all. Recorded per row
+    because those are different qualities of evidence (assumption 5.2), and a
+    report that blends a solid mid with a stale last trade overstates what it
+    knows."""
 
     @property
     def strike(self) -> Decimal:
