@@ -20,7 +20,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from algo.core.enums import Atomicity, SignalAction, Side
+from algo.core.enums import Atomicity, Side, SignalAction
 from algo.core.instrument import InstrumentId
 from algo.core.timeutil import ensure_utc
 

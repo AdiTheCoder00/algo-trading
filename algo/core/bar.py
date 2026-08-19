@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import datetime
 from decimal import Decimal
+from itertools import pairwise
 from typing import Final
 
 import numpy as np
@@ -122,7 +123,7 @@ class BarWindow:
         happened to be last in the file, not the latest in time.
         """
         materialised = tuple(bars)
-        for earlier, later in zip(materialised, materialised[1:], strict=False):
+        for earlier, later in pairwise(materialised):
             if later.ts <= earlier.ts:
                 raise DomainError(
                     f"bars must be strictly increasing in time: {earlier.ts} then {later.ts}"

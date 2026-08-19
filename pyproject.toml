@@ -46,7 +46,10 @@ filterwarnings = ["error"]
 # ---------------------------------------------------------------- mypy
 # Brief §3: mypy --strict on core modules.
 [tool.mypy]
-python_version = "3.11"
+# No python_version pin: it is checked against whichever interpreter is running,
+# because numpy ships stubs that use 3.12 `type` syntax and a 3.11 pin makes mypy
+# fail inside site-packages before it reaches our code. The package itself still
+# targets 3.11+ (requires-python above) and uses nothing newer.
 strict = true
 warn_unreachable = true
 disallow_any_explicit = false
@@ -78,10 +81,16 @@ select = [
     "BLE",       # blind except    <- §12
     "TRY",       # exception antipatterns
 ]
-ignore = ["TRY003", "TRY400"]
+ignore = [
+    "TRY003",  # long messages in exceptions are the point here
+    "TRY400",
+    "RUF002",  # en dashes are deliberate typography in docstring prose
+]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests deliberately construct edge-case datetimes and assert on internals.
 "tests/*" = ["DTZ001", "DTZ005", "S101"]
 # The clock module is the ONE place allowed to read wall-clock time (D-015).
 "algo/core/clock.py" = ["DTZ003", "DTZ005"]
+# typer declares CLI arguments as call-valued defaults; that is its documented API.
+"algo/cli/main.py" = ["B008"]

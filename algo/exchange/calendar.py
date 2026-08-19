@@ -65,7 +65,7 @@ class BarBoundary(BaseModel):
 class MarketCalendar:
     """Trading days and session boundaries for one venue."""
 
-    __slots__ = ("_holidays", "_session", "_verified_through", "_allow_unverified", "_name")
+    __slots__ = ("_allow_unverified", "_holidays", "_name", "_session", "_verified_through")
 
     def __init__(
         self,

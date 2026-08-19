@@ -241,6 +241,52 @@ makes the trade log impossible to reason about after the fact.
 
 ---
 
+## Decisions made while building Milestone 1
+
+### D-027 — Parquet stores prices as strings; a float column is refused on read
+`write_parquet_bars` writes `open/high/low/close` as strings, and `read_parquet_bars`
+raises if it finds a float column, naming the remedy.
+**Why:** float64 cannot represent every tick-grid price exactly. Reading a float and
+converting it to `Decimal` afterwards does not recover the lost bits — it launders them.
+The failure would surface several layers away as a tick-grid rejection with no visible
+cause. Strings compress well enough that the cost is not worth arguing about.
+
+### D-028 — `dec()` refuses a float argument outright
+**Why:** `Decimal(0.1)` is legal Python and returns
+`0.1000000000000000055511151231257827`. Nothing in the type system stops it, so the
+refusal has to be explicit. If a float reaches money math, the bug is upstream and
+silently accepting it here would hide it.
+
+### D-029 — `bars_in_session` comes from the calendar, never from counting the data
+Found while writing the look-ahead canaries: the first version of
+`contexts_from_bars` counted how many bars each session contained by scanning the whole
+series, then handed that count to the strategy.
+**Why it was wrong:** that tells a strategy how many bars today will have *before the day
+has finished*. It is knowledge unavailable live, so it is look-ahead however innocuous it
+looks — a strategy could behave differently on a 29-bar day than a 30-bar one before
+knowing which it was in. The count now comes from `calendar.bar_boundaries()`, which is
+knowable in advance and is what a live session would use.
+
+### D-030 — `TRADING_MODE` is matched exactly: no `strip()`, no `lower()`
+**Why:** §2.1 says "no default, no fallback". Lenient parsing is a fallback. This is the
+one check standing between the engine and a real account, so `TRADING_MODE=LIVE ` with a
+stray shell space is refused — and the error quotes the value back with `repr()` so the
+space is visible rather than mysterious.
+
+### D-031 — The calendar refuses dates beyond its verified holiday range
+A `MarketCalendar` with no sourced holiday file, or a query past `verified_through`,
+raises rather than answering. Tests use an explicitly named `synthetic_calendar()`.
+**Why:** the alternative default is "assume it is a trading day", which silently backtests
+trades on holidays. Naming the synthetic constructor explicitly means an unverified
+calendar cannot reach a real run by accident.
+
+### D-032 — mypy runs against the ambient interpreter, unpinned
+**Why:** numpy ships stubs using 3.12 `type` syntax, so pinning `python_version = "3.11"`
+makes mypy fail inside site-packages before reaching our code. The package still targets
+3.11+ and uses nothing newer than `StrEnum` and `datetime.UTC`.
+
+---
+
 ## Judgement calls made because the brief was silent or self-conflicting
 
 | # | Call | Question |

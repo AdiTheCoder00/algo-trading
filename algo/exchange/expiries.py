@@ -145,7 +145,9 @@ class ExpiryCalendar:
     def option_expiry(self, underlying: str, year: int, month: int) -> date:
         return self.expiry_set(underlying, year, month).option_expiry
 
-    def nearest_expiry_on_or_after(self, underlying: str, on: date, *, horizon: int = 3) -> ExpirySet:
+    def nearest_expiry_on_or_after(
+        self, underlying: str, on: date, *, horizon: int = 3
+    ) -> ExpirySet:
         """The first cycle whose option expiry is on or after `on`.
 
         Looks forward `horizon` contract months, no further. Silently scanning

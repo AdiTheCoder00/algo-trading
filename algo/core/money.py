@@ -37,6 +37,17 @@ def dec(value: str | int | Decimal) -> Decimal:
     """
     if isinstance(value, Decimal):
         return value
+    if isinstance(value, float):
+        # Decimal(0.1) is legal Python and silently produces
+        # 0.1000000000000000055511151231257827. Refusing here is the whole point
+        # of the function — `bool` is caught too, since it is an int subclass
+        # that has no business being a rupee amount.
+        raise DomainError(
+            f"refusing to build a Decimal from the float {value!r} — the precision is "
+            "already lost. Pass a string, and fix whatever produced a float."
+        )
+    if isinstance(value, bool):
+        raise DomainError(f"refusing to build a Decimal from the bool {value!r}")
     try:
         return Decimal(value)
     except (InvalidOperation, ValueError) as exc:

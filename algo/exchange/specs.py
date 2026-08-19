@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import date
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -77,7 +78,7 @@ class ContractSpecStore:
 
 def _reject_overlaps(entries: list[InstrumentSpec]) -> None:
     """Two specs covering the same day would make lot size depend on list order."""
-    for earlier, later in zip(entries, entries[1:], strict=False):
+    for earlier, later in pairwise(entries):
         if earlier.effective_to is None:
             raise ConfigError(
                 f"{earlier.underlying} spec from {earlier.effective_from} is open-ended "

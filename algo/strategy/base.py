@@ -50,10 +50,10 @@ class Strategy(ABC):
     # Proposed additions to §5 (D-008 / Q7b), all no-ops by default so an
     # existing strategy is unaffected.
 
-    def on_fill(self, fill: Fill) -> None:
+    def on_fill(self, fill: Fill) -> None:  # noqa: B027 - optional hook, no-op by design
         """Informational. A strategy may record fills; it may not act on them here."""
 
-    def on_session_start(self, ctx: BarContext) -> None:
+    def on_session_start(self, ctx: BarContext) -> None:  # noqa: B027 - optional hook
         """Called before the first bar of a session."""
 
     def on_session_end(self, ctx: BarContext) -> list[Signal]:

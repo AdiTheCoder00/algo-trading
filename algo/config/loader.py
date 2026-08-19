@@ -13,6 +13,7 @@ it knows to be slightly wrong.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +45,7 @@ def load_config(
     path: Path | None = None,
     *,
     overrides: dict[str, Any] | None = None,
-    env: dict[str, str] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> AppConfig:
     """Build the resolved, frozen configuration."""
     raw: dict[str, Any] = {}
@@ -91,7 +92,7 @@ def _reject_float_money(raw: dict[str, Any], path: Path) -> None:
             )
 
 
-def _env_overrides(env: dict[str, str]) -> dict[str, str]:
+def _env_overrides(env: Mapping[str, str]) -> dict[str, str]:
     """`ALGO_RISK__SIZING__FIXED_LOTS=2` -> `risk.sizing.fixed_lots = "2"`."""
     out: dict[str, str] = {}
     for key, value in env.items():

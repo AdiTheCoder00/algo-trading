@@ -1,0 +1,83 @@
+# GOLDM short strangle — reference configuration.
+#
+# Money and percentage values are QUOTED STRINGS. YAML would parse a bare
+# 1000000.00 as a float, handing a float into money math at the very first step
+# and defeating brief §2.5 before the engine starts. The loader refuses unquoted
+# values on these paths rather than accepting one it knows to be slightly wrong.
+
+mode: backtest # backtest | paper | live. Live is gated twice — see algo/config/modes.py
+
+run:
+  name: goldm_strangle_m1
+  seed: 20260819
+  out_dir: runs
+
+market:
+  timezone: Asia/Kolkata # the session is expressed here...
+  dst_reference_zone: America/New_York # ...but the CLOSE TIME keys off US DST
+  calendar: mcx
+  allow_unverified_calendar: false # holidays must be sourced before a real run
+  session:
+    open_ist: "09:00"
+    close_ist_us_dst: "23:30" # 2nd Sun Mar -> 1st Sun Nov: 29 bars exactly
+    close_ist_standard: "23:55" # otherwise: 29 bars + a 25-minute stub
+  bar:
+    timeframe_minutes: 30
+    partial_last_bar: keep_flagged
+    act_on_partial_bar: false # the risk layer may act on it; the strategy may not
+
+instruments:
+  - underlying: GOLDM
+    exchange: MCX
+
+data:
+  source: synthetic # synthetic | csv | parquet — real data arrives at M1.5
+  quality:
+    reject_crossed_quotes: true
+    reject_empty_book: true
+    max_stale_seconds: 10.0
+    on_violation: skip_bar
+
+risk:
+  starting_equity: "1000000.00"
+  sizing:
+    mode: fixed_lots
+    fixed_lots: 1
+  caps:
+    max_concurrent_positions: 1
+    max_lots_per_underlying: 5
+    max_total_margin_pct: "50"
+  devolvement: # hard rules — there is deliberately no "enabled: false"
+    force_exit_sessions_before_expiry: 1
+    block_new_entries_within_dte: 2
+  kill_switch:
+    daily_loss_limit_pct: "2"
+    max_consecutive_losses: 3
+    max_drawdown_pct: "10"
+    flatten_on_trip: false # halt and alert; flattening into the move can cost more
+
+strategy:
+  id: goldm_delta_strangle_v1
+  target_delta: "0.25"
+  delta_tolerance: "0.05"
+  entry_bars_ist: ["09:30"] # close of the first 30-minute bar
+  cadence: per_expiry_cycle # one strangle per monthly cycle, ~12 a year
+  min_dte: 5
+  max_dte: 45
+  exit:
+    take_profit_kind: PCT_OF_MARGIN_AT_ENTRY
+    take_profit_value: "2"
+    stop_loss_kind: PCT_OF_MARGIN_AT_ENTRY
+    stop_loss_value: "1"
+    evaluate_on: bar_close # live evaluates on ticks; see docs Q15
+    min_stop_to_cost_ratio: "3"
+    on_stop_viability_breach: warn # log the ratio and proceed — the choice was informed
+
+persistence:
+  live_db: state/live.db
+  research_db: state/research.duckdb
+  wal: true
+
+logging:
+  level: INFO
+  json_format: true

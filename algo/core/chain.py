@@ -124,6 +124,7 @@ class OptionChainSnapshot(BaseModel):
             gap = abs(abs(row.delta) - target)
             if gap > tolerance:
                 continue
-            if gap < best_gap or (gap == best_gap and best is not None and row.strike < best.strike):
+            ties = gap == best_gap and best is not None and row.strike < best.strike
+            if gap < best_gap or ties:
                 best, best_gap = row, gap
         return best

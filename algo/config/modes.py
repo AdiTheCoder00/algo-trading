@@ -32,21 +32,28 @@ def resolve_mode(
     """Return the mode to run in, or raise if the live gate is not fully satisfied."""
     environment = os.environ if env is None else env
 
+    # Exact match, deliberately: no strip(), no lower(). This is the one check
+    # standing between the engine and a real account, and "no fallback" (§2.1)
+    # means no lenient interpretation either. `TRADING_MODE=LIVE ` with a stray
+    # shell space is refused, and the error quotes the value back so the space is
+    # visible rather than mysterious.
+    raw = environment.get(LIVE_ENV_VAR)
+
     if configured is not Mode.LIVE:
         # Guard against the opposite mistake: env demanding live while the config
         # says otherwise. Rather than silently obeying either, say they disagree.
-        if environment.get(LIVE_ENV_VAR, "").strip().lower() == Mode.LIVE.value:
+        if raw == Mode.LIVE.value:
             raise ModeError(
                 f"{LIVE_ENV_VAR}=live is set but the configuration says mode: {configured}. "
                 "Refusing to guess which one you meant."
             )
         return configured
 
-    env_value = environment.get(LIVE_ENV_VAR, "").strip().lower()
-    if env_value != Mode.LIVE.value:
+    if raw != Mode.LIVE.value:
         raise ModeError(
             f"configuration requests live trading but {LIVE_ENV_VAR} is "
-            f"{env_value or 'unset'}. Set {LIVE_ENV_VAR}=live to proceed."
+            f"{'unset' if raw is None else repr(raw)}. "
+            f"Set {LIVE_ENV_VAR}=live exactly (lowercase, no surrounding spaces) to proceed."
         )
     if not real_money_flag:
         raise ModeError(

@@ -12,6 +12,7 @@ to the future; such an assignment raises at the point it is written.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
@@ -25,6 +26,7 @@ from algo.core.errors import DataError, DomainError
 from algo.core.instrument import InstrumentId, InstrumentSpec
 from algo.core.position import Position
 from algo.core.timeutil import ist_date, minutes_between
+from algo.exchange.calendar import MarketCalendar
 from algo.exchange.specs import ContractSpecStore
 
 
@@ -89,13 +91,13 @@ class BarContext:
     """The strategy's entire view of the world at bar `i`."""
 
     __slots__ = (
-        "_window",
+        "_chain_provider",
+        "_exchange",
+        "_positions",
         "_session",
         "_specs",
-        "_positions",
-        "_chain_provider",
         "_timeframe",
-        "_exchange",
+        "_window",
     )
 
     def __init__(
@@ -217,10 +219,12 @@ def contexts_from_bars(
     the future one attribute access away.
     """
     empty_positions = positions or PositionView({})
+
+    # bars_in_session comes from the CALENDAR, never from counting the data.
+    # Counting the series would tell a strategy how many bars today will have
+    # before the day has finished — which is knowledge it cannot have live, and
+    # is therefore look-ahead however innocuous it looks.
     session_bar_counts: dict[date, int] = {}
-    for bar in bars:
-        session_bar_counts.setdefault(ist_date(bar.ts), 0)
-        session_bar_counts[ist_date(bar.ts)] += 1
 
     seen_in_session: dict[date, int] = {}
     for index in range(len(bars)):
@@ -228,6 +232,11 @@ def contexts_from_bars(
         session_day = ist_date(bar.ts)
         bar_index = seen_in_session.get(session_day, 0)
         seen_in_session[session_day] = bar_index + 1
+
+        if session_day not in session_bar_counts:
+            session_bar_counts[session_day] = len(
+                calendar.bar_boundaries(session_day, timeframe)
+            )
 
         window = BarWindow.of(tuple(bars[: index + 1]))
         session = build_session_info(
