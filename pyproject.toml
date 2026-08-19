@@ -12,6 +12,8 @@ dependencies = [
     "structlog>=24.1",
     "PyYAML>=6.0",
     "typer>=0.12",
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +24,7 @@ dev = [
     "ruff>=0.4",
     "pandas-stubs",
     "types-PyYAML",
+    "httpx",
 ]
 
 [project.scripts]
