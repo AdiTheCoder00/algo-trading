@@ -131,10 +131,9 @@ def greeks(f: float, k: float, t: float, vol: float, r: float, right: Right) -> 
     if t < MIN_T or vol < MIN_VOL:
         # Degenerate limit: the option is a discounted forward or nothing at all.
         intrinsic = max(f - k, 0.0) if right is Right.CE else max(k - f, 0.0)
-        if right is Right.CE:
-            delta = discount if f > k else 0.0
-        else:
-            delta = -discount if f < k else 0.0
+        in_the_money = f > k if right is Right.CE else f < k
+        sign = 1.0 if right is Right.CE else -1.0
+        delta = sign * discount if in_the_money else 0.0
         return Greeks(
             price=discount * intrinsic,
             delta=delta,

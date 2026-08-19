@@ -54,6 +54,47 @@ It reads expiry from the Angel One instrument master — what the exchange actua
 and uses the derived rule only as a cross-check that alarms on mismatch. If the two disagree,
 the engine halts new entries rather than picking one.
 
+### Q1e `[BLOCKING M4]` **What is the ₹1,56,640 your terminal displayed?** It is not what the options are priced off.
+
+Found while building the pricing layer, from your own chain. Inverting every strike
+against 1,56,640 gives put volatilities roughly **0.3 points above call volatilities at
+every single strike** — a one-sided error at every strike, which is not noise.
+
+Solving put-call parity for the forward instead — model-free, no volatility assumption —
+gives a tight cluster:
+
+| Strike | C − P | Implied forward |
+|---|---|---|
+| 155000 | 1612.50 | 156,615 |
+| 155500 | 1115.50 | 156,617 |
+| 156000 | 610.00 | 156,611 |
+| 157000 | −395.50 | 156,604 |
+| 158000 | −1390.50 | 156,607 |
+
+Median **156,611** against a displayed **156,640**. A thirty-point gap, and the estimates
+agree with each other to within thirteen points — so it is a signal, not one bad print.
+
+**Why this matters more than thirty points sounds:** a wrong forward biases every delta in
+the chain the same way, which biases strike selection the same way, on every trade,
+permanently. It would never surface as an error — only as a strategy that quietly sells
+slightly the wrong strikes.
+
+Three candidates, and I cannot tell them apart from a screenshot:
+
+1. **It is spot, not the future.** MCX gold spot and the near future differ by cost of
+   carry, and thirty points on 156,640 is about 0.019% — plausible for nine days.
+2. **It is a different contract month** than the one these options settle into.
+3. **The LTPs are stale relative to each other.** They are last trades, not synchronised
+   quotes, so the chain may simply be a mosaic of different moments.
+
+If (3), the recorder solves it by capturing the futures quote in the same snapshot as the
+options. If (1) or (2), we need to know which futures series to read. **Please check what
+that tooltip figure is labelled as, and whether the chain lets you see the underlying
+futures contract explicitly.**
+
+The cross-check is built either way: `implied_forward()` compares the two and reports the
+gap rather than absorbing it.
+
 ### Q1c `[BLOCKING M4]` Which futures contract underlies the 28 Aug option series?
 The devolvement rules need it. An ITM short leg at option expiry becomes a **GOLDM futures
 position** — in which contract, and how many days until *that* contract's tender period opens?

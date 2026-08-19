@@ -287,6 +287,61 @@ makes mypy fail inside site-packages before reaching our code. The package still
 
 ---
 
+## Decisions made while building Milestone 2
+
+### D-033 — Milestone 2 is `pricing/`, not `indicators/`
+The brief's M2 is "Indicators — only what `<<STRATEGY>>` needs". What this strategy
+needs turns out to be no indicators at all: entry is time-based at the 09:30 bar with
+no filter (D-026), so there is no moving average, oscillator or swing detector in the
+design. What it actually needs is Black-76, an implied-volatility solver and greeks, in
+order to find the 0.25-delta strikes.
+**Why this is worth recording rather than quietly substituting:** inventing indicators to
+fill the milestone slot would have added parameters nothing asked for, and every added
+parameter on a ~12-trade-a-year strategy is a curve-fitting opportunity. `indicators/`
+still exists with its lag-declaring protocol, empty, for whenever a filter is specified.
+
+### D-034 — `pricing/forward.py` exists after all. D-018 was right in theory, wrong in practice.
+**What D-018 said:** the forward module collapses to nothing, because MCX options are
+options on futures and `F` is observed rather than reconstructed.
+**What building it revealed:** inverting the live 28 Aug 2026 chain against the futures
+price shown on the terminal (1,56,640) produced put volatilities roughly 0.3 points
+*above* call volatilities at **every single strike**. A one-sided error at every strike is
+not noise — it is the signature of a wrong `F`. Solving put-call parity for the forward
+instead gives a tight cluster: 156,604 / 156,607 / 156,611 / 156,615 / 156,617 across the
+five strikes with two-sided quotes. Median 156,611, against a stated 156,640. **Thirty
+points.**
+**Why it matters more than thirty points sounds:** a wrong forward biases every delta in
+the chain in the same direction, which biases strike selection in the same direction, on
+every trade, forever. It would never show up as an error — just as a strategy that
+consistently sells slightly the wrong strikes.
+**Decision:** `forward_from_parity()` and `implied_forward()` compute the chain's own
+implied forward as a model-free cross-check, and the gap is reported rather than absorbed.
+The check returns "consistent" when no strike quotes both sides, because absence of
+evidence must not halt the engine on a thin day — `pairs_used` distinguishes the two cases.
+**Open:** what the 1,56,640 on the terminal actually was. See Q1e.
+
+### D-035 — Each chain row is priced off its own solved volatility, not a flat ATM vol
+**Why:** the live chain has a real skew — call volatility rises monotonically from 21.53%
+at 155000 to 22.51% at 159000. Pricing the wings off an ATM volatility would misprice
+precisely where a 0.25-delta strangle lives. The consequence is visible in the tests: the
+159000 call is 0.342 delta on its own volatility and 0.336 on a flat one. Both numbers are
+arithmetically right; the market's is the one that decides which strike gets sold.
+
+### D-036 — Bisection, not Newton, for implied volatility
+**Why:** bisection is unconditionally convergent here (option price is strictly monotonic
+in volatility) and runs a bounded, deterministic number of iterations. Newton is faster and
+can overshoot into negative volatility on a deep out-of-the-money quote — a once-a-month
+failure that is impossible to reproduce afterwards. Speed is not the constraint on a
+strategy that trades twelve times a year; reproducibility is (§7.4).
+
+### D-037 — `math.erf` for the normal CDF, not a polynomial approximation
+**Why:** exact to double precision and identical across platforms. The Abramowitz-Stegun
+polynomial is accurate to ~7.5 decimal places, which sounds ample until a delta of 0.2499
+versus 0.2501 selects a different strike. A backtest that picks different strikes on
+different machines is not reproducible, and reproducibility here is a hard requirement.
+
+---
+
 ## Judgement calls made because the brief was silent or self-conflicting
 
 | # | Call | Question |
