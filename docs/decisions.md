@@ -478,6 +478,55 @@ first is the case that actually matters.
 
 ---
 
+## Decisions made while building Milestone 5
+
+### D-051 — `WalkForwardReport` has no combined metric, and cannot be given one
+Brief §10: "Always report in-sample and out-of-sample side by side. Never report a
+single blended number." Enforced structurally — there is no `overall` field and no
+property that would compute one, and a test asserts the attribute does not exist.
+**Why:** averaging a number the parameters were fitted to with a number they were
+not is worse than reporting either alone. Leaving the field out is the only version
+of that rule that survives someone being in a hurry later.
+
+### D-052 — Out-of-sample windows may never overlap, and `rolling_windows` refuses
+A step smaller than the validation window is rejected, not silently allowed.
+**Why:** overlapping validation periods count the same trade as evidence twice,
+which inflates the apparent sample exactly where the sample is the binding
+constraint. A step *larger* than the window is refused too, since it would leave
+days validated by nothing.
+
+### D-053 — Instability is measured by flip rate, not by counting distinct values
+The brief asks to "flag any parameter whose optimal value jumps around between
+windows". `flip_rate` — the fraction of window-to-window transitions where the value
+changed — distinguishes a parameter that moved once and settled (a possible regime
+change) from one that alternates every window (noise). Counting distinct values
+collapses those two into the same verdict and makes the flag useless.
+The chosen values are printed as a sequence so the reader sees the wobble rather
+than taking a verdict on trust.
+
+### D-054 — The walk-forward compares optimising against **not** optimising
+Every window is also evaluated out of sample with a fixed parameter set that was
+never fitted to anything. If per-window optimisation does not beat leaving the
+parameters alone, the optimisation is fitting noise, and the report says so in
+those words.
+**Why:** this is the single most informative line in a walk-forward and the easiest
+one to omit. Without it, a report showing positive out-of-sample P&L looks like
+evidence for the optimisation, when it may be evidence only that the strategy works
+and the optimisation is along for the ride.
+
+### D-055 — The report leads with whether it can support a conclusion at all
+`Feasibility` grades a run INSUFFICIENT / THIN / ADEQUATE from the out-of-sample
+trade count, and `summary()` prints that verdict above any number.
+**Why, concretely:** at ~12 trades a year, two years of recorded data over 180/90-day
+windows yields **6 windows and about 18 out-of-sample trades**. Reaching 30 would take
+roughly 2.5 years of *validated* data, and longer still of recording, because the
+first in-sample window is consumed before any validation starts. That is the honest
+answer to "will walk-forward tell me anything", and it is better delivered before
+months of recording than after. Exposed as `algo walkforward` so the answer can be
+checked against different cadences and window sizes.
+
+---
+
 ## Judgement calls made because the brief was silent or self-conflicting
 
 | # | Call | Question |
