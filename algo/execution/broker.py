@@ -9,10 +9,12 @@ Two design rules follow from brief §2.3 ("never fire-and-forget"):
 **Every snapshot carries our own `client_order_id`.** Reconciliation has to be able
 to ask "is *this* order — the one I intended — live at the broker?", and matching on
 symbol, side and quantity cannot answer that when two identical orders exist. For
-the paper adapter the id round-trips exactly. For Angel One it will have to travel
-in whatever tag field the API offers, and **whether SmartAPI supports one is an
-open question for Milestone 7** — if it does not, reconciliation falls back to a
-timestamped window match, which is weaker and will be documented as such.
+the paper adapter the id round-trips exactly. For the Kotak Neo adapter (Milestone
+7) the broker's order book echoes the id back: the ledger records it at placement
+(`GuiOrdId` on SDK main builds; the `order_report` book is authoritative in the
+published SDK), and every read path matches the book on it before falling back to
+a timestamped symbol/side/quantity window match, which is weaker and only used for
+orders that never learned a broker id.
 
 **Snapshots are what the broker says, never what we believe.** They are kept apart
 from our journal precisely so the two can be compared and found to disagree.

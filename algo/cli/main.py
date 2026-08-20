@@ -12,13 +12,15 @@ looking like a strategy result would be worse than one that says what it is.
 from __future__ import annotations
 
 import os
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
+from dotenv import load_dotenv
 
 from algo.config.loader import config_hash, load_config
-from algo.config.modes import resolve_mode
+from algo.config.modes import LIVE_FLAG, resolve_mode
 from algo.core.bar import Timeframe
 from algo.data.resample import expected_bar_count, resample
 from algo.data.synthetic import one_minute_session
@@ -26,7 +28,17 @@ from algo.data.validate import validate_bars
 from algo.exchange.calendar import synthetic_calendar
 from algo.exchange.specs import ContractSpecStore
 
+if TYPE_CHECKING:
+    from algo.config.schema import AppConfig
+    from algo.core.clock import SystemClock
+    from algo.data.smartapi_feed import SmartConnectTransport
+    from algo.exchange.master import InstrumentMaster
+
 app = typer.Typer(add_completion=False, help="MCX GOLDM short-strangle engine")
+
+#: Credentials live in .env (gitignored). Loading it here means the whole CLI
+#: sees the same environment without anyone hardcoding a secret.
+load_dotenv()
 
 #: One day inside US daylight saving and one outside, so both session-length
 #: regimes are exercised every time `verify` runs.
@@ -202,6 +214,207 @@ def backtest(
         typer.echo(f"  tearsheet  -> {write(tearsheet, markup)}")
 
 
+@app.command()
+def live(
+    path: Path = typer.Argument(Path("config/goldm.yaml"), help="Config file to resolve"),
+    refresh_master: bool = typer.Option(
+        False, "--refresh-master", help="Re-download the instrument master before starting"
+    ),
+    expiry: str | None = typer.Option(
+        None, help="Option expiry to quote (YYYY-MM-DD); default: nearest listed"
+    ),
+    real_money_flag: bool = typer.Option(
+        False, LIVE_FLAG, help="Acknowledge this is a real account"
+    ),
+) -> None:
+    """Connect to Kotak Neo (live broker) + Angel SmartAPI (candles), and report.
+
+    The Milestone 7 wiring drill: it proves the live path end to end —
+    both credential sets, both instrument masters, both sessions, order ledger,
+    reconciliation — without placing an order. A live session never runs
+    without --i-understand-this-is-real-money, whatever the config says.
+    """
+    from algo.core.clock import SystemClock
+    from algo.data.smartapi_feed import (
+        SmartConnectTransport,
+    )
+    from algo.data.smartapi_feed import (
+        credentials_from_env as smart_credentials_from_env,
+    )
+    from algo.exchange.master import (
+        HttpMasterSource,
+        InstrumentMaster,
+        KotakMasterSource,
+        fetch_master,
+    )
+    from algo.execution.kotak import (
+        KotakBroker,
+        NeoTransport,
+        default_totp,
+    )
+    from algo.execution.kotak import (
+        credentials_from_env as kotak_credentials_from_env,
+    )
+    from algo.execution.reconcile import Reconciler
+    from algo.persistence.journal import OrderJournal
+
+    config = load_config(path)
+    resolve_mode(config.mode, real_money_flag=real_money_flag)
+
+    clock = SystemClock()
+
+    smart_credentials = smart_credentials_from_env()
+    if not smart_credentials.has_all():
+        typer.echo("  ! ALGO_SMARTAPI_* credentials are missing (see .env.example)")
+        raise typer.Exit(code=1)
+    kotak_credentials = kotak_credentials_from_env()
+    if not kotak_credentials.has_all():
+        typer.echo("  ! ALGO_KOTAK_* credentials are missing (see .env.example)")
+        raise typer.Exit(code=1)
+
+    snapshot = config.data.master_snapshot
+    if refresh_master or not snapshot.exists():
+        typer.echo(f"  fetching instrument master -> {snapshot}")
+        fetch_master(HttpMasterSource(), snapshot, now=clock.now())
+    master = InstrumentMaster.from_snapshot(snapshot)
+    underlying = config.instruments[0].underlying
+    exchange = config.instruments[0].exchange
+    n_expiries = len(master.option_expiries(underlying, exchange))
+    typer.echo(f"  master snapshot (bars): {n_expiries} listed option expiries for {underlying}")
+
+    live_snapshot = config.data.live_master_snapshot
+    market_data_key = kotak_credentials.market_data_key or kotak_credentials.consumer_key
+    if refresh_master or not live_snapshot.exists():
+        typer.echo(f"  fetching Kotak live master -> {live_snapshot}")
+        fetch_master(
+            KotakMasterSource(consumer_key=market_data_key),
+            live_snapshot,
+            now=clock.now(),
+        )
+    live_master = InstrumentMaster.from_snapshot(live_snapshot)
+    n_live_expiries = len(live_master.option_expiries(underlying, exchange))
+    typer.echo(
+        f"  live master snapshot: {n_live_expiries} listed option expiries for {underlying}"
+    )
+
+    smart_transport = SmartConnectTransport(smart_credentials.api_key)
+    smart_transport.connect(
+        smart_credentials.client_id,
+        smart_credentials.password,
+        default_totp(smart_credentials.totp_seed)(),
+    )
+    typer.echo(f"  smartapi session for {smart_credentials.client_id} (candles)")
+
+    broker = KotakBroker(
+        transport=NeoTransport(kotak_credentials.consumer_key),
+        master=live_master,
+        credentials=kotak_credentials,
+        clock=clock,
+    )
+    broker.restore(config.persistence.live_broker_state)
+    broker.connect()
+
+    with OrderJournal(config.persistence.live_db) as journal:
+        report = Reconciler(broker, journal).reconcile(
+            now=clock.now(), since=clock.now() - timedelta(days=1)
+        )
+        broker.save(config.persistence.live_broker_state)
+
+    typer.echo(f"  session         {broker.health().detail}")
+    typer.echo(f"  adapter         {broker!r}")
+    typer.echo("")
+    typer.echo(report.summary())
+
+    if expiry is not None:
+        _quote_chain(market_data_key, live_master, config, expiry, clock)
+
+    _bars_from_candles(smart_transport, master, config, clock)
+
+    broker.disconnect()
+    typer.echo("  session ended.")
+
+
+def _quote_chain(
+    consumer_key: str,
+    master: InstrumentMaster,
+    config: AppConfig,
+    expiry: str,
+    clock: SystemClock,
+) -> None:
+    """One chain snapshot for the given expiry, printed as a table."""
+    from datetime import date as _date
+
+    from algo.data.kotak_feed import KotakChainFeed, NeoQuotesTransport
+    from algo.data.live import SessionWindow
+    from algo.exchange.calendar import synthetic_calendar
+
+    feed = KotakChainFeed(
+        transport=NeoQuotesTransport(consumer_key),
+        master=master,
+        underlying=config.instruments[0].underlying,
+        clock=clock,
+        session=SessionWindow(synthetic_calendar()),
+        poll_interval_s=0.0,
+    )
+    option_expiry = _date.fromisoformat(expiry)
+    try:
+        snapshot = next(iter(feed.snapshots(option_expiry)))
+    except StopIteration:
+        typer.echo("  no chain snapshot: outside session hours")
+        return
+    typer.echo(
+        f"\nchain {snapshot.underlying} {snapshot.option_expiry} @ "
+        f"{snapshot.futures_price} (futures)"
+    )
+    for row in snapshot.rows:
+        quote = row.quote
+        bid = f"{quote.bid}" if quote.bid is not None else "-"
+        ask = f"{quote.ask}" if quote.ask is not None else "-"
+        ltp = f"{quote.ltp}" if quote.ltp is not None else "-"
+        typer.echo(f"  {row.strike:>8} {row.right:<3} bid {bid:>8}  ask {ask:>8}  ltp {ltp:>8}")
+
+
+def _bars_from_candles(
+    transport: SmartConnectTransport,
+    master: InstrumentMaster,
+    config: AppConfig,
+    clock: SystemClock,
+) -> None:
+    """One read of today's closed bars, as the live loop would get them."""
+    from algo.core.bar import Timeframe
+    from algo.core.instrument import FutureId
+    from algo.data.live import SessionWindow
+    from algo.data.smartapi_feed import SmartApiBarFeed
+    from algo.exchange.calendar import synthetic_calendar
+
+    underlying = config.instruments[0].underlying
+    exchange = config.instruments[0].exchange
+    futures = master.future_rows(underlying, exchange)
+    if not futures:
+        typer.echo("  candle proof: no futures contract in the master snapshot")
+        return
+    row = futures[-1]
+    if row.expiry is None:
+        typer.echo("  candle proof: futures contract has no expiry; skipping")
+        return
+    feed = SmartApiBarFeed(
+        transport=transport,
+        master=master,
+        instrument=FutureId(underlying=underlying, expiry=row.expiry, exchange=exchange),
+        timeframe=Timeframe(minutes=config.market.bar.timeframe_minutes),
+        clock=clock,
+        session=SessionWindow(synthetic_calendar()),
+    )
+    try:
+        bars = list(feed)
+    except Exception as exc:  # noqa: BLE001 - a drill must degrade, not crash
+        typer.echo(f"  candle proof: no bars yet ({exc})")
+        return
+    typer.echo(
+        f"  candle proof: {len(bars)} closed bar(s) today for {row.tradingsymbol}"
+    )
+
+
 @app.command("walkforward")
 def walk_forward_feasibility(
     years: float = typer.Option(2.0, help="Years of recorded data available"),
@@ -375,6 +588,71 @@ def kill_switch(
                 f"  {request.id}  {request.requested_at:%Y-%m-%d %H:%M}  "
                 f"by {request.requested_by:<10} {acted:<26} {request.reason}"
             )
+
+
+@app.command("credentials")
+def credentials() -> None:
+    """Report which broker credentials are loaded — without printing any of them.
+
+    Brief §2.7. This shows presence and length only, which is enough to diagnose a
+    truncated key or a stray newline and reveals nothing useful to anyone else. A
+    trading system's output gets pasted into chat windows and issue trackers, so
+    the safest secret is one that was never rendered.
+    """
+    from algo.api.app import TOKEN_ENV
+    from algo.data.smartapi_feed import (
+        credentials_from_env as smart_credentials_from_env,
+    )
+    from algo.execution.kotak import credentials_from_env as kotak_credentials_from_env
+
+    def status(prefix: str, fields: list[str]) -> None:
+        import os
+
+        for name in fields:
+            raw = os.environ.get(f"{prefix}_{name}", "")
+            if raw:
+                mark = "set"
+                detail = f"{len(raw)} chars"
+                if raw != raw.strip():
+                    detail += "  ! has leading/trailing whitespace"
+            else:
+                mark, detail = "MISSING", ""
+            typer.echo(f"  {prefix}_{name:<28} {mark:<8} {detail}")
+
+    smart = smart_credentials_from_env()
+    typer.echo("SmartAPI (historical bars — from .env or the environment):")
+    status(
+        "ALGO_SMARTAPI",
+        ["API_KEY", "CLIENT_ID", "PASSWORD", "TOTP_SEED"],
+    )
+    typer.echo("")
+    if smart.has_all():
+        typer.echo("  all four SmartAPI credentials are present.")
+    else:
+        typer.echo("  MISSING: " + ", ".join(smart.missing()))
+
+    typer.echo("")
+    kotak = kotak_credentials_from_env()
+    typer.echo("Kotak Neo (live broker — from .env or the environment):")
+    status(
+        "ALGO_KOTAK",
+        ["CONSUMER_KEY", "MOBILE_NUMBER", "UCC", "TOTP_SEED", "MPIN", "MARKET_DATA_KEY"],
+    )
+    typer.echo("")
+    if kotak.has_all():
+        typer.echo("  all five Kotak credentials are present.")
+    else:
+        typer.echo("  MISSING: " + ", ".join(kotak.missing()))
+        typer.echo("  Copy .env.example to .env and fill it in. An API key alone")
+        typer.echo("  authenticates nothing — login needs the client code, the MPIN")
+        typer.echo("  and the TOTP secret as well.")
+
+    typer.echo("")
+    token = os.environ.get(TOKEN_ENV, "")
+    if token:
+        typer.echo(f"  {TOKEN_ENV:<26} set      {len(token)} chars")
+    else:
+        typer.echo(f"  {TOKEN_ENV:<26} MISSING  (the monitoring API will not start)")
 
 
 if __name__ == "__main__":

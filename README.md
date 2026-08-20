@@ -158,8 +158,9 @@ algo/
 dashboard/       Next.js monitoring page (4 runtime dependencies, no chart library)
 ```
 
-Still to come: the **chain recorder (M1.5)** and the **Angel One adapter (M7)**. Both
-need SmartAPI credentials — see `docs/open-questions.md` Q10/Q11.
+Still to come: the **chain recorder (M1.5)** and the **live adapters (M7)**: Kotak
+Neo trades the chain live while Angel SmartAPI supplies the historical/closed
+bars — see `docs/open-questions.md` Q10/Q11.
 
 ## Design notes worth knowing before reading the code
 

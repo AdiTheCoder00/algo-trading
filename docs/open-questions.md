@@ -18,6 +18,7 @@ Revised after your answers. Each states **my default** so you can reply by excep
 | Entry | **09:30 bar** | Close of the first 30-min bar (09:00–09:30 IST), time-based, no filter |
 | Cadence | **Once per expiry cycle** | One strangle per monthly cycle ⇒ **~12 trades/year**. Sample size stays the hard limit on what any metric can show |
 | Expiry | **Last Friday of the month — CONFIRMED** | Terminal shows GOLDM 28 Aug 2026, a Friday and the last Friday of August. I disputed this and was wrong (C-004). Instrument master remains source of truth (D-023); "last Friday" is the cross-check |
+| Live broker | **Kotak Neo trades; SmartAPI reads history** | Live orders, chain feed and the live scrip master come from Kotak Neo (`KotakBroker`, `KotakChainFeed`, Kotak CSV master). SmartAPI survives only for historical/closed bars (candle API) and the Angel JSON master. `SmartApiBroker` removed. No websocket bar feed this pass |
 
 ---
 
@@ -308,6 +309,13 @@ cannot get back.**
 **Default:** build it to run either way, with a **daily coverage report** that tells you
 exactly how many snapshots were captured versus expected — so a gap is discovered the next
 morning rather than in month four.
+
+### Q13 `[BLOCKING live drill]` Kotak Neo credentials
+The live drill (`algo live`) needs the five `ALGO_KOTAK_*` variables in `.env`
+(`CONSUMER_KEY`, `MOBILE_NUMBER`, `UCC`, `TOTP_SEED`, `MPIN`) alongside the four
+`ALGO_SMARTAPI_*` ones. The Kotak session is established fresh on every connect
+(TOTP login + MPIN — the SDK cannot restore a trade session from an access token
+alone), and a wrong seed/MPIN is reported as a hard failure, never retried.
 
 ### Q12 `[BLOCKING M1]` Repository
 `D:\algo trading` is not a git repository. Shall I `git init` and add a `.gitignore` covering

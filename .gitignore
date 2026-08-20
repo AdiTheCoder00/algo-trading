@@ -9,6 +9,7 @@
 data/
 runs/
 state/
+logs/
 *.parquet
 *.duckdb
 *.db

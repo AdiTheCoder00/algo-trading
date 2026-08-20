@@ -8,6 +8,7 @@ tick-grid rejection with no visible cause.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -46,7 +47,9 @@ class TestCsvRoundTrip:
         opened = calendar.session_open(SUMMER_DAY)
         original = [
             Bar(
-                ts=opened + pd.Timedelta(minutes=i + 1).to_pytimedelta(),
+                # datetime.timedelta, not pandas': pandas 2.3 deprecates the
+                # kwargs form here and warnings are errors in this suite.
+                ts=opened + timedelta(minutes=i + 1),
                 timeframe=M1,
                 open=Decimal(p),
                 high=Decimal(p),

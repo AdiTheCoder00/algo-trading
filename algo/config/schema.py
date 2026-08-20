@@ -79,9 +79,19 @@ class QualityConfig(BaseModel):
 class DataConfig(BaseModel):
     model_config = _FROZEN
 
-    source: str = Field(default="synthetic", pattern="^(synthetic|csv|parquet)$")
+    source: str = Field(default="synthetic", pattern="^(synthetic|csv|parquet|live)$")
     bars_path: Path | None = None
     chain_path: Path | None = None
+    master_snapshot: Path = Field(
+        default=Path("state/master_mcx.json"),
+        description="Frozen Angel One instrument master (bar data), fetched by "
+        "`algo live`.",
+    )
+    live_master_snapshot: Path = Field(
+        default=Path("state/kotak_master.json"),
+        description="Frozen Kotak Neo scrip master (live quotes and orders), "
+        "fetched by `algo live`.",
+    )
     quality: QualityConfig = QualityConfig()
 
 
@@ -173,6 +183,11 @@ class PersistenceConfig(BaseModel):
     live_db: Path = Path("state/live.db")
     research_db: Path = Path("state/research.duckdb")
     wal: bool = True
+    live_broker_state: Path = Field(
+        default=Path("state/kotak_broker.json"),
+        description="The Kotak adapter's ledger — our client ids mapped to the "
+        "broker's, so a restart can still answer order_by_client_id.",
+    )
 
 
 class LoggingConfig(BaseModel):

@@ -40,6 +40,12 @@ _MONEY_PATHS = (
 
 ENV_PREFIX = "ALGO_"
 
+#: Env namespaces consumed *outside* the config schema — credentials read directly
+#: by `credentials_from_env`, never injected into the resolved config. Injecting
+#: them would leak secrets into the hashed config, and the schema forbids extras
+#: precisely so that such a leak fails loudly instead of silently.
+NON_CONFIG_ENV_PREFIXES = ("ALGO_SMARTAPI_", "ALGO_KOTAK_")
+
 
 def load_config(
     path: Path | None = None,
@@ -97,6 +103,8 @@ def _env_overrides(env: Mapping[str, str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in env.items():
         if not key.startswith(ENV_PREFIX):
+            continue
+        if any(key.startswith(namespace) for namespace in NON_CONFIG_ENV_PREFIXES):
             continue
         dotted = key[len(ENV_PREFIX) :].lower().replace("__", ".")
         out[dotted] = value

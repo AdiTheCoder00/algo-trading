@@ -9,7 +9,7 @@ Status: **revised after your answers. Awaiting review.** Nothing below is implem
 | Instrument | **GOLDM (Gold Mini, 100 g) options on MCX** — options *on futures* |
 | Timeframe | 30-minute bars |
 | Strategy | Short strangle: sell OTM call + OTM put, each nearest 0.25 delta |
-| Broker | Angel One (SmartAPI), MCX segment |
+| Broker | Live: **Kotak Neo** (orders, chain feed, live master) · History: **Angel One SmartAPI** (candle API, JSON master) |
 | Holding | NRML, carried overnight |
 | Sizing | Fixed lots |
 | Data | **Recorded forward from now** — no usable history exists |
@@ -284,9 +284,10 @@ been up for months. So I propose one change to the build order:
 
 **Insert Milestone 1.5 — Chain Recorder, immediately after M1.**
 
-- Read-only. Angel One auth, instrument master, MCX option chain discovery, WebSocket
-  subscribe, snapshot writer → parquet, plus the `data/validate.py` quality gates running
-  live so we find out on day one if what we are capturing is unusable.
+- Read-only. Kotak Neo auth, instrument master (live CSV master), MCX option chain
+  discovery, snapshot writer → parquet, plus the `data/validate.py` quality gates running
+  live so we find out on day one if what we are capturing is unusable. Historical/closed
+  bars come from the Angel SmartAPI candle endpoint on the side.
 - **No order placement code whatsoever.** This does not weaken §2.1 — the trading path stays
   unbuilt until M7.
 - Runs continuously from that point while M2–M5 are built against synthetic fixtures.
@@ -415,13 +416,11 @@ algo/
 │   ├── fills.py              shared fill simulator used by BOTH backtest and paper
 │   ├── sim.py                SimBroker (backtest, M3)
 │   ├── paper.py              PaperBroker (live data, simulated fills, M6)
-│   └── angelone/
-│       ├── auth.py           (M1.5) session/TOTP login, token refresh
-│       ├── instruments.py    (M1.5) instrument master -> InstrumentId mapping
-│       ├── marketdata.py     (M1.5) WebSocket depth + quotes.  READ ONLY.
-│       ├── adapter.py        (M7) order placement/modify/cancel — not before M7
-│       ├── errors.py         (M7) retryable vs fatal taxonomy
-│       └── ratelimit.py      (M7) rate limiter + heartbeat
+│   └── kotak/
+│       ├── kotak.py            (M7) KotakBroker: TOTP login, place/cancel,
+│       │                            book/trade reads, positions, funds, ledger
+│       ├── kotak_feed.py       (M1.5+) KotakChainFeed: chain snapshots via quotes
+│       └── smartapi_feed.py    (M1.5+) SmartApiBarFeed: closed bars via candle API
 │
 ├── backtest/
 │   ├── engine.py             bar-by-bar event loop
@@ -484,8 +483,9 @@ class OptionId(BaseModel, frozen=True):
     right: Right
     exchange: Exchange = Exchange.MCX
 
-# No broker token here. Angel One's symboltoken / tradingsymbol live only in
-# execution/angelone/instruments.py. core/ never learns what a symboltoken is.
+# No broker token here. The Kotak scrip master (live) and the Angel One JSON
+# master (history) map to InstrumentId in exchange/master.py. core/ never learns
+# what a symboltoken is.
 
 class InstrumentSpec(BaseModel, frozen=True):
     lot_size: Decimal                # GOLDM: 100 g

@@ -14,6 +14,13 @@ dependencies = [
     "typer>=0.12",
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
+    "python-dotenv>=1.0",
+    "smartapi-python>=1.5.5",
+    "kotakneoapi==3.0.1",
+    "pyotp>=2.9",
+    # The SmartAPI SDK does not declare its own dependencies.
+    "logzero>=1.7",
+    "websocket-client>=1.8",
 ]
 
 [project.optional-dependencies]
@@ -61,6 +68,14 @@ files = ["algo", "tests"]
 
 [[tool.mypy.overrides]]
 module = ["pyarrow.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The Angel One and Kotak Neo SDKs ship no usable type information (kotakneoapi
+# ships py.typed without stubs, which makes mypy analyze it and flag its lazy
+# exports at import sites); they are imported lazily behind our own typed
+# transport boundaries and are not worth stubbing.
+module = ["SmartApi.*", "neo_api_client.*", "logzero", "pyotp", "requests"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------- ruff
