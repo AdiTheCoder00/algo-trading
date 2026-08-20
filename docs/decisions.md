@@ -675,6 +675,81 @@ trading halt is not a trade-off worth making for a pinned version number.
 
 ---
 
+## Closing the gaps against the brief
+
+### C-005 — The dashboard pointed at a command that did not exist
+The kill-switch panel and the README both told the operator to run
+`algo killswitch --reset`. There was no such command — the CLI had `verify`,
+`config`, `backtest`, `walkforward` and `serve` and nothing else. So the only
+documented way to clear a halt was a dead end, in the one part of the system whose
+whole purpose is to work when things have gone wrong. Now implemented with
+`--trip`, `--reset` and a default status view.
+
+### D-073 — A strangle is **one** trade, not two
+`TradeBuilder` groups every fill between "flat" and "flat again" into a single
+`Trade` with multiple legs.
+**Why:** reporting the call and the put separately would show one winner and one
+loser on a position that was always a single bet, which would corrupt the win
+rate, the profit factor and the R-distribution simultaneously. Until this was
+built, `core.trade.Trade` was fully defined and entirely unused — the trade log
+was permanently empty and every §10 statistic needing a round trip was absent.
+
+### D-074 — Trade P&L is differenced from the portfolio, not recalculated
+`gross_pnl` is the portfolio's realised figure at close minus its value at open.
+**Why:** exactly one piece of code knows how a round trip closes out
+(`Position.apply`). A second implementation in the reporting layer would agree
+for a while and then quietly stop agreeing, and the two numbers would both look
+plausible.
+
+### D-075 — R is the configured stop; no stop means no R-multiple
+Assumption 7.4, now enforced. A trade opened without a stop carries `r_multiple:
+None`, and the R statistics report **how many trades they could actually use**.
+**Why:** a short strangle's maximum loss is unbounded, so an R measured against it
+is meaningless — and averaging a subset without saying so overstates what the
+number covers.
+**Observed immediately:** the first real strangle run stopped out at **−1.32R** on
+a 1R stop. The exit is evaluated at a bar close and fills at the next bar, so the
+position kept moving. Stops do not stop at 1R, and the R-distribution now shows
+that rather than assuming it away.
+
+### D-076 — A position still open when the data ends is not a trade
+`TradeBuilder.abandon()` discards it.
+**Why:** counting it would put an unrealised figure into a realised statistic. The
+open position is reported separately instead.
+
+### D-077 — Export is byte-stable; formatting lives in the tearsheet
+The CSV writer uses sorted columns, `str(Decimal)` rather than a format string, one
+fixed UTC timestamp form, and an explicit `lineterminator="\n"` — because the
+default on Windows produces `\r\r\n` and a golden file that depends on the
+operating system is not a golden file.
+**Why:** every "nicety" on the way out — two decimal places, thousands separators,
+a rounded R — makes the file prettier and the diff useless.
+
+### D-078 — Regenerating the golden file is a deliberate act
+It only happens under `ALGO_UPDATE_GOLDEN=1`, and the test then *skips* with a
+message telling you to read the diff before committing.
+**Why:** a test that silently rewrites its own expectation whenever the code
+changes is not a test. There is also a guard-the-guard assertion that the fixture
+actually trades — a golden file of zero trades would pass forever.
+
+### D-079 — The tearsheet is one self-contained HTML file
+Inline SVG, no matplotlib, no chart library, nothing fetched when it opens. Asserted
+by a test: no `http`, no `https`, no `<script>`.
+**Why:** a tearsheet you can email, open on a machine with no Python, and still read
+in five years beats a prettier one that needs an environment. The caveats render
+*above* the numbers, because placeholder rates change what every figure below them
+means and a footnote is where that goes to be ignored.
+
+### D-080 — CI enforces the project's own rules, not just the tooling's
+Beyond ruff, mypy and pytest, the workflow greps for wall-clock reads outside
+`core/clock.py` (D-015), `float(` in money paths (§2.5), and swallowed exceptions
+(§12) — and fails the build on any of them.
+**Why:** ruff cannot know these are rules. Written down in a decision log they are
+guidance; enforced in CI they are constraints. The dashboard job runs `tsc`,
+`next build` and `npm audit` for the same reason.
+
+---
+
 ## Judgement calls made because the brief was silent or self-conflicting
 
 | # | Call | Question |

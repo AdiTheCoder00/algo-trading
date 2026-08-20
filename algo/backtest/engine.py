@@ -46,12 +46,14 @@ from algo.core.instrument import InstrumentId, OptionId
 from algo.core.order import Order
 from algo.core.signal import PriceIntent, Signal, SignalLeg
 from algo.core.timeutil import iso, ist_date
+from algo.core.trade import Trade
 from algo.costs.margin import MarginModel
 from algo.exchange.calendar import MarketCalendar
 from algo.exchange.expiries import ExpiryCalendar, ExpirySet
 from algo.exchange.specs import ContractSpecStore
 from algo.execution.fills import FillSimulator
 from algo.portfolio.book import EquityPoint, Portfolio
+from algo.portfolio.trades import TradeBuilder
 from algo.risk.devolvement import DevolvementGuard
 from algo.risk.engine import Accepted, Rejected, RiskEngine, RiskSnapshot
 from algo.risk.exits import ExitLevels, ExitReason, resolve_levels
@@ -108,6 +110,7 @@ class BacktestResult:
     spread_measured: bool
     notes: tuple[Note, ...] = field(default_factory=tuple)
     exits: tuple[ExitEvent, ...] = field(default_factory=tuple)
+    trades: tuple[Trade, ...] = field(default_factory=tuple)
     margin_calibrated: bool = True
     kill_switch_tripped: bool = False
     warnings: tuple[str, ...] = field(default_factory=tuple)
@@ -147,13 +150,16 @@ class BacktestEngine:
         "_kill_switch",
         "_levels",
         "_margin",
+        "_pending_exit_reason",
         "_portfolio",
         "_prices",
         "_risk",
+        "_signal_meta",
         "_sim",
         "_specs",
         "_strategy",
         "_timeframe",
+        "_trade_builder",
     )
 
     def __init__(
@@ -201,6 +207,9 @@ class BacktestEngine:
         self._levels: ExitLevels | None = None
         self._entry_credit = Decimal("0")
         self._bar_counts: dict[date, int] = {}
+        self._trade_builder = TradeBuilder(strategy.strategy_id)
+        self._signal_meta: dict[str, tuple[str, dict[str, str]]] = {}
+        self._pending_exit_reason = ""
 
     # -------------------------------------------------------------------- run
     def run(self) -> BacktestResult:
@@ -209,6 +218,7 @@ class BacktestEngine:
         rejections: list[Rejection] = []
         notes: list[Note] = []
         exits: list[ExitEvent] = []
+        trades: list[Trade] = []
         round_trips = 0
         spread_cost = Decimal("0")
         session_started: set[date] = set()
@@ -220,20 +230,37 @@ class BacktestEngine:
             # ---- 1. orders queued on the previous bar transact against this one
             bar_fills: list[Fill] = []
             for order_index, order in enumerate(pending):
+                if not self._trade_builder.is_open:
+                    self._begin_trade(order, bar)
                 fill = self._execute(order, bar, index, order_index, session_day)
                 bar_fills.append(fill)
+                self._trade_builder.add(fill)
                 spread_cost += fill.slippage * fill.qty * self._spec_for(
                     order.instrument, session_day
                 ).multiplier
+
+                # Checked per fill, not per bar: a close and a re-open landing on
+                # the same bar are two trades, and grouping them would report one.
+                if self._portfolio.is_flat and self._trade_builder.is_open:
+                    trades.append(
+                        self._trade_builder.close(
+                            at=bar.ts,
+                            realised_now=self._portfolio.realised_pnl,
+                            exit_reason=self._pending_exit_reason or "strategy close",
+                        )
+                    )
+                    round_trips += 1
+                    self._pending_exit_reason = ""
+                    self._levels = None
+                    self._entry_credit = Decimal("0")
             fills.extend(bar_fills)
             pending = []
 
-            if was_open and self._portfolio.is_flat:
-                round_trips += 1
-                self._levels = None
-                self._entry_credit = Decimal("0")
-            elif not was_open and not self._portfolio.is_flat and bar_fills:
+            if not was_open and not self._portfolio.is_flat and bar_fills:
                 self._open_levels(bar_fills, bar, session_day)
+                self._trade_builder.set_risk(
+                    self._levels.stop_loss if self._levels is not None else None
+                )
 
             marks = self._marks(bar)
             self._portfolio.check_identity(marks)
@@ -246,6 +273,7 @@ class BacktestEngine:
             exit_orders, exit_event = self._risk_exits(bar, session_day, marks)
             if exit_event is not None:
                 exits.append(exit_event)
+                self._pending_exit_reason = exit_event.reason.value
 
             # ---- 3. mark and record
             self._portfolio.record(bar.ts, marks)
@@ -270,7 +298,9 @@ class BacktestEngine:
                 continue
             pending.extend(self._size(signals, bar, session_day, rejections))
 
-        return self._finish(fills, rejections, notes, exits, round_trips, spread_cost)
+        return self._finish(
+            fills, rejections, notes, exits, round_trips, spread_cost, trades
+        )
 
     # --------------------------------------------------------------- internals
     def _spec_for(self, instrument: InstrumentId, on: date) -> Any:
@@ -350,6 +380,19 @@ class BacktestEngine:
             margin=margin,
             equity=self._portfolio.equity(self._marks(bar)),
             credit=credit,
+        )
+
+    def _begin_trade(self, order: Order, bar: Bar) -> None:
+        reason, context = self._signal_meta.get(
+            order.signal_id, ("no reason recorded", {})
+        )
+        self._trade_builder.open(
+            signal_id=order.signal_id,
+            reason=reason,
+            context=context,
+            risk_r=None,
+            at=bar.ts,
+            realised_so_far=self._portfolio.realised_pnl,
         )
 
     def _risk_exits(
@@ -519,6 +562,7 @@ class BacktestEngine:
                 )
                 continue
             if isinstance(decision, Accepted):
+                self._signal_meta[signal.signal_id] = (signal.reason, dict(signal.context))
                 queued.extend(decision.orders)
         return queued
 
@@ -566,7 +610,12 @@ class BacktestEngine:
         exits: list[ExitEvent],
         round_trips: int,
         spread_cost: Decimal,
+        trades: list[Trade],
     ) -> BacktestResult:
+        # A position still open when the data ends is not a completed round trip.
+        # Counting it as one would put an unrealised figure into a realised
+        # statistic; the open position is reported separately instead.
+        self._trade_builder.abandon()
         last = self._bars[-1]
         final_marks = {
             position.instrument.key: require_mark(self._prices, position.instrument.key, last.ts)
@@ -605,6 +654,7 @@ class BacktestEngine:
             rejections=tuple(rejections),
             notes=tuple(notes),
             exits=tuple(exits),
+            trades=tuple(trades),
             starting_equity=self._portfolio.starting_equity,
             final_equity=final_equity,
             net_pnl=final_equity - self._portfolio.starting_equity,

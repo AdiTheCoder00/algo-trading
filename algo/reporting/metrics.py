@@ -13,19 +13,22 @@ reads as "no edge"; `None` reads as "not enough data", which is the truth when
 there are three observations. Sortino with no losing periods is `None` rather
 than infinity for the same reason.
 
-Deliberately not here yet: anything requiring an R-multiple. R is the configured
-stop level (assumption 7.4), and stop handling lands with the risk layer at
-Milestone 4. Reporting an expectancy in R before R exists would mean inventing
-one.
+R-multiples arrive with the trade log. R is the configured stop in rupees
+(assumption 7.4), **not** the maximum possible loss — a short strangle's maximum
+loss is unbounded, so an R measured against it would be meaningless. A trade with
+no stop set carries no R-multiple, and the statistics that need one say how many
+trades they could actually use rather than silently averaging a subset.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
 from itertools import pairwise
 
+from algo.core.trade import Trade
 from algo.portfolio.book import EquityPoint
 
 #: MCX non-agri sessions run 14.5 hours, five days a week — roughly 250 a year.
@@ -39,6 +42,97 @@ class Drawdown:
     duration: timedelta
     peak_equity: Decimal
     trough_equity: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class TradeStats:
+    """Brief §10, the half that needs completed round trips.
+
+    Every field is `None` when it cannot be computed rather than 0. A profit
+    factor of 0.0 reads as "loses everything"; `None` reads as "no losing trades
+    to divide by", which is a different statement.
+    """
+
+    trades: int
+    wins: int
+    losses: int
+    win_rate: Decimal | None
+    profit_factor: Decimal | None
+    gross_profit: Decimal
+    gross_loss: Decimal
+    largest_win: Decimal | None
+    largest_loss: Decimal | None
+    longest_losing_streak: int
+    #: How many trades carried an R-multiple. The R statistics use only these.
+    trades_with_r: int
+    expectancy_r: Decimal | None
+    average_win_r: Decimal | None
+    average_loss_r: Decimal | None
+    r_multiples: tuple[Decimal, ...]
+
+    def histogram(self, buckets: int = 9) -> list[tuple[str, int]]:
+        """R-multiple distribution, for the tearsheet.
+
+        Brief §10 asks for the distribution rather than just a mean, because a
+        premium-selling strategy's shape — many small wins, rare large losses —
+        is invisible in an average and obvious in a histogram.
+        """
+        if not self.r_multiples:
+            return []
+        low = min(self.r_multiples)
+        high = max(self.r_multiples)
+        if high == low:
+            return [(f"{low:+.2f}R", len(self.r_multiples))]
+        width = (high - low) / Decimal(buckets)
+        counts = [0] * buckets
+        for value in self.r_multiples:
+            index = int((value - low) / width)
+            counts[min(index, buckets - 1)] += 1
+        return [
+            (f"{low + width * Decimal(i):+.2f}R", counts[i]) for i in range(buckets)
+        ]
+
+
+def trade_stats(trades: Sequence[Trade]) -> TradeStats:
+    """Compute the round-trip statistics from a trade log."""
+    nets = [t.net_pnl for t in trades]
+    wins = [n for n in nets if n > 0]
+    losses = [n for n in nets if n < 0]
+    gross_profit = sum(wins, Decimal("0"))
+    gross_loss = -sum(losses, Decimal("0"))
+
+    streak = worst_streak = 0
+    for net in nets:
+        streak = streak + 1 if net < 0 else 0
+        worst_streak = max(worst_streak, streak)
+
+    rs = [t.r_multiple for t in trades if t.r_multiple is not None]
+    win_rs = [r for r in rs if r > 0]
+    loss_rs = [r for r in rs if r <= 0]
+
+    return TradeStats(
+        trades=len(trades),
+        wins=len(wins),
+        losses=len(losses),
+        win_rate=(
+            Decimal(len(wins)) / Decimal(len(trades)) * Decimal("100") if trades else None
+        ),
+        # None, not zero: no losing trades means nothing to divide by, which is
+        # not the same as "made nothing".
+        profit_factor=(gross_profit / gross_loss if gross_loss > 0 else None),
+        gross_profit=gross_profit,
+        gross_loss=gross_loss,
+        largest_win=max(wins) if wins else None,
+        largest_loss=min(losses) if losses else None,
+        longest_losing_streak=worst_streak,
+        trades_with_r=len(rs),
+        expectancy_r=(sum(rs, Decimal("0")) / Decimal(len(rs)) if rs else None),
+        average_win_r=(sum(win_rs, Decimal("0")) / Decimal(len(win_rs)) if win_rs else None),
+        average_loss_r=(
+            sum(loss_rs, Decimal("0")) / Decimal(len(loss_rs)) if loss_rs else None
+        ),
+        r_multiples=tuple(rs),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +154,7 @@ class Metrics:
     calmar: Decimal | None
     exposure_pct: Decimal
     periods_per_year: Decimal
+    trade: TradeStats | None = None
 
     def summary(self) -> str:
         """One block of text, with the caveats attached rather than in a footnote."""
@@ -86,6 +181,25 @@ class Metrics:
                 f"Calmar            {_or_dash(self.calmar)}",
             ]
         )
+        if self.trade is not None and self.trade.trades:
+            stats = self.trade
+            lines.extend(
+                [
+                    "",
+                    f"round trips       {stats.trades} "
+                    f"({stats.wins}W / {stats.losses}L)",
+                    f"win rate          {_or_dash(stats.win_rate, '%')}",
+                    f"profit factor     {_or_dash(stats.profit_factor)}",
+                    f"largest win       {_or_dash(stats.largest_win)}",
+                    f"largest loss      {_or_dash(stats.largest_loss)}",
+                    f"losing streak     {stats.longest_losing_streak}",
+                    f"expectancy        {_or_dash(stats.expectancy_r, 'R')}"
+                    f"   (from {stats.trades_with_r} trades with a stop)",
+                    f"average win       {_or_dash(stats.average_win_r, 'R')}",
+                    f"average loss      {_or_dash(stats.average_loss_r, 'R')}",
+                ]
+            )
+
         if self.trade_count < 30:
             lines.append(
                 f"\n  NOTE: {self.trade_count} trades. Ratios above cannot distinguish "
@@ -99,6 +213,7 @@ def compute(
     *,
     trade_count: int,
     total_cost: Decimal,
+    trades: Sequence[Trade] = (),
     periods_per_year: Decimal = TRADING_DAYS_PER_YEAR,
 ) -> Metrics:
     """Derive the metric set from an equity curve."""
@@ -137,6 +252,7 @@ def compute(
         calmar=calmar,
         exposure_pct=exposure,
         periods_per_year=periods_per_year,
+        trade=trade_stats(trades) if trades else None,
     )
 
 
