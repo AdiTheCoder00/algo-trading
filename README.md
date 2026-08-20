@@ -4,11 +4,14 @@ An event-driven trading system for a short strangle on **MCX GOLDM options** —
 ~0.25-delta call and one ~0.25-delta put, one cycle per monthly expiry, traded through
 Angel One.
 
-**Status: Milestones 1-3 complete.** Domain models, configuration, the MCX calendar, the
-feeds and resampler, the look-ahead guarantees, option pricing (Black-76 + IV solver), the
-backtest engine and the MCX cost model are built and tested. The strangle strategy itself
-is Milestone 4. Nothing here has been connected to a broker, and no real market data has
-been recorded yet.
+**Status: Milestones 1-8 complete, except the chain recorder (M1.5) and the Angel One
+adapter (M7).** Domain models, configuration, the MCX calendar, feeds and resampler, the
+look-ahead guarantees, option pricing, the backtest engine and cost model, the strangle
+strategy and full risk layer, walk-forward analysis, the paper adapter with reconciliation
+and crash recovery, and the monitoring dashboard are all built and tested.
+
+**Nothing has been connected to a real broker, and no real market data has been recorded.**
+Every number the system can currently produce comes from generated data.
 
 Live trading is off by default and cannot be reached by accident. See [Modes](#modes).
 
@@ -68,13 +71,41 @@ make exactly nothing before costs and lose exactly the costs:
   ! SPREAD IS MODELLED, NOT MEASURED - the recorder replaces this at M1.5
 ```
 
+Whether a walk-forward on your data could tell you anything, before spending months
+recording it:
+
+```bash
+.venv/Scripts/algo.exe walkforward
+```
+
+## The dashboard
+
+Two processes. The API reads a state file the engine writes; it never holds the engine.
+
+```bash
+ALGO_API_TOKEN=pick-a-secret .venv/Scripts/algo.exe serve
+```
+
+```bash
+cd dashboard && npm install && npm run dev
+```
+
+Copy `dashboard/.env.example` to `dashboard/.env.local` and set the same token. It has
+no `NEXT_PUBLIC_` prefix on purpose — the token guards the kill switch, so it stays on
+the Next.js server and every call is proxied. It never reaches the browser.
+
+The page shows the equity curve and underwater plot, open positions, signals **with the
+reason they fired**, why the strategy declined to trade, system health, and the kill
+switch. It is read-only apart from that one button, and the button records a *request* —
+the engine acts on it at its next bar, so the UI says "halt requested", never "halted".
+
 ## Tests
 
 ```bash
 .venv/Scripts/python.exe -m pytest
 ```
 
-310 tests. The suite includes the look-ahead canaries required by the brief: cheating
+469 tests. The suite includes the look-ahead canaries required by the brief: cheating
 strategies that try to read the next bar, reach for a dataframe, reach for the feed, or
 bolt an attribute onto the context — each must raise. It also runs the whole pipeline
 twice, once against a dataset whose future bars have been replaced with randomised
@@ -119,13 +150,16 @@ algo/
 ├── risk/        sizing and the caps
 ├── backtest/    the bar-by-bar event loop
 ├── reporting/   metrics
-├── strategy/    the Strategy contract, BarContext, and the two reference strategies
-└── cli/         verify, config, backtest
+├── strategy/    Strategy contract, BarContext, the strangle, two reference strategies
+├── persistence/ the write-ahead order journal and the dashboard state store
+├── api/         FastAPI read-only monitoring + the kill-switch request
+└── cli/         verify, config, backtest, walkforward, serve
+
+dashboard/       Next.js monitoring page (4 runtime dependencies, no chart library)
 ```
 
-Still to come, in order: the chain recorder (M1.5), the strangle strategy and the full
-risk layer (M4), walk-forward (M5), the paper adapter (M6), the Angel One adapter (M7),
-and the dashboard (M8).
+Still to come: the **chain recorder (M1.5)** and the **Angel One adapter (M7)**. Both
+need SmartAPI credentials — see `docs/open-questions.md` Q10/Q11.
 
 ## Design notes worth knowing before reading the code
 
@@ -156,6 +190,19 @@ and the dashboard (M8).
   1e-21 drift on its first run.
 - **A metric that cannot be computed returns nothing, not zero.** A Sharpe of 0.0 reads
   as "no edge"; `None` reads as "not enough data", which is usually the truth here.
+- **The API reads a file; it never holds the engine.** A web framework holding live
+  trading objects is one bug away from mutating trading state to serve an HTTP request.
+  A test fails if a second mutating endpoint ever appears.
+- **The kill switch is a request, not an action.** The API records that a halt was asked
+  for and returns 202; the engine trips its own switch on the next bar. A dead API cannot
+  leave the engine half-tripped, and a dead engine cannot swallow a halt.
+- **An order is written before it is sent, and never sent twice.** A crash between the
+  write and the call leaves an ambiguous SENT, which reconciliation resolves. The reverse
+  ordering would leave a JOURNALLED order the broker already holds — and the obvious
+  recovery would double the position.
+- **An unconfirmable order halts trading rather than being resent.** An order missing from
+  the broker may never have arrived, or may have filled and been cleared. Those look
+  identical from outside.
 - **Devolvement is a hard rule, not a setting.** An in-the-money short leg left at option
   expiry becomes a GOLDM futures position, and GOLDM futures go to compulsory physical
   delivery of gold. The risk layer will force-exit before expiry and refuse to carry

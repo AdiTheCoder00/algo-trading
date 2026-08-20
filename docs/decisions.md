@@ -598,6 +598,83 @@ margin, stop level, kill-switch equity — is wrong while it stands.
 
 ---
 
+## Decisions made while building Milestone 8
+
+### D-064 — The API reads a file; it never holds the engine
+The engine writes to a SQLite state file, the API only reads it. The API process
+has no `Portfolio`, no `OrderRouter` and no broker connection.
+**Why:** a web framework holding live trading objects is one bug away from
+mutating trading state to serve an HTTP request. A dashboard that can move a
+position is not a dashboard. A test enumerates the routes and fails if a second
+mutating endpoint ever appears — which is the only form of this rule that survives
+someone adding a convenient "close position" button later.
+
+### D-065 — The kill switch is a *request*, not an action
+`POST /kill-switch` writes a row saying a halt was asked for and returns **202**.
+The engine trips its own switch on its next bar and marks the request acted on.
+**Why:** the API never touches the switch, so a dead API cannot leave the engine
+half-tripped, and a dead engine cannot swallow a halt — the request is still
+sitting in the table when it comes back. The 202 is not decoration either: a UI
+that showed "halted" the instant the call returned would be lying for as long as
+the engine took to notice, at exactly the moment an operator most needs the truth.
+The dashboard therefore reports "halt requested", never "halted".
+
+### D-066 — There is no reset endpoint
+Tripping the switch is one click. Clearing it is `algo killswitch --reset` at a
+terminal.
+**Why:** un-tripping a halt deserves a look at why it tripped and a person who has
+done that looking. Q21 settled the same way for parameters: they change through
+config and a restart, so every live setting traces to a committed file rather than
+to something typed into a browser once.
+
+### D-067 — The API token never reaches the browser
+The Next.js **server** holds `ALGO_API_TOKEN` and proxies every call through
+`app/api/state/[...path]`. The variable deliberately has no `NEXT_PUBLIC_` prefix,
+because that prefix inlines a value into the browser bundle.
+**Why:** the token guards the kill switch. Shipping it to the browser would put a
+trading halt behind devtools. The proxy also carries an explicit allow-list of
+paths — without one, a path parameter is an open proxy from the browser into
+whatever else the server can reach.
+
+### D-068 — The API refuses to start without a token, and binds to localhost
+`create_app` raises if `ALGO_API_TOKEN` is unset; `algo serve` defaults to
+127.0.0.1 and prints a warning when told to bind wider.
+**Why:** serving an unauthenticated kill switch to anything that can reach the port
+is not a default worth having. Exposing it should be a decision, not an accident.
+
+### D-069 — Money crosses the wire as strings and is never parsed
+The API serialises every `Decimal` as a string, and the TypeScript types declare
+them `string`. They are converted to `number` in exactly one place: computing SVG
+path coordinates for the equity chart.
+**Why:** JavaScript numbers are float64, so `Number("1000000.05")` is
+1000000.0499999999. Parsing at the last step would undo the whole `Decimal`
+discipline at the point the operator actually reads the figure. A pixel of
+rounding in a chart is invisible; a paisa in a reported number is not.
+
+### D-070 — No charting library
+The equity curve and the underwater plot are hand-drawn inline SVG — roughly thirty
+lines of path arithmetic.
+**Why:** a chart package would add several hundred transitive dependencies to a
+page running on the same machine as a trading engine. The whole dashboard has
+four runtime dependencies. Brief §10 asks for the underwater plot specifically,
+and depth and duration are different experiences that one equity line shows
+neither of clearly.
+
+### D-071 — `allowedDevOrigins` covers both `127.0.0.1` and `localhost`
+Found by actually opening the page: Next's dev server treats the two spellings as
+different origins and blocks its own JavaScript chunks across them. The result is a
+page that serves its shell with no client code — which looks exactly like an engine
+that is up and reporting nothing. Both spellings are allowed so the failure cannot
+happen either way round.
+
+### D-072 — Next was upgraded off the version with a published CVE
+`npm install` flagged a security advisory against `next@15.1.6`. Upgraded to
+16.3.1; `npm audit --omit=dev` now reports zero vulnerabilities.
+**Why:** shipping a known-vulnerable dependency in the process that fronts a
+trading halt is not a trade-off worth making for a pinned version number.
+
+---
+
 ## Judgement calls made because the brief was silent or self-conflicting
 
 | # | Call | Question |
