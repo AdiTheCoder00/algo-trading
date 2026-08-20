@@ -840,6 +840,24 @@ engine chooses to honour on the next bar, never a mutation of running state (the
 same reasoning as D-064/D-065), and the flatten that accompanies a requested halt
 is an explicit part of the request, not something the engine invents.
 
+### D-089 - Sizing is fixed lots until a sizing rule is actually implemented
+`SizingConfig` now accepts `mode: fixed_lots` only; the `margin_pct` and `risk_pct`
+modes that `config/goldm.yaml` advertised are gone from both schema and file.
+**Why:** those modes were never implemented - a config file that names an
+unimplemented sizing rule is a promise the engine does not keep, and D-024 shows
+what happens to a stop that is a percentage of an *approximate* margin. When a
+real sizing rule lands, the schema grows with the implementation, not before it.
+
+### D-090 - Roadmap-only modules stay until their milestone arrives
+`algo/data/feed.py`, `csv_feed.py` and `parquet_feed.py` (M1.5/M7 feeds) and
+`algo/strategy/paper.py` (the paper loop) are not dead code: they are the load
+bearing future of a repository whose tests replay recordings, and
+`synthetic_chain.py` is the strangle suite's fixture. They stay, and keep their
+importers in the test suite.
+**Why:** deleting them would save a few modules today and re-create them against
+a changed interface tomorrow. The cost of keeping code that is tested and imported
+is lower than the cost of re-deriving decisions that were already made (D-019).
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting

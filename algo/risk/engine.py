@@ -12,6 +12,7 @@ below the minimum lot is a skipped trade with a log line, never a rounded-up one
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -33,6 +34,12 @@ class RiskSnapshot:
     equity: Decimal
     open_position_count: int
     lots_held: int = 0
+    margin_used: Decimal = Decimal("0")
+    """Margin already blocked, rupees, on the same combo basis as the new leg."""
+    propose_margin: Callable[[int], Decimal] | None = None
+    """Given the sized lot count, the margin this signal would block. None when no
+    margin model is in play, which disables the MARGIN_CAP check rather than
+    guessing."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +107,13 @@ class FixedLotSizer:
 class RiskEngine:
     """Sizes signals and applies the caps."""
 
-    __slots__ = ("_max_concurrent", "_max_lots_per_underlying", "_sizer", "_spec_for")
+    __slots__ = (
+        "_margin_cap_pct",
+        "_max_concurrent",
+        "_max_lots_per_underlying",
+        "_sizer",
+        "_spec_for",
+    )
 
     def __init__(
         self,
@@ -109,15 +122,30 @@ class RiskEngine:
         spec_for: object,
         max_concurrent_positions: int,
         max_lots_per_underlying: int,
+        margin_cap_pct: Decimal | None = None,
     ) -> None:
         self._sizer = sizer
         self._spec_for = spec_for
         self._max_concurrent = max_concurrent_positions
         self._max_lots_per_underlying = max_lots_per_underlying
+        self._margin_cap_pct = margin_cap_pct
 
     def evaluate(
         self, signal: Signal, snapshot: RiskSnapshot, *, spec: InstrumentSpec
     ) -> RiskDecision:
+        for leg in signal.legs:
+            if leg.entry.kind != "MARKET":
+                # A limit intent is a request the engine cannot honour — the fill
+                # simulator only crosses the book. Ignoring it would execute a
+                # different order than the strategy asked for (brief §12).
+                return Rejected(
+                    reason=RejectReason.UNSUPPORTED_LIMIT_INTENT,
+                    detail=(
+                        f"leg {leg.instrument.key} asked for a {leg.entry.kind} entry "
+                        f"at {leg.entry.limit_price}; only market intents are supported"
+                    ),
+                )
+
         lots, trace = self._sizer.size(equity=snapshot.equity, spec=spec)
 
         if lots < spec.min_lots:
@@ -147,6 +175,22 @@ class RiskEngine:
                     f"the cap of {self._max_lots_per_underlying}"
                 ),
             )
+        if (
+            is_opening
+            and self._margin_cap_pct is not None
+            and snapshot.propose_margin is not None
+        ):
+            cap = snapshot.equity * self._margin_cap_pct / Decimal("100")
+            proposed = snapshot.propose_margin(lots)
+            if snapshot.margin_used + proposed > cap:
+                return Rejected(
+                    reason=RejectReason.MARGIN_CAP,
+                    detail=(
+                        f"{snapshot.margin_used} margin already blocked plus "
+                        f"{proposed} for this position exceeds the cap of {cap} "
+                        f"({self._margin_cap_pct}% of equity)"
+                    ),
+                )
 
         orders = tuple(
             Order(

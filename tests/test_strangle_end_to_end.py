@@ -31,6 +31,7 @@ from algo.backtest.prices import ChainFeedProvider, ChainPriceSource, CompositeP
 from algo.core.bar import M1, M30, Bar
 from algo.core.chain import OptionChainSnapshot
 from algo.core.enums import Exchange, RejectReason
+from algo.core.errors import DomainError
 from algo.core.instrument import FutureId, InstrumentSpec, OptionId
 from algo.core.signal import ComboExit
 from algo.core.timeutil import ist_date, to_ist
@@ -148,6 +149,9 @@ def _run(
     kill_switch: KillSwitch | None = None,
     min_dte: int = 3,
     wide_exits: bool = False,
+    stop_viability_threshold: Decimal | None = None,
+    on_stop_viability_breach: str = "warn",
+    stop_loss: ComboExit | None = None,
 ) -> BacktestResult:
     session_days = days or SESSION_DAYS
     bars = _bars(calendar, session_days, drift_per_bar)
@@ -169,9 +173,12 @@ def _run(
             take_profit=ComboExit(kind="ABS_INR", value=Decimal("99999999"))
             if wide_exits
             else None,
-            stop_loss=ComboExit(kind="ABS_INR", value=Decimal("99999999"))
-            if wide_exits
-            else None,
+            stop_loss=stop_loss
+            or (
+                ComboExit(kind="ABS_INR", value=Decimal("99999999"))
+                if wide_exits
+                else None
+            ),
         ),
         risk=RiskEngine(
             sizer=FixedLotSizer(1),
@@ -200,6 +207,8 @@ def _run(
         else None,
         kill_switch=kill_switch,
         margin=FixedMarginPerLot(MARGIN_PER_LOT),
+        stop_viability_threshold=stop_viability_threshold,
+        on_stop_viability_breach=on_stop_viability_breach,
     )
     return engine.run()
 
@@ -392,3 +401,38 @@ def test_the_position_is_always_flat_by_the_end(
     property that matters more than any P&L figure in this file."""
     result = _run(calendar, drift_per_bar=drift, wide_exits=True)
     assert result.equity_curve[-1].open_positions == 0
+
+
+class TestStopViability:
+    """D-024: a position that opens at its own stop is not a strategy."""
+
+    def test_a_stop_that_clears_the_cost_threshold_is_silent(
+        self, calendar: MarketCalendar
+    ) -> None:
+        result = _run(
+            calendar,
+            stop_viability_threshold=Decimal("3"),
+            wide_exits=True,  # an enormous stop clears any threshold
+        )
+        assert not any("stop viability" in note.message for note in result.notes)
+
+    def test_a_stop_below_the_threshold_warns(self, calendar: MarketCalendar) -> None:
+        result = _run(
+            calendar,
+            stop_viability_threshold=Decimal("3"),
+            wide_exits=True,  # take profit exists, so the levels resolve at entry
+            stop_loss=ComboExit(kind="ABS_INR", value=Decimal("1")),
+        )
+        assert any("stop viability" in note.message for note in result.notes)
+
+    def test_refuse_stops_the_run_instead_of_trading_on(
+        self, calendar: MarketCalendar
+    ) -> None:
+        with pytest.raises(DomainError, match="refuse"):
+            _run(
+                calendar,
+                stop_viability_threshold=Decimal("3"),
+                on_stop_viability_breach="refuse",
+                wide_exits=True,
+                stop_loss=ComboExit(kind="ABS_INR", value=Decimal("1")),
+            )

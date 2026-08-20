@@ -41,7 +41,7 @@ data:
 risk:
   starting_equity: "1000000.00"
   sizing:
-    mode: fixed_lots
+    mode: fixed_lots # the only sizing mode; margin_pct and risk_pct were dropped (D-089)
     fixed_lots: 1
   caps:
     max_concurrent_positions: 1

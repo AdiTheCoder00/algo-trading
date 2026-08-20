@@ -84,7 +84,6 @@ class OrderState(StrEnum):
 class SignalAction(StrEnum):
     OPEN = "OPEN"
     CLOSE = "CLOSE"
-    MODIFY = "MODIFY"
 
 
 class Atomicity(StrEnum):
@@ -96,7 +95,6 @@ class Atomicity(StrEnum):
     """
 
     ALL_OR_NONE = "ALL_OR_NONE"
-    BEST_EFFORT = "BEST_EFFORT"
 
 
 class RejectReason(StrEnum):
@@ -109,9 +107,7 @@ class RejectReason(StrEnum):
     KILL_SWITCH_TRIPPED = "KILL_SWITCH_TRIPPED"
     DEVOLVEMENT_WINDOW = "DEVOLVEMENT_WINDOW"
     TENDER_WINDOW = "TENDER_WINDOW"
-    UNTRADEABLE_QUOTE = "UNTRADEABLE_QUOTE"
-    SPEC_VIOLATION = "SPEC_VIOLATION"
-    STOP_BELOW_COST = "STOP_BELOW_COST"
+    UNSUPPORTED_LIMIT_INTENT = "UNSUPPORTED_LIMIT_INTENT"
 
 
 class QuoteFlag(StrEnum):

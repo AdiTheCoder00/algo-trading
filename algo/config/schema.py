@@ -98,10 +98,8 @@ class DataConfig(BaseModel):
 class SizingConfig(BaseModel):
     model_config = _FROZEN
 
-    mode: str = Field(default="fixed_lots", pattern="^(fixed_lots|margin_pct|risk_pct_with_stop)$")
+    mode: str = Field(default="fixed_lots", pattern="^fixed_lots$")
     fixed_lots: int = 1
-    margin_pct: Decimal = Decimal("40")
-    risk_pct: Decimal = Decimal("1")
 
 
 class CapsConfig(BaseModel):

@@ -16,12 +16,14 @@ import pytest
 
 from algo.core.enums import RejectReason
 from algo.core.errors import DomainError
-from algo.core.signal import ComboExit
+from algo.core.instrument import FutureId, InstrumentSpec
+from algo.core.signal import ComboExit, Signal
 from algo.core.timeutil import utc
 from algo.costs.margin import FixedMarginPerLot, SpanApproxMargin
 from algo.exchange.calendar import MarketCalendar, synthetic_calendar
 from algo.exchange.expiries import ExpirySet
 from algo.risk.devolvement import DevolvementGuard
+from algo.risk.engine import RiskDecision
 from algo.risk.exits import ExitReason, check_viability, resolve_levels
 from algo.risk.killswitch import KillSwitch, KillSwitchState, TripReason
 
@@ -382,3 +384,112 @@ class TestKillSwitch:
             state=restored,
         )
         assert resumed.is_tripped
+
+
+class TestRiskEngineCaps:
+    """The caps that go beyond lot counts: the margin cap and the entry intent."""
+
+    def _open_signal(self, goldm_future: FutureId, *, limit: Decimal | None = None) -> Signal:
+        from algo.core.enums import Side, SignalAction
+        from algo.core.signal import PriceIntent, SignalLeg
+
+        entry = PriceIntent.limit(limit) if limit is not None else PriceIntent.market()
+        return Signal(
+            signal_id="cap-test",
+            strategy_id="test",
+            ts=utc(2026, 8, 19, 6, 0),
+            action=SignalAction.OPEN,
+            legs=(SignalLeg(instrument=goldm_future, direction=Side.SELL, entry=entry),),
+            reason="margin-cap test",
+        )
+
+    def _evaluate(
+        self,
+        signal: Signal,
+        goldm_spec: InstrumentSpec,
+        *,
+        margin_cap_pct: Decimal | None = Decimal("10"),
+        margin_used: Decimal = Decimal("0"),
+        proposed_margin: Decimal = Decimal("200000"),
+    ) -> RiskDecision:
+        from algo.risk.engine import FixedLotSizer, RiskEngine, RiskSnapshot
+
+        risk = RiskEngine(
+            sizer=FixedLotSizer(1),
+            spec_for=None,
+            max_concurrent_positions=5,
+            max_lots_per_underlying=10,
+            margin_cap_pct=margin_cap_pct,
+        )
+        return risk.evaluate(
+            signal,
+            RiskSnapshot(
+                now=signal.ts,
+                session_day=date(2026, 8, 19),
+                equity=Decimal("1000000"),
+                open_position_count=0,
+                lots_held=0,
+                margin_used=margin_used,
+                propose_margin=lambda lots: proposed_margin,
+            ),
+            spec=goldm_spec,
+        )
+
+    def test_the_margin_cap_rejects_an_opening_that_breaks_it(
+        self, goldm_spec: InstrumentSpec, goldm_future: FutureId
+    ) -> None:
+        from algo.risk.engine import Rejected
+
+        decision = self._evaluate(
+            self._open_signal(goldm_future), goldm_spec, proposed_margin=Decimal("150000")
+        )
+        assert isinstance(decision, Rejected)
+        assert decision.reason is RejectReason.MARGIN_CAP
+
+    def test_an_opening_inside_the_cap_is_accepted(
+        self, goldm_spec: InstrumentSpec, goldm_future: FutureId
+    ) -> None:
+        from algo.risk.engine import Accepted
+
+        decision = self._evaluate(
+            self._open_signal(goldm_future), goldm_spec, proposed_margin=Decimal("50000")
+        )
+        assert isinstance(decision, Accepted)
+
+    def test_margin_already_blocked_counts_towards_the_cap(
+        self, goldm_spec: InstrumentSpec, goldm_future: FutureId
+    ) -> None:
+        from algo.risk.engine import Rejected
+
+        decision = self._evaluate(
+            self._open_signal(goldm_future),
+            goldm_spec,
+            proposed_margin=Decimal("50000"),
+            margin_used=Decimal("60000"),
+        )
+        assert isinstance(decision, Rejected)
+        assert decision.reason is RejectReason.MARGIN_CAP
+
+    def test_no_margin_model_means_no_cap(
+        self, goldm_spec: InstrumentSpec, goldm_future: FutureId
+    ) -> None:
+        from algo.risk.engine import Accepted
+
+        decision = self._evaluate(
+            self._open_signal(goldm_future),
+            goldm_spec,
+            margin_cap_pct=None,
+            proposed_margin=Decimal("999999"),
+        )
+        assert isinstance(decision, Accepted)
+
+    def test_a_limit_intent_is_rejected_not_silently_ignored(
+        self, goldm_spec: InstrumentSpec, goldm_future: FutureId
+    ) -> None:
+        from algo.risk.engine import Rejected
+
+        decision = self._evaluate(
+            self._open_signal(goldm_future, limit=Decimal("156000")), goldm_spec
+        )
+        assert isinstance(decision, Rejected)
+        assert decision.reason is RejectReason.UNSUPPORTED_LIMIT_INTENT
