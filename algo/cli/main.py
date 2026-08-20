@@ -109,6 +109,17 @@ def backtest(
     seed: int = typer.Option(20260819),
     tearsheet: Path | None = typer.Option(None, help="Write an HTML tearsheet here"),
     trade_log: Path | None = typer.Option(None, help="Write the trade log CSV here"),
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        help="A config file whose sizing, caps, kill switch and equity this run uses",
+    ),
+    state: Path | None = typer.Option(
+        None,
+        "--state",
+        help="Stream equity, positions, signals, notes and health to this dashboard "
+        "state file, and act on kill-switch requests each bar",
+    ),
 ) -> None:
     """Run the Milestone 3 falsification on synthetic bars.
 
@@ -116,20 +127,28 @@ def backtest(
     reference strategies over generated data to show that the engine's cost
     arithmetic behaves - buy-and-hold tracking the instrument, and a coin flip on
     a flat market losing exactly its costs and nothing else.
+
+    `--config` makes the risk settings real: sizing lots, caps, kill-switch
+    limits, margin cap and starting equity come from the file instead of the
+    defaults. `--state` feeds the monitoring dashboard; halt requests recorded
+    there trip the kill switch on the next bar.
     """
     from decimal import Decimal
 
     from algo.backtest.engine import BacktestEngine
     from algo.core.instrument import FutureId
     from algo.costs.charges import McxChargeModel
+    from algo.costs.margin import SpanApproxMargin
     from algo.costs.slippage import TickSlippage
     from algo.costs.spread import FixedTickSpread
     from algo.data.resample import resample
     from algo.data.synthetic import flat_session, one_minute_session
     from algo.execution.fills import FillSimulator
+    from algo.persistence.state import StateStore
     from algo.portfolio.book import Portfolio
     from algo.reporting import metrics as metrics_mod
     from algo.risk.engine import FixedLotSizer, RiskEngine
+    from algo.risk.killswitch import KillSwitch
     from algo.strategy.buy_and_hold import BuyAndHold
     from algo.strategy.coin_flip import CoinFlip
 
@@ -145,32 +164,84 @@ def backtest(
     )
     bars = resample(source, calendar=calendar, timeframe=tf)
 
-    engine = BacktestEngine(
-        bars=bars,
-        calendar=calendar,
-        specs=ContractSpecStore.default(),
-        strategy=(
-            CoinFlip(instrument, seed=seed)
-            if strategy == "coin_flip"
-            else BuyAndHold(instrument)
-        ),
-        risk=RiskEngine(
-            sizer=FixedLotSizer(1),
-            spec_for=None,
-            max_concurrent_positions=1,
-            max_lots_per_underlying=5,
-        ),
-        simulator=FillSimulator(
-            spread=FixedTickSpread(spread_ticks),
-            slippage=TickSlippage(market_ticks=0, stop_ticks=2),
-            charges=McxChargeModel.default(),
-        ),
-        portfolio=Portfolio(Decimal("1000000.00")),
-        instrument=instrument,
-        timeframe=tf,
-        is_option=False,
-    )
-    result = engine.run()
+    if config is not None:
+        from algo.config.loader import load_config as resolve
+
+        cfg = resolve(config)
+        starting_equity = cfg.risk.starting_equity
+        lots = cfg.risk.sizing.fixed_lots
+        max_concurrent = cfg.risk.caps.max_concurrent_positions
+        max_lots = cfg.risk.caps.max_lots_per_underlying
+        margin_cap_pct = cfg.risk.caps.max_total_margin_pct
+        kill_switch = KillSwitch(
+            daily_loss_limit_pct=cfg.risk.kill_switch.daily_loss_limit_pct,
+            max_consecutive_losses=cfg.risk.kill_switch.max_consecutive_losses,
+            max_drawdown_pct=cfg.risk.kill_switch.max_drawdown_pct,
+        )
+        margin = SpanApproxMargin()
+        stop_viability = cfg.strategy.exit.min_stop_to_cost_ratio
+        on_breach = cfg.strategy.exit.on_stop_viability_breach
+        mode = cfg.mode.value
+        typer.echo(f"config        {config} (mode {mode}, {lots} lot(s), equity {starting_equity})")
+    else:
+        starting_equity = Decimal("1000000.00")
+        lots = 1
+        max_concurrent = 1
+        max_lots = 5
+        margin_cap_pct = None
+        kill_switch = None
+        margin = None
+        stop_viability = None
+        on_breach = "warn"
+        mode = "backtest"
+
+    store: StateStore | None = None
+    if state is not None:
+        store = StateStore(state)
+        kill_switch = kill_switch or KillSwitch(
+            daily_loss_limit_pct=Decimal("2"),
+            max_consecutive_losses=3,
+            max_drawdown_pct=Decimal("10"),
+        )
+
+    try:
+        engine = BacktestEngine(
+            bars=bars,
+            calendar=calendar,
+            specs=ContractSpecStore.default(),
+            strategy=(
+                CoinFlip(instrument, seed=seed)
+                if strategy == "coin_flip"
+                else BuyAndHold(instrument)
+            ),
+            risk=RiskEngine(
+                sizer=FixedLotSizer(lots),
+                spec_for=None,
+                max_concurrent_positions=max_concurrent,
+                max_lots_per_underlying=max_lots,
+                margin_cap_pct=margin_cap_pct,
+            ),
+            simulator=FillSimulator(
+                spread=FixedTickSpread(spread_ticks),
+                slippage=TickSlippage(market_ticks=0, stop_ticks=2),
+                charges=McxChargeModel.default(),
+            ),
+            portfolio=Portfolio(starting_equity),
+            instrument=instrument,
+            timeframe=tf,
+            is_option=False,
+            kill_switch=kill_switch,
+            margin=margin,
+            state=store,
+            mode=mode,
+            broker="backtest",
+            stop_viability_threshold=stop_viability,
+            on_stop_viability_breach=on_breach,
+        )
+        result = engine.run()
+    finally:
+        if store is not None:
+            store.close()
 
     typer.echo(f"strategy      {strategy}")
     typer.echo(f"market        {'flat (cost isolation)' if flat else 'seeded random walk'}")

@@ -138,6 +138,18 @@ cycles still beats precision over none.
 
 Two processes. The API reads a state file the engine writes; it never holds the engine.
 
+Feed that file from a backtest:
+
+```bash
+.venv/Scripts/algo.exe backtest --config config/goldm.yaml --state state/dashboard.db
+```
+
+The engine streams equity, positions, signals, notes, completed trades and health into
+`state/dashboard.db` after every bar, and reads halt requests back out of it — a halt
+recorded while a run is going trips the kill switch at the engine's next bar, and the
+request can ask for an explicit flatten alongside it. Without `--state` the engine is
+exactly what it was before; the wiring is invisible when unused.
+
 ```bash
 ALGO_API_TOKEN=pick-a-secret .venv/Scripts/algo.exe serve
 ```

@@ -825,6 +825,21 @@ see. Fifteen real lint errors surfaced the moment the ignore was corrected. The
 lesson generalises past this bug: a check that silently covers less than you think is
 worse than no check, because it also removes the suspicion that would find the gap.
 
+### D-088 - The dashboard is fed by the engine, opt-in, through one state file
+`algo backtest --state state/dashboard.db` attaches a `StateStore` to the engine.
+The engine writes equity, positions, signals, notes, completed trades and health
+after each bar, and consumes halt requests recorded in the same file at its next
+bar. Without `--state` the engine behaves exactly as before - the wiring is
+invisible when unused, and a test proves that attaching a store changes nothing
+about the result a run produces.
+**Why:** the dashboard had to be able to show the state of a *run*, and the only
+honest source of that state is the engine that produces it. Recording it in the
+same file the API already reads keeps one source of truth instead of two. The
+kill-switch direction (dashboard -> engine) stays narrow: a halt is a request the
+engine chooses to honour on the next bar, never a mutation of running state (the
+same reasoning as D-064/D-065), and the flatten that accompanies a requested halt
+is an explicit part of the request, not something the engine invents.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting

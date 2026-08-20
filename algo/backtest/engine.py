@@ -32,7 +32,7 @@ The portfolio identity is re-checked after every fill and every mark.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -52,11 +52,12 @@ from algo.exchange.calendar import MarketCalendar
 from algo.exchange.expiries import ExpiryCalendar, ExpirySet
 from algo.exchange.specs import ContractSpecStore
 from algo.execution.fills import FillSimulator
+from algo.persistence.state import EquityRow, PositionRow, SignalRow, StateStore
 from algo.portfolio.book import EquityPoint, Portfolio
 from algo.portfolio.trades import TradeBuilder
 from algo.risk.devolvement import DevolvementGuard
 from algo.risk.engine import Accepted, Rejected, RiskEngine, RiskSnapshot
-from algo.risk.exits import ExitLevels, ExitReason, resolve_levels
+from algo.risk.exits import ExitLevels, ExitReason, check_viability, resolve_levels
 from algo.risk.killswitch import KillSwitch
 from algo.strategy.base import Strategy
 from algo.strategy.context import BarContext, ChainProvider, PositionView, build_session_info
@@ -138,6 +139,7 @@ class BacktestEngine:
     __slots__ = (
         "_bar_counts",
         "_bars",
+        "_broker",
         "_calendar",
         "_chain_provider",
         "_config_hash",
@@ -145,11 +147,14 @@ class BacktestEngine:
         "_entry_credit",
         "_exchange",
         "_expiries",
+        "_flatten_requested",
         "_instrument",
         "_is_option",
         "_kill_switch",
         "_levels",
         "_margin",
+        "_mode",
+        "_on_stop_viability_breach",
         "_pending_exit_reason",
         "_portfolio",
         "_prices",
@@ -157,6 +162,8 @@ class BacktestEngine:
         "_signal_meta",
         "_sim",
         "_specs",
+        "_state",
+        "_stop_viability_threshold",
         "_strategy",
         "_timeframe",
         "_trade_builder",
@@ -183,6 +190,11 @@ class BacktestEngine:
         devolvement: DevolvementGuard | None = None,
         kill_switch: KillSwitch | None = None,
         margin: MarginModel | None = None,
+        state: StateStore | None = None,
+        mode: str = "backtest",
+        broker: str = "backtest",
+        stop_viability_threshold: Decimal | None = None,
+        on_stop_viability_breach: str = "warn",
     ) -> None:
         if not bars:
             raise DomainError("cannot run a backtest with no bars")
@@ -204,8 +216,14 @@ class BacktestEngine:
         self._devolvement = devolvement
         self._kill_switch = kill_switch
         self._margin = margin
+        self._state = state
+        self._mode = mode
+        self._broker = broker
+        self._stop_viability_threshold = stop_viability_threshold
+        self._on_stop_viability_breach = on_stop_viability_breach
         self._levels: ExitLevels | None = None
         self._entry_credit = Decimal("0")
+        self._flatten_requested = False
         self._bar_counts: dict[date, int] = {}
         self._trade_builder = TradeBuilder(strategy.strategy_id)
         self._signal_meta: dict[str, tuple[str, dict[str, str]]] = {}
@@ -222,10 +240,15 @@ class BacktestEngine:
         round_trips = 0
         spread_cost = Decimal("0")
         session_started: set[date] = set()
+        self._begin_health()
 
         for index, bar in enumerate(self._bars):
             session_day = ist_date(bar.ts)
             was_open = not self._portfolio.is_flat
+
+            # ---- 0. the dashboard's halt requests act on the next bar
+            if self._state is not None and self._kill_switch is not None:
+                self._consume_kill_switch_requests(bar.ts)
 
             # ---- 1. orders queued on the previous bar transact against this one
             bar_fills: list[Fill] = []
@@ -242,14 +265,14 @@ class BacktestEngine:
                 # Checked per fill, not per bar: a close and a re-open landing on
                 # the same bar are two trades, and grouping them would report one.
                 if self._portfolio.is_flat and self._trade_builder.is_open:
-                    trades.append(
-                        self._trade_builder.close(
-                            at=bar.ts,
-                            realised_now=self._portfolio.realised_pnl,
-                            exit_reason=self._pending_exit_reason or "strategy close",
-                        )
+                    trade = self._trade_builder.close(
+                        at=bar.ts,
+                        realised_now=self._portfolio.realised_pnl,
+                        exit_reason=self._pending_exit_reason or "strategy close",
                     )
+                    trades.append(trade)
                     round_trips += 1
+                    self._record_trade(trade)
                     self._pending_exit_reason = ""
                     self._levels = None
                     self._entry_credit = Decimal("0")
@@ -279,13 +302,18 @@ class BacktestEngine:
             self._portfolio.record(bar.ts, marks)
             if self._kill_switch is not None:
                 self._kill_switch.observe_equity(self._portfolio.equity(marks), bar.ts)
+            self._record_bar_state(bar, marks)
 
             # ---- 4. the strategy sees bars [0..i] and nothing else
             signals = self._ask_strategy(bar, index, session_day)
+            strategy_notes = self._strategy.drain_notes()
             notes.extend(
                 Note(ts_iso=iso(bar.ts), message=message)
-                for message in self._strategy.drain_notes()
+                for message in strategy_notes
             )
+            if self._state is not None:
+                for message in strategy_notes:
+                    self._state.record_note(bar.ts, message)
 
             if index == len(self._bars) - 1:
                 # Nothing can execute after the last bar; queuing would silently
@@ -381,6 +409,77 @@ class BacktestEngine:
             equity=self._portfolio.equity(self._marks(bar)),
             credit=credit,
         )
+        self._check_stop_viability(entry_fills, session_day)
+
+    def _check_stop_viability(self, entry_fills: list[Fill], session_day: date) -> None:
+        """D-024: a position that opens at its own stop is not a strategy.
+
+        The stop was just frozen at entry; this compares it against what a round
+        trip in these legs costs. `warn` records a note the dashboard shows;
+        `refuse` fails the run, because the fills have already executed and the
+        only honest form of refusal left is to stop.
+        """
+        if self._levels is None or self._stop_viability_threshold is None:
+            return
+        cost = Decimal("0")
+        for fill in entry_fills:
+            spec = self._spec_for(fill.instrument, session_day)
+            spread, charges = self._sim.predicted_round_trip_cost(
+                price=fill.price,
+                lots=abs(fill.lots),
+                spec=spec,
+                is_option=True,
+                on=session_day,
+            )
+            cost += spread + charges.total
+        check = check_viability(
+            stop=self._levels.stop_loss,
+            round_trip_cost=cost,
+            threshold=self._stop_viability_threshold,
+        )
+        if check.passes:
+            return
+        message = check.message()
+        if self._on_stop_viability_breach == "refuse":
+            raise DomainError(
+                f"refusing to continue: {message} (on_stop_viability_breach=refuse)"
+            )
+        self._strategy.note(f"stop viability: {message}")
+
+    def _book_margin(self, session_day: date, marks: dict[str, Decimal]) -> Decimal:
+        """Margin currently blocked, on the same combo basis as _open_levels."""
+        if self._margin is None:
+            return Decimal("0")
+        notional = Decimal("0")
+        lots = 1
+        for position in self._portfolio.open_positions():
+            notional += abs(position.qty) * marks[position.instrument.key] * position.multiplier
+            lots = max(lots, abs(position.lots))
+        return self._margin.margin_for(
+            notional=notional,
+            lots=lots,
+            is_short_option=any(
+                isinstance(position.instrument, OptionId)
+                for position in self._portfolio.open_positions()
+            ),
+        )
+
+    def _proposed_margin(
+        self, signal: Signal, lots: int, session_day: date, bar: Bar
+    ) -> Decimal:
+        """What this signal would block, sized to `lots`. Zero without a model."""
+        if self._margin is None:
+            return Decimal("0")
+        notional = Decimal("0")
+        for leg in signal.legs:
+            price = self._prices.fill_reference(leg.instrument.key, bar.ts) or bar.close
+            spec = self._spec_for(leg.instrument, session_day)
+            notional += price * Decimal(lots * leg.ratio) * spec.multiplier
+        return self._margin.margin_for(
+            notional=notional,
+            lots=max(lots, 1),
+            is_short_option=any(isinstance(leg.instrument, OptionId) for leg in signal.legs),
+        )
 
     def _begin_trade(self, order: Order, bar: Bar) -> None:
         reason, context = self._signal_meta.get(
@@ -404,6 +503,12 @@ class BacktestEngine:
 
         reason: ExitReason | None = None
         detail = ""
+
+        if self._flatten_requested:
+            # The halt arrived with flatten explicitly requested (D-012): halting
+            # alone stops new orders; flattening is the caller's decision.
+            reason = ExitReason.KILL_SWITCH
+            detail = "flatten requested with the halt"
 
         cycle = self._current_cycle()
         if self._devolvement is not None and cycle is not None:
@@ -524,22 +629,27 @@ class BacktestEngine:
         equity = self._portfolio.equity(marks)
         open_count = len(self._portfolio.open_positions())
         lots_held = abs(position.lots) if position else 0
+        margin_used = self._book_margin(session_day, marks)
 
         queued: list[Order] = []
         for signal in signals:
             blocked = self._pre_trade_block(signal, session_day)
             if blocked is not None:
-                rejections.append(
-                    Rejection(
-                        ts_iso=iso(bar.ts),
-                        signal_id=signal.signal_id,
-                        reason=blocked[0],
-                        detail=blocked[1],
-                    )
+                rejection = Rejection(
+                    ts_iso=iso(bar.ts),
+                    signal_id=signal.signal_id,
+                    reason=blocked[0],
+                    detail=blocked[1],
                 )
+                rejections.append(rejection)
+                self._record_rejection(bar, rejection)
                 continue
 
             is_closing = signal.action is SignalAction.CLOSE
+
+            def _propose(sized: int, signal: Signal = signal) -> Decimal:
+                return self._proposed_margin(signal, sized, session_day, bar)
+
             decision = self._risk.evaluate(
                 signal,
                 RiskSnapshot(
@@ -548,21 +658,34 @@ class BacktestEngine:
                     equity=equity,
                     open_position_count=0 if is_closing else open_count,
                     lots_held=0 if is_closing else lots_held,
+                    margin_used=Decimal("0") if is_closing else margin_used,
+                    propose_margin=None if is_closing else _propose,
                 ),
                 spec=self._spec_for(signal.legs[0].instrument, session_day),
             )
             if isinstance(decision, Rejected):
-                rejections.append(
-                    Rejection(
-                        ts_iso=iso(bar.ts),
-                        signal_id=signal.signal_id,
-                        reason=decision.reason,
-                        detail=decision.detail,
-                    )
+                rejection = Rejection(
+                    ts_iso=iso(bar.ts),
+                    signal_id=signal.signal_id,
+                    reason=decision.reason,
+                    detail=decision.detail,
                 )
+                rejections.append(rejection)
+                self._record_rejection(bar, rejection)
                 continue
             if isinstance(decision, Accepted):
                 self._signal_meta[signal.signal_id] = (signal.reason, dict(signal.context))
+                if self._state is not None:
+                    self._state.record_signal(
+                        SignalRow(
+                            signal_id=signal.signal_id,
+                            ts=signal.ts,
+                            strategy=signal.strategy_id,
+                            action=signal.action.value,
+                            reason=signal.reason,
+                            context=dict(signal.context),
+                        )
+                    )
                 queued.extend(decision.orders)
         return queued
 
@@ -616,6 +739,7 @@ class BacktestEngine:
         # Counting it as one would put an unrealised figure into a realised
         # statistic; the open position is reported separately instead.
         self._trade_builder.abandon()
+        self._end_health()
         last = self._bars[-1]
         final_marks = {
             position.instrument.key: require_mark(self._prices, position.instrument.key, last.ts)
@@ -671,6 +795,115 @@ class BacktestEngine:
                 self._kill_switch.is_tripped if self._kill_switch is not None else False
             ),
             warnings=tuple(warnings),
+        )
+
+    # --------------------------------------------------- dashboard state (opt-in)
+    def _begin_health(self) -> None:
+        """Stamp what this run is before the first bar (D-088)."""
+        if self._state is None:
+            return
+        at = self._bars[0].ts
+        self._state.set_health("engine", "running", at=at)
+        self._state.set_health("mode", self._mode, at=at)
+        self._state.set_health("broker", self._broker, at=at)
+        self._state.set_health(
+            "kill_switch",
+            "tripped"
+            if self._kill_switch is not None and self._kill_switch.is_tripped
+            else "armed",
+            at=at,
+        )
+
+    def _end_health(self) -> None:
+        """The API turns these flags into warnings; they must reflect the run."""
+        if self._state is None:
+            return
+        at = self._bars[-1].ts
+        self._state.set_health("engine", "stopped", at=at)
+        self._state.set_health(
+            "costs_verified", "true" if self._sim.costs_verified else "false", at=at
+        )
+        self._state.set_health(
+            "spread_measured", "true" if self._sim.spread_measured else "false", at=at
+        )
+        self._state.set_health(
+            "margin_calibrated",
+            "true" if self._margin is None or self._margin.is_calibrated else "false",
+            at=at,
+        )
+
+    def _consume_kill_switch_requests(self, at: datetime) -> None:
+        """Act on halt requests the dashboard or CLI recorded (D-066, D-088).
+
+        The request is a request: the engine trips its own switch here, at its
+        own bar, and marks the request acted. A request is acted on at the first
+        bar at or after it was recorded, so one recorded mid-session does not
+        cut short the session before it existed. A flatten request queues closes
+        the way any other risk exit does — the halt takes effect immediately, the
+        flatten fills on the next bar, exactly like a stop.
+        """
+        if self._state is None or self._kill_switch is None:
+            return
+        for request in self._state.pending_kill_switch_requests():
+            if request.requested_at > at:
+                continue
+            if not self._kill_switch.is_tripped:
+                self._kill_switch.trip_manually(
+                    f"requested by {request.requested_by}: {request.reason}", at
+                )
+                if request.flatten:
+                    self._flatten_requested = True
+            self._state.mark_kill_switch_acted(request.id, at=at)
+
+    def _record_bar_state(self, bar: Bar, marks: dict[str, Decimal]) -> None:
+        """One equity point and one positions snapshot per bar."""
+        if self._state is None:
+            return
+        point = self._portfolio.curve[-1]
+        self._state.record_equity(
+            EquityRow(
+                ts=point.ts,
+                equity=point.equity,
+                cash=point.cash,
+                realised=point.realised_pnl,
+                unrealised=point.unrealised_pnl,
+                charges=point.charges,
+                open_positions=point.open_positions,
+            )
+        )
+        rows = [
+            PositionRow(
+                instrument_key=position.instrument.key,
+                lots=position.lots,
+                qty=position.qty,
+                average_price=position.average_price,
+                mark=marks[position.instrument.key],
+                unrealised=position.unrealised_pnl(marks[position.instrument.key]),
+                updated_at=bar.ts,
+            )
+            for position in self._portfolio.open_positions()
+        ]
+        self._state.replace_positions(rows)
+        if self._kill_switch is not None:
+            self._state.set_health(
+                "kill_switch",
+                "tripped" if self._kill_switch.is_tripped else "armed",
+                at=bar.ts,
+            )
+
+    def _record_trade(self, trade: Trade) -> None:
+        if self._state is None:
+            return
+        self._state.record_trade(
+            trade.trade_id, trade.opened_at, trade.closed_at, trade.to_log_row()
+        )
+
+    def _record_rejection(self, bar: Bar, rejection: Rejection) -> None:
+        if self._state is None:
+            return
+        self._state.record_note(
+            bar.ts,
+            f"rejected {rejection.signal_id}: {rejection.reason} - {rejection.detail}",
         )
 
 
