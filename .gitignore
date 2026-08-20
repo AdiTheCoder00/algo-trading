@@ -14,6 +14,10 @@ state/
 *.db
 *.db-wal
 *.db-shm
+report.html
+tearsheet-sample.html
+trades.csv
+dashboard/public-tearsheet.html
 
 # Python
 .venv/
