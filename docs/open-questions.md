@@ -103,6 +103,13 @@ That gap is the entire margin for error between "we got assigned" and "we owe so
 gold". Please read the underlying contract off the chain, or tell me the GOLDM futures expiry
 dates your terminal lists.
 
+**Partly routable now.** `build_snapshots(..., resolve_underlying=...)` in the bhavcopy
+loader takes this mapping as an injected function; its default pairs an option expiry with
+the earliest futures contract expiring on or after it. That default is a documented
+heuristic, and it is the thing this question exists to replace with fact (D-084). The
+devolvement rules still need the real answer - a heuristic is fine for grouping a backtest
+and is not fine for deciding whether you owe someone 100 g of gold.
+
 ### Q1d `[BLOCKING M4]` Scroll the chain to 153000 and 160500 — are they quoted?
 From your screenshot (σ ≈ 21.6%, 9 DTE, F = ₹1,56,640) the **0.25-delta strikes are ≈ 160,500
 call and ≈ 153,000 put** — outside the 155000–159000 window shown. The furthest visible strike,
@@ -118,6 +125,16 @@ executed at 0.25 delta on GOLDM, and the real choices become: a nearer delta (0.
 the book clearly supports), or **GOLD (1 kg) options** where depth is better at 10× notional
 per lot. That is a decision worth making now rather than after the recorder confirms it in
 three months.
+
+**Now answerable from evidence rather than a screenshot.** The MCX bhavcopy carries volume
+and open interest per strike for every expired cycle back to 2016. `algo bhavcopy <dir>`
+reports what share of the ladder actually traded, and a strike that was listed but never
+traded is reported as untradeable rather than given a synthetic book (D-083). One
+downloaded file plus a few years of archive answers "is 0.25 delta reachable on GOLDM"
+across roughly a hundred cycles instead of one afternoon. That does not replace the
+question - the bhavcopy has no bid/ask, so it can show a strike traded without showing
+what the spread was - but "it never trades at all" and "it trades every day" are both
+things it can settle outright.
 
 ### Q2 `[BLOCKING M4]` Which expiry do you sell, and at what DTE?
 Nearest option expiry, or skip to the next? What DTE window is acceptable at entry?

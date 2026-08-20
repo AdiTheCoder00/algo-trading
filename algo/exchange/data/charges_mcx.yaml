@@ -1,0 +1,50 @@
+# MCX charge rates.
+#
+# ############################################################################
+# #  PLACEHOLDER VALUES.  `verified: false`.                                  #
+# #                                                                           #
+# #  Every number below came from secondary sources while planning, not from  #
+# #  a contract note. They are here so the engine can run and so the shape    #
+# #  of the model can be tested — not so anyone can trust a net P&L figure.   #
+# #                                                                           #
+# #  Decision D-011: these are replaced by rates reverse-engineered from a    #
+# #  real Angel One MCX options contract note, locked by a test that          #
+# #  reproduces that note to the paisa. Until then `verified` stays false,    #
+# #  every report carries the flag, and the live path refuses to use them.    #
+# #                                                                           #
+# #  See docs/open-questions.md Q6.                                           #
+# ############################################################################
+#
+# Notes on the bases, which differ and are easy to conflate:
+#   * For OPTIONS every percentage applies to PREMIUM turnover — what actually
+#     changed hands — not to the notional the contract controls. Applying an
+#     option rate to notional overstates costs by roughly a hundredfold.
+#   * CTT is charged on the SELL side only, and the option writer pays it. For a
+#     strategy whose every entry is a sale that is a cost on every trade.
+#   * Stamp duty is charged on the BUY side only.
+#   * GST applies to brokerage + exchange transaction charge + SEBI fee. It does
+#     not apply to CTT or stamp duty.
+
+rates:
+  - verified: false
+    effective_from: "2026-01-01"
+    effective_to: null
+    source: >-
+      PLACEHOLDER. Assembled from secondary sources (broker calculators and
+      published fee summaries) during Milestone 0 planning, not from a contract
+      note. Not to be trusted to the paisa. Replace per D-011 / Q6.
+
+    brokerage_per_order: "20"
+    brokerage_pct_of_turnover: "0"
+    sebi_pct: "0.0001" # approx Rs 10 per crore of turnover
+    gst_pct: "18"
+
+    option:
+      ctt_sell_pct: "0.05" # on premium, sell side, paid by the writer
+      exchange_txn_pct: "0.0418" # UNVERIFIED - MCX options rate differs from futures
+      stamp_duty_buy_pct: "0.003"
+
+    future:
+      ctt_sell_pct: "0.01" # on notional, sell side, non-agri
+      exchange_txn_pct: "0.0026" # approx Rs 260 per crore, non-agri
+      stamp_duty_buy_pct: "0.002"

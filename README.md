@@ -78,6 +78,62 @@ recording it:
 .venv/Scripts/algo.exe walkforward
 ```
 
+## Historical option data
+
+There are two historical sources, deliberately kept apart.
+
+**SmartAPI** serves GOLDM *futures* bars at 30 minutes. It cannot serve options that
+have already expired - Angel One state that data of expired contracts is not stored,
+and an expired contract has no `symboltoken` to request history with. That rules out
+every option cycle worth backtesting.
+
+**The MCX bhavcopy** is the daily contract-wise file: open, high, low, close, volume
+and open interest for every contract that traded, **including expired ones**, back to
+2016 through third-party archives. About a hundred monthly GOLDM cycles are available
+today rather than after two and a half years of recording.
+
+Download a day's file from [mcxindia.com](https://www.mcxindia.com/market-data/bhavcopy)
+and check it before trusting anything built on it:
+
+```bash
+.venv/Scripts/algo.exe bhavcopy path/to/bhavcopy.csv
+```
+
+That either parses cleanly and reports coverage, or prints the columns your file
+actually has next to the ones the loader expected. **The column mapping is an
+unverified assumption** - MCX serves the file through a browser flow behind bot
+protection, so no sample could be fetched to confirm the headers. Correcting it means
+passing a `BhavcopyColumns`, not editing the parser.
+
+Coverage matters as much as the schema:
+
+```
+GOLDM: 78 option rows over 3 sessions
+  span     2026-08-18 .. 2026-08-20
+  cycles   1 expiries
+  traded   60 rows had volume (76.9% of the ladder)
+  breadth  20.0 strikes traded per session on average
+```
+
+A hundred cycles of history is only worth having if the strikes the strategy wants
+were changing hands. That last figure is the honest answer, and it is also how
+question **Q1d** - are the 0.25-delta strikes actually two-sided quoted - gets
+answered from years of evidence instead of one screenshot.
+
+What this data cannot do, stated here rather than in a footnote, because every number
+derived from it inherits these:
+
+- **It is daily.** There is no 09:30 bar. Entry at the 09:30 close has to be proxied
+  by the day's open, which approximates the strategy rather than running it.
+- **There is no bid or ask.** The spread stays an assumption, and on a thin GOLDM
+  option book the spread *is* the dominant cost. Only the recorder settles that.
+- **Stops can only be judged against the daily high and low**, which is pessimistic
+  and consistent with §6, but coarse.
+
+So a bhavcopy backtest answers "has this shape ever worked, across many real cycles".
+It does not answer "what would I actually have been filled at". Shape over a hundred
+cycles still beats precision over none.
+
 ## The dashboard
 
 Two processes. The API reads a state file the engine writes; it never holds the engine.

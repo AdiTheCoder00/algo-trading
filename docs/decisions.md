@@ -748,6 +748,83 @@ Beyond ruff, mypy and pytest, the workflow greps for wall-clock reads outside
 guidance; enforced in CI they are constraints. The dashboard job runs `tsc`,
 `next build` and `npm audit` for the same reason.
 
+### D-081 - Bhavcopy is a second historical feed, not a replacement for the recorder
+MCX's daily contract-wise file is loaded alongside SmartAPI rather than folded into
+it. SmartAPI serves GOLDM *futures* bars; Angel One state plainly that "data of
+expired contracts is not stored", so it can never serve an option cycle that has
+already settled - which is every cycle worth testing. The bhavcopy covers expired
+contracts back to 2016.
+**Why:** the two feeds have different granularity and different caveats, and folding
+them together would let a daily number be mistaken for a 30-minute one. Keeping
+them apart means every result carries the provenance of the data behind it. This
+turns "wait two and a half years for the recorder" into "about a hundred monthly
+cycles, today" - but a bhavcopy backtest is a **shape test**, not a fill-accurate
+one, and is labelled as such wherever it is reported.
+
+### D-082 - The bhavcopy column mapping is declared data, and unverified
+`MCX_DEFAULT_COLUMNS` is a `BhavcopyColumns` model, not names hardcoded in the
+parser. `parse_rows` validates the header on load and, on a mismatch, raises with
+the columns the file actually has beside the ones it wanted.
+**Why:** MCX serves the file through a browser flow behind Akamai bot protection.
+Three attempts to fetch a sample were refused with 403, so the mapping is a stated
+assumption and is documented as one. At M0 the rule was set that "a loader written
+against an invented schema is a week of wasted work" - the compromise that honours
+it is a loader that cannot silently mis-parse: correcting the mapping against a real
+file is a config change, and `algo bhavcopy <file>` exists to make that check the
+first thing anyone does.
+
+### D-083 - Assuming a spread on end-of-day data is an explicit, separate function
+A bhavcopy chain has no bid or ask, so no row passes the engine's tradeability test -
+correct, and it would otherwise mean no backtest could run at all. `assume_spread()`
+synthesises a book, and it is a call site you can see rather than a flag. Rows with
+zero volume get no book at all.
+**Why:** the alternative was loosening `is_tradeable`, and that rule protects the
+live path. Inventing data is sometimes necessary; doing it invisibly is not. The
+zero-volume rule matters more than the spread itself: a strike that was listed but
+never traded is the most valuable thing this dataset says about a thin ladder, and
+handing it a synthetic book would erase exactly that signal.
+
+### D-084 - A chain with no futures close for that session is dropped, not patched
+Options are priced off the future. If the file has no FUTCOM row for a trade date,
+`build_snapshots` skips the whole chain rather than carrying the previous day's
+forward or interpolating one.
+**Why:** every delta in the snapshot is computed against that number, so a
+substituted forward would not produce a slightly wrong 0.25-delta strike - it would
+produce a confident one. Missing data should be absent, not approximated. The same
+reasoning as the look-ahead firewall: the wrong number is worse than no number.
+
+### D-085 - Bhavcopy snapshots are stamped at the session close
+Not midnight. These are closing prices, so the snapshot timestamp is 23:30 IST
+(or 23:55 outside US daylight saving) on the trade date.
+**Why:** dating a closing price to 00:00 would place the entire chain *before* the
+session that produced it, which is a look-ahead the firewall cannot catch because
+the timestamps would be internally consistent.
+
+### D-086 - CLI output stays ASCII
+Typer prints command docstrings as `--help` text. On this machine the console is
+cp1252, which rendered every em dash in the CLI as a replacement character and would
+raise `UnicodeEncodeError` on a rupee sign. `algo/cli/main.py` is now ASCII and CI
+greps to keep it that way. Prose in docs and non-CLI modules keeps its typography.
+**Why:** the alternative - reconfiguring the console code page at startup - leaks
+into the user's shell after the process exits and can break other programs in that
+window. The failure showed up on the error path, which is the last place that can
+afford to be unreadable or to crash.
+
+### D-087 - Directory ignores are anchored to the repository root
+`.gitignore` had bare `data/`, `runs/`, `state/` and `logs/`. A bare directory pattern
+matches at *every* level, so those four lines were silently excluding real source:
+the whole of `algo/data/` (twelve modules, including both broker feeds, the resampler
+and the validator), `algo/exchange/data/` (the GOLDM contract spec and the MCX charge
+rates), and `dashboard/app/api/state/` (the proxy that keeps the API token out of the
+browser). Nothing in those paths had ever been committed. They are now `/data/`,
+`/runs/`, `/state/`, `/logs/`, which is what was meant.
+**Why:** a clone of this repository would not have imported. The pattern also hid the
+data layer from `ruff`, which respects `.gitignore` by default - `ruff check .` had
+been passing without ever reading those files, so CI was green over code it could not
+see. Fifteen real lint errors surfaced the moment the ignore was corrected. The
+lesson generalises past this bug: a check that silently covers less than you think is
+worse than no check, because it also removes the suspicion that would find the gap.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting

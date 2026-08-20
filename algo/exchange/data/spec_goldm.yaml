@@ -1,0 +1,38 @@
+# MCX GOLDM (Gold Mini) contract specification.
+#
+# Decision D-010: every entry carries effective_from and a source. A number
+# without a date and a citation is an unfalsifiable claim and does not belong in
+# a system that moves money.
+#
+# STATUS OF THESE VALUES
+#   tick_size, strike_interval, multiplier  -> observed directly from the live
+#       Angel One GOLDM option chain on 2026-08-19 (expiry 28 Aug 2026, underlying
+#       Rs 1,56,640). All quoted premiums landed on .00 / .50, and the strike
+#       ladder stepped in 500s.
+#   lot_size, max_order_qty_lots, dpr_pct   -> NOT YET VERIFIED. They must be read
+#       from the MCX contract specification before any live use. `dpr_pct` is left
+#       null rather than guessed, so the fill simulator will refuse to model a
+#       circuit rather than model it wrongly.
+#
+# Reminder on units: GOLDM trades 100 g and is quoted in rupees per 10 g, so one
+# point of quoted price is worth 10 rupees per lot. lot_size and multiplier are
+# numerically similar here by coincidence and must not be conflated.
+
+specs:
+  - underlying: GOLDM
+    exchange: MCX
+    lot_size: "100"           # grams
+    multiplier: "10"          # rupees per point of quoted price, per lot
+    tick_size: "0.50"
+    strike_interval: "500"
+    max_order_qty_lots: null  # UNVERIFIED - exchange per-order cap
+    min_lots: 1
+    max_lots: null
+    dpr_pct: null             # UNVERIFIED - daily price range / circuit
+    effective_from: "2026-01-01"
+    effective_to: null
+    source: >-
+      Tick size, strike interval and price-quotation basis observed from the live
+      Angel One GOLDM option chain, 2026-08-19 (28 Aug 2026 expiry). Lot size,
+      per-order quantity cap and DPR pending confirmation from the MCX contract
+      specification document. See docs/open-questions.md Q1c.

@@ -64,6 +64,18 @@ jobs:
             exit 1
           fi
 
+      # Typer prints command docstrings as --help text, and Windows consoles
+      # default to a legacy code page - an em dash there renders as a
+      # replacement character and a rupee sign would raise. The CLI is a
+      # terminal surface, so it stays ASCII. Prose elsewhere keeps its
+      # typography.
+      - name: CLI output is ASCII
+        run: |
+          if LC_ALL=C grep -n "[^[:print:][:space:]]" algo/cli/main.py; then
+            echo "::error::non-ASCII in algo/cli/main.py mangles on a cp1252 console"
+            exit 1
+          fi
+
   dashboard:
     name: dashboard
     runs-on: ubuntu-latest

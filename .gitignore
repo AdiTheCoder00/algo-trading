@@ -6,10 +6,10 @@
 *.key
 
 # Data and run artefacts
-data/
-runs/
-state/
-logs/
+/data/
+/runs/
+/state/
+/logs/
 *.parquet
 *.duckdb
 *.db

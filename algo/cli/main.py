@@ -114,7 +114,7 @@ def backtest(
 
     This is not a strategy result and does not pretend to be one. It runs the two
     reference strategies over generated data to show that the engine's cost
-    arithmetic behaves — buy-and-hold tracking the instrument, and a coin flip on
+    arithmetic behaves - buy-and-hold tracking the instrument, and a coin flip on
     a flat market losing exactly its costs and nothing else.
     """
     from decimal import Decimal
@@ -229,9 +229,9 @@ def live(
 ) -> None:
     """Connect to Kotak Neo (live broker) + Angel SmartAPI (candles), and report.
 
-    The Milestone 7 wiring drill: it proves the live path end to end —
+    The Milestone 7 wiring drill: it proves the live path end to end -
     both credential sets, both instrument masters, both sessions, order ledger,
-    reconciliation — without placing an order. A live session never runs
+    reconciliation - without placing an order. A live session never runs
     without --i-understand-this-is-real-money, whatever the config says.
     """
     from algo.core.clock import SystemClock
@@ -500,7 +500,7 @@ def serve(
 
     if not os.environ.get(TOKEN_ENV):
         raise typer.BadParameter(
-            f"{TOKEN_ENV} is not set. The API will not start without it — the "
+            f"{TOKEN_ENV} is not set. The API will not start without it - the "
             "kill-switch endpoint is not something to serve unauthenticated."
         )
     if host not in ("127.0.0.1", "localhost") :
@@ -521,7 +521,7 @@ def kill_switch(
     reason: str = typer.Option("", help="Why. Required with --trip"),
     flatten: bool = typer.Option(False, help="Also close open positions"),
 ) -> None:
-    """Inspect, request, or clear the trading halt. Brief §2.2.
+    """Inspect, request, or clear the trading halt. Brief section 2.2.
 
     With no flags it reports. `--trip` records a halt request the engine acts on at
     its next bar. `--reset` clears one.
@@ -556,7 +556,7 @@ def kill_switch(
                 requested_by="cli", reason=reason.strip(), flatten=flatten, at=clock.now()
             )
             typer.echo(f"halt requested (id {request_id}).")
-            typer.echo("The engine acts on this at its next bar — it is not halted yet.")
+            typer.echo("The engine acts on this at its next bar - it is not halted yet.")
             return
 
         if reset:
@@ -592,9 +592,9 @@ def kill_switch(
 
 @app.command("credentials")
 def credentials() -> None:
-    """Report which broker credentials are loaded — without printing any of them.
+    """Report which broker credentials are loaded - without printing any of them.
 
-    Brief §2.7. This shows presence and length only, which is enough to diagnose a
+    Brief section 2.7. This shows presence and length only, which is enough to diagnose a
     truncated key or a stray newline and reveals nothing useful to anyone else. A
     trading system's output gets pasted into chat windows and issue trackers, so
     the safest secret is one that was never rendered.
@@ -620,7 +620,7 @@ def credentials() -> None:
             typer.echo(f"  {prefix}_{name:<28} {mark:<8} {detail}")
 
     smart = smart_credentials_from_env()
-    typer.echo("SmartAPI (historical bars — from .env or the environment):")
+    typer.echo("SmartAPI (historical bars - from .env or the environment):")
     status(
         "ALGO_SMARTAPI",
         ["API_KEY", "CLIENT_ID", "PASSWORD", "TOTP_SEED"],
@@ -633,7 +633,7 @@ def credentials() -> None:
 
     typer.echo("")
     kotak = kotak_credentials_from_env()
-    typer.echo("Kotak Neo (live broker — from .env or the environment):")
+    typer.echo("Kotak Neo (live broker - from .env or the environment):")
     status(
         "ALGO_KOTAK",
         ["CONSUMER_KEY", "MOBILE_NUMBER", "UCC", "TOTP_SEED", "MPIN", "MARKET_DATA_KEY"],
@@ -644,7 +644,7 @@ def credentials() -> None:
     else:
         typer.echo("  MISSING: " + ", ".join(kotak.missing()))
         typer.echo("  Copy .env.example to .env and fill it in. An API key alone")
-        typer.echo("  authenticates nothing — login needs the client code, the MPIN")
+        typer.echo("  authenticates nothing - login needs the client code, the MPIN")
         typer.echo("  and the TOTP secret as well.")
 
     typer.echo("")
@@ -653,6 +653,89 @@ def credentials() -> None:
         typer.echo(f"  {TOKEN_ENV:<26} set      {len(token)} chars")
     else:
         typer.echo(f"  {TOKEN_ENV:<26} MISSING  (the monitoring API will not start)")
+
+
+@app.command("bhavcopy")
+def inspect_bhavcopy(
+    path: Path = typer.Argument(..., help="A bhavcopy CSV, or a directory of them."),
+    symbol: str = typer.Option("GOLDM", help="Which underlying to report on."),
+    expiry: str | None = typer.Option(
+        None, help="Print one cycle's chain, as YYYY-MM-DD."
+    ),
+) -> None:
+    """Check a downloaded MCX bhavcopy against the expected layout, and report coverage.
+
+    Run this first on a real file. The column mapping in the loader is a stated
+    assumption - MCX serves the file through a browser flow behind bot protection,
+    so no sample could be fetched to confirm the headers. This command either
+    parses cleanly or prints the columns the file actually has next to the ones
+    the loader wanted, which makes correcting it a config change.
+
+    Coverage matters as much as the schema. A hundred cycles of history is only
+    worth having if the strikes the strategy wants were changing hands, and the
+    percentage of the ladder that traded is the honest answer to that.
+    """
+    from algo.core.errors import DataError
+    from algo.data.bhavcopy import (
+        BhavcopyChainFeed,
+        build_snapshots,
+        coverage,
+        load_directory,
+        parse_rows,
+    )
+
+    try:
+        if path.is_dir():
+            rows = load_directory(path, symbol=symbol)
+            typer.echo(f"read {len(sorted(path.glob('*.csv')))} files from {path}")
+        else:
+            rows = parse_rows(path, symbols=frozenset({symbol}))
+            typer.echo(f"read {path}")
+    except DataError as exc:
+        typer.echo("")
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    typer.echo("")
+    typer.echo(coverage(rows, symbol=symbol))
+
+    snapshots = build_snapshots(rows, symbol=symbol)
+    typer.echo("")
+    typer.echo(f"built {len(snapshots)} chain snapshots")
+    if not snapshots:
+        typer.echo("")
+        typer.echo("  No snapshots. A chain is dropped when the file has no futures")
+        typer.echo("  close for that session - options are priced off the future, and")
+        typer.echo("  without it every delta would be invented. Check that the file")
+        typer.echo("  contains the FUTCOM rows as well as the OPTFUT ones.")
+        return
+
+    feed = BhavcopyChainFeed(snapshots, underlying=symbol)
+    typer.echo(f"cycles: {', '.join(str(e) for e in feed.expiries())}")
+
+    if expiry is None:
+        typer.echo("")
+        typer.echo("Pass --expiry YYYY-MM-DD to print one cycle's ladder.")
+        return
+
+    wanted = date.fromisoformat(expiry)
+    series = list(feed.snapshots(wanted))
+    if not series:
+        typer.echo(f"no snapshots for {wanted}")
+        raise typer.Exit(code=1)
+
+    latest = series[-1]
+    typer.echo("")
+    typer.echo(f"{wanted} as of {latest.ts:%Y-%m-%d}  future {latest.futures_price}")
+    typer.echo(f"  {'strike':>10} {'right':>5} {'close':>10} {'volume':>9} {'OI':>9}")
+    for row in latest.rows:
+        typer.echo(
+            f"  {row.strike:>10} {row.right.value:>5} {row.quote.ltp:>10}"
+            f" {row.quote.volume:>9,} {row.quote.open_interest:>9,}"
+        )
+    typer.echo("")
+    typer.echo("  No bid/ask column exists in this file, so none is shown. The spread")
+    typer.echo("  stays an assumption until the recorder has live quotes.")
 
 
 if __name__ == "__main__":
