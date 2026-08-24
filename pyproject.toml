@@ -21,6 +21,7 @@ dependencies = [
     # The SmartAPI SDK does not declare its own dependencies.
     "logzero>=1.7",
     "websocket-client>=1.8",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]
