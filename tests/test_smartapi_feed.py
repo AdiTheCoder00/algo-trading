@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -234,3 +235,46 @@ class TestSessionWindow:
         assert session.is_live(utc(2026, 8, 19, 12, 0))
         assert not session.is_live(utc(2026, 8, 19, 2, 0))
         assert not session.is_live(utc(2026, 8, 19, 18, 30))
+
+
+class TestTheSdkCannotLogCredentials:
+    """The SDK logs full request bodies - password and TOTP included - at ERROR
+    level on any failed call, to stderr and to a `logs/<date>/app.log` file it
+    creates itself. Confirmed by hitting it directly: one failed login wrote a
+    real MPIN and TOTP code to disk in plaintext. `_silence_smartapi_logger`
+    (called from `SmartConnectTransport.__init__`, before the SDK object is ever
+    constructed) is the fix; this asserts it actually leaves the logger inert."""
+
+    def test_the_logger_is_disabled_after_silencing(self) -> None:
+        import logging
+
+        import logzero
+
+        from algo.data.smartapi_feed import _silence_smartapi_logger
+
+        # Start from a state the SDK's own logging would produce, so the test
+        # would fail if silencing did nothing.
+        logzero.logger.disabled = False
+        logzero.logger.setLevel(logging.INFO)
+
+        _silence_smartapi_logger()
+
+        assert logzero.logger.disabled is True
+        assert logzero.logger.handlers == []
+        assert logzero.logger.level > logging.CRITICAL
+        # An error logged after silencing must not reach any handler.
+        logzero.logger.error("password=hunter2 totp=123456")
+
+    def test_the_sdk_cannot_re_attach_a_file_handler(self, tmp_path: Path) -> None:
+        """`SmartConnect.__init__` calls `logzero.logfile(path, ...)` itself,
+        after silencing runs. That call must be a no-op, or the file sink comes
+        back the moment the SDK is constructed."""
+        import logzero
+
+        from algo.data.smartapi_feed import _silence_smartapi_logger
+
+        _silence_smartapi_logger()
+        logzero.logfile(str(tmp_path / "app.log"), loglevel=10)
+
+        assert not (tmp_path / "app.log").exists()
+        assert logzero.logger.handlers == []

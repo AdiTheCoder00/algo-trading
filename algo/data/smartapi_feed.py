@@ -98,12 +98,36 @@ class CandleTransport(Protocol):
     def candles(self, params: dict[str, Any]) -> dict[str, Any]: ...
 
 
+def _silence_smartapi_logger() -> None:
+    """The SDK logs full request bodies - password and TOTP included - at ERROR
+    level on any failed call, both to stderr and to a `logs/<date>/app.log` file
+    it creates itself (`SmartConnect.__init__`, via `logzero.logfile(...)`).
+    Confirmed by hitting it directly: a single failed login wrote the real MPIN
+    and a TOTP code to disk in plaintext.
+
+    Neither sink is optional or configurable from the SDK's own API, so this
+    disables logzero's default logger outright before `SmartConnect` is ever
+    constructed - `logzero.logfile` is replaced with a no-op so the SDK's own
+    `logzero.logfile(...)` call inside `__init__` never attaches a file handler,
+    and the logger itself is disabled so nothing reaches stderr either.
+    """
+    import logging
+
+    import logzero
+
+    logzero.logfile = lambda *args, **kwargs: None
+    logzero.logger.handlers.clear()
+    logzero.logger.setLevel(logging.CRITICAL + 1)
+    logzero.logger.disabled = True
+
+
 class SmartConnectTransport:
     """The real transport: wraps `SmartConnect` from the official SDK."""
 
     __slots__ = ("_api",)
 
     def __init__(self, api_key: str) -> None:
+        _silence_smartapi_logger()
         from SmartApi import SmartConnect
 
         self._api = SmartConnect(api_key)

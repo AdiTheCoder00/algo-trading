@@ -915,6 +915,25 @@ month whose own contract has already expired and rolled off the master, with
 next month's very much listed, is an ordinary calendar position, not an edge
 case. Regression test in `tests/test_expiries.py`.
 
+### D-095 - The SmartApi SDK's logger is silenced before it is ever constructed
+`SmartConnect.__init__` logs full request bodies - password and TOTP included -
+at ERROR level on any failed call, to stderr **and** to a `logs/<date>/app.log`
+file it creates itself via `logzero.logfile(...)`, unconditionally, with no
+opt-out in its own API. Confirmed by hitting it directly: one failed login
+(a local TLS-interception certificate error, unrelated to the credentials
+themselves) wrote a real MPIN and a TOTP code to disk in plaintext.
+`_silence_smartapi_logger()` (`algo/data/smartapi_feed.py`) neutralises
+`logzero`'s default logger - disabled, no handlers, level above CRITICAL - and
+replaces `logzero.logfile` with a no-op, both before `SmartConnect(api_key)` is
+constructed, so neither sink is ever live.
+**Why:** this is a defect in a third-party dependency, not project code, so it
+cannot be fixed at the source - only neutralised at every call site that touches
+it, which is now exactly one (`SmartConnectTransport.__init__`). The two leaked
+log files from this session were never committed (confirmed against
+`git log --all`) and have been deleted. Angel One's own TOTP is time-boxed to
+thirty seconds, so the specific value that leaked was already unusable by the
+time it was found; the MPIN is not, which is the more serious half of this.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting
