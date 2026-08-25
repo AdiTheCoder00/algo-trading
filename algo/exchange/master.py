@@ -106,9 +106,9 @@ def parse_master(raw: list[object]) -> list[MasterRow]:
                     name=str(entry.get("name", "")).upper(),
                     instrumenttype=str(entry.get("instrumenttype", "")).upper(),
                     expiry=_parse_expiry(entry.get("expiry")),
-                    strike=_parse_strike(entry.get("strike")),
+                    strike=_parse_angel_one_price(entry.get("strike")),
                     lot_size=_parse_decimal(entry.get("lotsize")),
-                    tick_size=_parse_decimal(entry.get("tick_size")),
+                    tick_size=_parse_angel_one_price(entry.get("tick_size")),
                 )
             )
         except (ValueError, InvalidOperation):
@@ -124,10 +124,29 @@ def _parse_expiry(value: object) -> date | None:
     return datetime.strptime(value.strip().upper(), "%d%b%Y").date()  # noqa: DTZ007
 
 
-def _parse_strike(value: object) -> Decimal | None:
+#: Angel One's scrip master publishes strike and tick size scaled by 100 for MCX
+#: (its API does not carry a precision field the way Kotak's does). Verified
+#: 2026-08-25 against the live master: GOLDM28AUG26157000CE, whose strike the
+#: tradingsymbol itself states as 157000, is served as `"strike": "15700000.000000"`
+#: - and its tick size, independently confirmed against the project's own sourced
+#: GOLDM contract spec (algo/exchange/data/spec_goldm.yaml, tick_size 0.50), is
+#: served as `"tick_size": "50.000000"`. Two independent checks, both x100.
+_ANGEL_ONE_PRICE_SCALE = Decimal("100")
+
+
+def _parse_angel_one_price(value: object) -> Decimal | None:
+    """A strike or tick size from the Angel One JSON master, descaled to real
+    rupees. See `_ANGEL_ONE_PRICE_SCALE` for the evidence this constant rests on.
+
+    Applies to `parse_master` only. `parse_master_csv` (Kotak) has its own
+    already-correct, precision-field-driven descaling for strike
+    (`_parse_kotak_strike`) and has not been checked here for tick size - it is
+    a separate broker's file format and this constant does not necessarily
+    apply to it.
+    """
     if not isinstance(value, str) or not value.strip():
         return None
-    return Decimal(value.strip())
+    return Decimal(value.strip()) / _ANGEL_ONE_PRICE_SCALE
 
 
 def _parse_decimal(value: object) -> Decimal | None:
@@ -145,7 +164,10 @@ def _parse_precision(value: object) -> int | None:
         return None
 
 
-def _right_of(symbol: str) -> Right | None:
+def right_of(symbol: str) -> Right | None:
+    """The CE/PE suffix of a tradingsymbol, or None. Public: reused by
+    algo/backtest/smartapi_runner.py to build an OptionId from a MasterRow
+    without a second, possibly-diverging implementation."""
     suffix = symbol[-2:].upper()
     if suffix == "CE":
         return Right.CE
@@ -330,7 +352,7 @@ class InstrumentMaster:
             matches = [
                 r for r in candidates if r.expiry == instrument.option_expiry
                 and r.strike == instrument.strike
-                and _right_of(r.tradingsymbol) is instrument.right
+                and right_of(r.tradingsymbol) is instrument.right
             ]
         else:
             matches = [r for r in candidates if r.expiry == instrument.expiry]
@@ -397,7 +419,7 @@ class InstrumentMaster:
                     and r.expiry == option_expiry
                     and r.instrumenttype.startswith("OPT")
                     and r.strike is not None
-                    and _right_of(r.tradingsymbol) is not None
+                    and right_of(r.tradingsymbol) is not None
                 ),
                 key=lambda r: (r.strike, r.tradingsymbol),
             )

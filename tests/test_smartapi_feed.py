@@ -278,3 +278,27 @@ class TestTheSdkCannotLogCredentials:
 
         assert not (tmp_path / "app.log").exists()
         assert logzero.logger.handlers == []
+
+
+class TestTheOsCertificateStoreIsTrusted:
+    """Confirmed live: this machine's antivirus intercepts outbound HTTPS and
+    re-signs it with a locally-issued root the OS trusts but Python's bundled
+    `certifi` list does not - a plain `requests` call to Angel One failed with
+    `CERTIFICATE_VERIFY_FAILED` even though the connection itself was fine.
+    `_trust_the_os_certificate_store` fixes the mismatch by pointing Python's
+    SSL contexts at the OS store (what curl already uses), never by disabling
+    verification."""
+
+    def test_injects_truststore_without_raising(self) -> None:
+        from algo.data.smartapi_feed import _trust_the_os_certificate_store
+
+        _trust_the_os_certificate_store()  # idempotent; must not raise if called twice
+        _trust_the_os_certificate_store()
+
+    def test_ssl_context_is_replaced_with_truststores(self) -> None:
+        import ssl
+
+        from algo.data.smartapi_feed import _trust_the_os_certificate_store
+
+        _trust_the_os_certificate_store()
+        assert ssl.SSLContext.__module__ == "truststore._api"

@@ -121,12 +121,33 @@ def _silence_smartapi_logger() -> None:
     logzero.logger.disabled = True
 
 
+def _trust_the_os_certificate_store() -> None:
+    """Some environments intercept outbound HTTPS locally (antivirus web
+    shields doing TLS scanning are the common case, confirmed here: the real
+    certificate Angel One's server presents gets swapped in transit for one
+    issued by "Norton Antivirus for SSL/TLS scanning"). The OS trusts that
+    root; Python's bundled `certifi` list does not, so a plain `requests` call
+    fails with `CERTIFICATE_VERIFY_FAILED` even though the connection is fine.
+
+    `truststore.inject_into_ssl()` points Python's SSL contexts at the OS
+    certificate store instead of `certifi`'s bundled one. This does not weaken
+    verification - it changes which already-vetted set of roots is consulted,
+    the same set curl and every other OS-native tool already uses - so a
+    genuinely bad certificate still fails. Disabling verification instead
+    would have accepted this one blindly along with anything else.
+    """
+    import truststore
+
+    truststore.inject_into_ssl()
+
+
 class SmartConnectTransport:
     """The real transport: wraps `SmartConnect` from the official SDK."""
 
     __slots__ = ("_api",)
 
     def __init__(self, api_key: str) -> None:
+        _trust_the_os_certificate_store()
         _silence_smartapi_logger()
         from SmartApi import SmartConnect
 
@@ -190,11 +211,6 @@ class SmartApiBarFeed:
         return self._timeframe
 
     def __iter__(self) -> Iterator[Bar]:
-        try:
-            row = self._master.row_for(self._instrument)
-        except DataError as exc:
-            raise DataError(f"bar feed: {exc}") from exc
-
         now = self._clock.now()
         session_day = self._session.day_for(now)
         until = min(
@@ -205,47 +221,83 @@ class SmartApiBarFeed:
         if until <= since:
             return
 
-        try:
-            response = self._transport.candles(
-                {
-                    "exchange": self._exchange.value,
-                    "symboltoken": row.symboltoken,
-                    "interval": f"{self._timeframe.minutes}_MINUTE",
-                    "fromdate": since.strftime("%Y-%m-%d %H:%M"),
-                    "todate": until.strftime("%Y-%m-%d %H:%M"),
-                }
-            )
-        except Exception as exc:
-            raise RetryableBrokerError(f"candle API failed: {exc}") from exc
-        if not response.get("status", False):
-            raise RetryableBrokerError(
-                f"candle API failed: "
-                f"{response.get('message') or response.get('errorcode') or 'no message'}"
-            )
-        raw_bars = response.get("data")
-        if not isinstance(raw_bars, list) or not raw_bars:
-            return
+        yield from fetch_bar_history(
+            self._transport,
+            self._master,
+            self._instrument,
+            timeframe=self._timeframe,
+            since=since,
+            until=until,
+            exchange=self._exchange,
+        )
 
-        # The API returns ascending order; enforce it on the raw response —
-        # a reordered feed is exactly the silent look-ahead the engine's
-        # checks exist for, and sorting would paper over it.
-        previous = None
-        for raw in raw_bars:
-            ts_raw = raw[0] if isinstance(raw, (list, tuple)) and raw else None
-            if previous is not None and ts_raw is not None and str(ts_raw) < str(previous):
-                raise DataError("candle API returned non-increasing timestamps")
-            if ts_raw is not None:
-                previous = ts_raw
 
-        bars: list[Bar] = []
-        for raw in raw_bars:
-            bar = _bar_from_candle(raw, self._timeframe, partial=False)
-            if bar is not None and since < bar.ts <= until:
-                bars.append(bar)
-        if not bars:
-            return
-        bars.sort(key=lambda b: b.ts)
-        yield from bars
+def fetch_bar_history(
+    transport: CandleTransport,
+    master: InstrumentMaster,
+    instrument: InstrumentId,
+    *,
+    timeframe: Timeframe,
+    since: datetime,
+    until: datetime,
+    exchange: Exchange = Exchange.MCX,
+) -> list[Bar]:
+    """One instrument's closed bars over an explicit `[since, until]` window.
+
+    `SmartApiBarFeed.__iter__` is this call with `since`/`until` pinned to
+    "today so far" — the live polling loop only ever wants that. Pulling a real
+    multi-week window for a backtest (`algo/backtest/smartapi_runner.py`) needs
+    the same candle-to-`Bar` conversion over an arbitrary range, so it lives here
+    once rather than as a second, possibly-diverging copy.
+
+    No rate limiting of its own. Building a full option chain means calling this
+    once per strike per side — the caller paces those calls; see
+    `algo/backtest/smartapi_runner.py`.
+    """
+    try:
+        row = master.row_for(instrument)
+    except DataError as exc:
+        raise DataError(f"bar history: {exc}") from exc
+
+    try:
+        response = transport.candles(
+            {
+                "exchange": exchange.value,
+                "symboltoken": row.symboltoken,
+                "interval": f"{timeframe.minutes}_MINUTE",
+                "fromdate": since.strftime("%Y-%m-%d %H:%M"),
+                "todate": until.strftime("%Y-%m-%d %H:%M"),
+            }
+        )
+    except Exception as exc:
+        raise RetryableBrokerError(f"candle API failed: {exc}") from exc
+    if not response.get("status", False):
+        raise RetryableBrokerError(
+            f"candle API failed: "
+            f"{response.get('message') or response.get('errorcode') or 'no message'}"
+        )
+    raw_bars = response.get("data")
+    if not isinstance(raw_bars, list) or not raw_bars:
+        return []
+
+    # The API returns ascending order; enforce it on the raw response — a
+    # reordered feed is exactly the silent look-ahead the engine's checks
+    # exist for, and sorting would paper over it.
+    previous = None
+    for raw in raw_bars:
+        ts_raw = raw[0] if isinstance(raw, (list, tuple)) and raw else None
+        if previous is not None and ts_raw is not None and str(ts_raw) < str(previous):
+            raise DataError("candle API returned non-increasing timestamps")
+        if ts_raw is not None:
+            previous = ts_raw
+
+    bars: list[Bar] = []
+    for raw in raw_bars:
+        bar = _bar_from_candle(raw, timeframe, partial=False)
+        if bar is not None and since < bar.ts <= until:
+            bars.append(bar)
+    bars.sort(key=lambda b: b.ts)
+    return bars
 
 
 def _bar_from_candle(raw: Any, timeframe: Timeframe, *, partial: bool) -> Bar | None:

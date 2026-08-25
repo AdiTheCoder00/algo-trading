@@ -25,6 +25,11 @@ from algo.exchange.master import (
 
 FETCHED_AT = utc(2026, 8, 19, 4, 0)
 
+#: Strike and tick size below are written the way Angel One's real master
+#: actually serves them for MCX - scaled by 100 - not the real rupee value.
+#: See `_ANGEL_ONE_PRICE_SCALE` in algo/exchange/master.py for the live
+#: evidence this scale rests on. `parse_master` divides it back out; every
+#: assertion below checks the real, descaled value.
 FUTURE_ROW = {
     "token": "20001",
     "symbol": "GOLDM04SEP26FUT",
@@ -34,7 +39,7 @@ FUTURE_ROW = {
     "expiry": "04SEP2026",
     "strike": "",
     "lotsize": "100",
-    "tick_size": "0.5",
+    "tick_size": "50.000000",
 }
 
 CALL_ROW = {
@@ -44,9 +49,9 @@ CALL_ROW = {
     "exch_seg": "MCX",
     "instrumenttype": "OPTCUR",
     "expiry": "28AUG2026",
-    "strike": "160500",
+    "strike": "16050000.000000",
     "lotsize": "100",
-    "tick_size": "0.5",
+    "tick_size": "50.000000",
 }
 
 PUT_ROW = {
@@ -56,9 +61,9 @@ PUT_ROW = {
     "exch_seg": "MCX",
     "instrumenttype": "OPTCUR",
     "expiry": "28AUG2026",
-    "strike": "153000",
+    "strike": "15300000.000000",
     "lotsize": "100",
-    "tick_size": "0.5",
+    "tick_size": "50.000000",
 }
 
 JUNK_ROWS = [
@@ -101,6 +106,32 @@ class TestParseMaster:
         assert row.expiry == date(2026, 8, 28)
         assert row.strike == Decimal("160500")
         assert row.lot_size == Decimal("100")
+        assert row.tick_size == Decimal("0.5")
+
+    def test_a_strike_matching_the_tradingsymbol_survives_x100_and_back(self) -> None:
+        """The regression this file exists to catch: `parse_master` must return
+        the strike the tradingsymbol itself states (GOLDM...157000CE means
+        157000), not the x100 figure Angel One's real API serves it as. Confirmed
+        live on 2026-08-25 against the actual master file - `state/master_mcx.json`
+        held `"strike": "15700000.000000"` for that exact contract before this
+        fix, silently 100x too large, unnoticed because nothing had constructed
+        an `OptionId` from a live Angel One row until now."""
+        row = parse_master(
+            [
+                {
+                    "token": "575067",
+                    "symbol": "GOLDM28AUG26157000CE",
+                    "name": "GOLDM",
+                    "exch_seg": "MCX",
+                    "instrumenttype": "OPTFUT",
+                    "expiry": "28AUG2026",
+                    "strike": "15700000.000000",
+                    "lotsize": "100",
+                    "tick_size": "50.000000",
+                }
+            ]
+        )[0]
+        assert row.strike == Decimal("157000")
         assert row.tick_size == Decimal("0.5")
 
     def test_skips_unreadable_rows_silently(self) -> None:

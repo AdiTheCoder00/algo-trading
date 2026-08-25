@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1017,6 +1018,272 @@ def backtest_bhavcopy(
             curve=result.equity_curve,
             trades=result.trades,
             warnings=(*result.warnings, "SHAPE TEST: two ticks a day, not a real intraday grid"),
+            dataset_hash=result.dataset_hash,
+            config_hash=result.config_hash,
+        )
+        typer.echo(f"  tearsheet  -> {write(tearsheet, markup)}")
+
+
+@app.command("backtest-smartapi")
+def backtest_smartapi(
+    expiry: str = typer.Argument(
+        ..., help="Option expiry to trade, YYYY-MM-DD - must be currently listed "
+        "and not yet expired (SmartAPI cannot serve an expired contract)"
+    ),
+    symbol: str = typer.Option("GOLDM", help="Which underlying to trade."),
+    since: str | None = typer.Option(
+        None, help="Start date YYYY-MM-DD (default: 25 calendar days before expiry)"
+    ),
+    until: str | None = typer.Option(None, help="End date YYYY-MM-DD (default: today)"),
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        help="A config file whose sizing, caps, kill switch, devolvement window, "
+        "strategy parameters and equity this run uses",
+    ),
+    strike_band_pct: float = typer.Option(
+        0.10,
+        "--strike-band-pct",
+        help="Fetch strikes within this fraction beyond the underlying's observed "
+        "high/low - wider covers more of a 0.25-delta wing's possible range, at "
+        "the cost of more real API calls",
+    ),
+    rate_limit_s: float = typer.Option(0.35, "--rate-limit-s", help="Pause between candle calls"),
+    max_contracts: int = typer.Option(
+        120, "--max-contracts", help="Refuse to fetch more than this many contracts"
+    ),
+    risk_free_rate: float = typer.Option(0.065, "--risk-free-rate"),
+    refresh_master: bool = typer.Option(
+        False, "--refresh-master", help="Re-download the instrument master first"
+    ),
+    tearsheet: Path | None = typer.Option(None, help="Write an HTML tearsheet here"),
+    trade_log: Path | None = typer.Option(None, help="Write the trade log CSV here"),
+) -> None:
+    """Run the real GOLDM short-strangle strategy over real SmartAPI history.
+
+    Where `backtest-bhavcopy` covers ~100 past cycles at two ticks a day, this
+    covers exactly **one** - whichever `expiry` is currently listed - at real
+    30-minute resolution. Angel One's own candle API cannot serve a contract
+    that has already expired, so this is structurally the only cycle it can
+    ever answer for. The two commands are complements: bhavcopy answers "has
+    this ever worked, across many cycles"; this answers "what would this
+    month's trade actually have looked like, at real intraday resolution".
+
+    Connects to your real SmartAPI account (ALGO_SMARTAPI_* in .env) and makes
+    one real, rate-limited network call per strike fetched - see
+    algo/backtest/smartapi_runner.py for exactly how the strike band and the
+    rate limit are chosen, and why. No orders are placed; this only reads
+    historical candles.
+    """
+    from datetime import time as _time
+
+    from algo.backtest.engine import BacktestEngine
+    from algo.backtest.prices import ChainFeedProvider, ChainPriceSource, CompositePriceSource
+    from algo.backtest.smartapi_runner import build_dataset
+    from algo.core.clock import SystemClock
+    from algo.core.errors import DataError
+    from algo.core.signal import ComboExit
+    from algo.core.timeutil import ist_to_utc
+    from algo.costs.charges import McxChargeModel
+    from algo.costs.margin import SpanApproxMargin
+    from algo.costs.slippage import TickSlippage
+    from algo.costs.spread import FixedTickSpread
+    from algo.data.smartapi_feed import (
+        SmartConnectTransport,
+    )
+    from algo.data.smartapi_feed import (
+        credentials_from_env as smart_credentials_from_env,
+    )
+    from algo.exchange.master import HttpMasterSource, InstrumentMaster, fetch_master
+    from algo.execution.fills import FillSimulator
+    from algo.execution.kotak import default_totp
+    from algo.portfolio.book import Portfolio
+    from algo.reporting import metrics as metrics_mod
+    from algo.risk.devolvement import DevolvementGuard
+    from algo.risk.engine import FixedLotSizer, RiskEngine
+    from algo.risk.killswitch import KillSwitch
+    from algo.strategy.delta_strangle import DeltaStrangle
+
+    option_expiry = date.fromisoformat(expiry)
+    calendar = synthetic_calendar()
+    clock = SystemClock()
+
+    credentials = smart_credentials_from_env()
+    if not credentials.has_all():
+        typer.echo("  ! ALGO_SMARTAPI_* credentials are missing (see .env.example)")
+        raise typer.Exit(code=1)
+
+    snapshot_path = Path("state/master_mcx.json")
+    if refresh_master or not snapshot_path.exists():
+        typer.echo(f"fetching instrument master -> {snapshot_path}")
+        fetch_master(HttpMasterSource(), snapshot_path, now=clock.now())
+    master = InstrumentMaster.from_snapshot(snapshot_path)
+    typer.echo(f"master snapshot fetched {master.fetched_at:%Y-%m-%d %H:%M}Z")
+
+    since_dt = (
+        ist_to_utc(date.fromisoformat(since), _time(9, 0))
+        if since is not None
+        else ist_to_utc(option_expiry - timedelta(days=25), _time(9, 0))
+    )
+    until_dt = (
+        ist_to_utc(date.fromisoformat(until), _time(23, 59)) if until is not None else clock.now()
+    )
+
+    transport = SmartConnectTransport(credentials.api_key)
+    typer.echo(f"logging in to SmartAPI as {credentials.client_id}")
+    transport.connect(
+        credentials.client_id, credentials.password, default_totp(credentials.totp_seed)()
+    )
+    typer.echo("login OK")
+
+    def progress(message: str) -> None:
+        typer.echo(f"  {message}")
+
+    try:
+        dataset = build_dataset(
+            transport,
+            master,
+            symbol=symbol,
+            option_expiry=option_expiry,
+            calendar=calendar,
+            since=since_dt,
+            until=until_dt,
+            strike_band_pct=Decimal(str(strike_band_pct)),
+            rate_limit_s=rate_limit_s,
+            max_contracts=max_contracts,
+            risk_free_rate=risk_free_rate,
+            on_progress=progress,
+        )
+    except DataError as exc:
+        typer.echo("")
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(
+        f"contracts      {dataset.contracts_fetched} fetched, "
+        f"{len(dataset.contracts_skipped_empty)} had no bars in this window"
+    )
+    typer.echo(f"bars           {len(dataset.bars)}   snapshots {len(dataset.chain_snapshots)}")
+    if not dataset.chain_snapshots:
+        typer.echo("no usable chain snapshots - nothing to run")
+        raise typer.Exit(code=1)
+
+    if config is not None:
+        from algo.config.loader import load_config as resolve
+
+        cfg = resolve(config)
+        strategy = DeltaStrangle(
+            underlying=symbol,
+            target_delta=cfg.strategy.target_delta,
+            delta_tolerance=cfg.strategy.delta_tolerance,
+            entry_times_ist=cfg.strategy.entry_bars_ist,
+            min_dte=cfg.strategy.min_dte,
+            max_dte=cfg.strategy.max_dte,
+            take_profit=ComboExit(
+                kind=cfg.strategy.exit.take_profit_kind, value=cfg.strategy.exit.take_profit_value
+            ),
+            stop_loss=ComboExit(
+                kind=cfg.strategy.exit.stop_loss_kind, value=cfg.strategy.exit.stop_loss_value
+            ),
+        )
+        starting_equity = cfg.risk.starting_equity
+        lots = cfg.risk.sizing.fixed_lots
+        max_lots = cfg.risk.caps.max_lots_per_underlying
+        margin_cap_pct = cfg.risk.caps.max_total_margin_pct
+        kill_switch = KillSwitch(
+            daily_loss_limit_pct=cfg.risk.kill_switch.daily_loss_limit_pct,
+            max_consecutive_losses=cfg.risk.kill_switch.max_consecutive_losses,
+            max_drawdown_pct=cfg.risk.kill_switch.max_drawdown_pct,
+        )
+        force_exit = cfg.risk.devolvement.force_exit_sessions_before_expiry
+        block_within = cfg.risk.devolvement.block_new_entries_within_dte
+        stop_viability = cfg.strategy.exit.min_stop_to_cost_ratio
+        on_breach = cfg.strategy.exit.on_stop_viability_breach
+        typer.echo(f"config         {config} ({lots} lot(s), equity {starting_equity})")
+    else:
+        strategy = DeltaStrangle(underlying=symbol)
+        starting_equity = Decimal("1000000.00")
+        lots = 1
+        max_lots = 5
+        margin_cap_pct = Decimal("50")
+        kill_switch = KillSwitch(
+            daily_loss_limit_pct=Decimal("2"),
+            max_consecutive_losses=3,
+            max_drawdown_pct=Decimal("10"),
+        )
+        force_exit = 1
+        block_within = 2
+        stop_viability = None
+        on_breach = "warn"
+
+    engine = BacktestEngine(
+        bars=dataset.bars,
+        calendar=calendar,
+        specs=ContractSpecStore.default(),
+        strategy=strategy,
+        risk=RiskEngine(
+            sizer=FixedLotSizer(lots),
+            spec_for=None,
+            max_concurrent_positions=2,  # a strangle is two positions
+            max_lots_per_underlying=max_lots,
+            margin_cap_pct=margin_cap_pct,
+        ),
+        simulator=FillSimulator(
+            spread=FixedTickSpread(2),
+            slippage=TickSlippage(market_ticks=0, stop_ticks=2),
+            charges=McxChargeModel.default(),
+        ),
+        portfolio=Portfolio(starting_equity),
+        instrument=dataset.instrument,
+        timeframe=Timeframe(minutes=30),
+        is_option=True,
+        price_source=CompositePriceSource(ChainPriceSource(dataset.chain_snapshots)),
+        chain_provider=ChainFeedProvider(dataset.chain_snapshots),
+        expiries=dataset.expiries,
+        devolvement=DevolvementGuard(
+            calendar=calendar,
+            force_exit_sessions_before_expiry=force_exit,
+            block_new_entries_within_dte=block_within,
+        ),
+        kill_switch=kill_switch,
+        margin=SpanApproxMargin(),
+        mode="backtest",
+        broker="backtest",
+        stop_viability_threshold=stop_viability,
+        on_stop_viability_breach=on_breach,
+    )
+    result = engine.run()
+
+    typer.echo("")
+    typer.echo(f"cycles         {len(result.trades)} round trip(s)")
+    summary = metrics_mod.compute(
+        result.equity_curve,
+        trade_count=result.round_trips,
+        total_cost=result.realised_cost,
+        trades=result.trades,
+    )
+    typer.echo(summary.summary())
+    typer.echo("")
+    typer.echo(f"  spread paid     {result.spread_cost:,}")
+    typer.echo(f"  charges paid    {result.total_charges:,}")
+    for warning in result.warnings:
+        typer.echo(f"  ! {warning}")
+    typer.echo("  ! REAL 30-MINUTE DATA, ONE CYCLE ONLY - the option chain has no real")
+    typer.echo("    order book (candles, not quotes); the spread is still modelled.")
+
+    if trade_log is not None:
+        from algo.reporting.export import write_trade_log
+
+        typer.echo(f"  trade log  -> {write_trade_log(result.trades, trade_log)}")
+    if tearsheet is not None:
+        from algo.reporting.tearsheet import render, write
+
+        markup = render(
+            title=f"GOLDM strangle - {symbol} {expiry} (SmartAPI)",
+            metrics=summary,
+            curve=result.equity_curve,
+            trades=result.trades,
+            warnings=(*result.warnings, "REAL 30-MIN DATA, ONE CYCLE ONLY - spread still modelled"),
             dataset_hash=result.dataset_hash,
             config_hash=result.config_hash,
         )
