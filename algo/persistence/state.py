@@ -169,7 +169,20 @@ class StateStore:
         self._path = Path(path)
         if self._path.parent != Path():
             self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._path), isolation_level=None)
+        # check_same_thread=False: the monitoring API opens one StateStore per
+        # request as a FastAPI sync dependency (algo/api/app.py), and FastAPI's
+        # threadpool executor is free to run that request's open and its later
+        # close on different worker threads - confirmed live, not theoretical:
+        # "SQLite objects created in a thread can only be used in that same
+        # thread" on /positions the first time two panels were added to the
+        # dashboard and both endpoints got hit back to back. Safe here because
+        # each StateStore instance is still only ever touched by the one
+        # request that created it, never concurrently by two - this relaxes
+        # sqlite3's same-thread check, it does not remove the single-owner
+        # discipline that check_same_thread is actually protecting.
+        self._conn = sqlite3.connect(
+            str(self._path), isolation_level=None, check_same_thread=False
+        )
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
 

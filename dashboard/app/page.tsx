@@ -17,15 +17,19 @@
 import { useCallback, useEffect, useState } from "react";
 import { EquityChart } from "@/components/EquityChart";
 import { KillSwitch } from "@/components/KillSwitch";
+import { KillSwitchHistory } from "@/components/KillSwitchHistory";
+import { TradeLog } from "@/components/TradeLog";
 import {
   api,
   inr,
   shortTime,
   type EquityPoint,
   type Health,
+  type KillSwitchRequest,
   type Note,
   type Position,
   type Signal,
+  type Trade,
 } from "@/lib/api";
 
 const REFRESH_MS = 15_000;
@@ -36,22 +40,28 @@ export default function Page() {
   const [positions, setPositions] = useState<Position[]>([]);
   const [signals, setSignals] = useState<Signal[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
+  const [trades, setTrades] = useState<Trade[]>([]);
+  const [haltHistory, setHaltHistory] = useState<KillSwitchRequest[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [h, e, p, s, n] = await Promise.all([
+      const [h, e, p, s, n, t, k] = await Promise.all([
         api.health(),
         api.equity(),
         api.positions(),
         api.signals(),
         api.notes(),
+        api.trades(),
+        api.killSwitchHistory(),
       ]);
       setHealth(h);
       setEquity(e);
       setPositions(p);
       setSignals(s);
       setNotes(n);
+      setTrades(t);
+      setHaltHistory(k);
       setError(null);
     } catch (caught) {
       // Rendered, not thrown. A monitoring page that goes blank when the thing it
@@ -147,6 +157,16 @@ export default function Page() {
 
       <section className="panel">
         <div className="panel-bar">
+          <span>halt history</span>
+          <span className="mono">{haltHistory.length}</span>
+        </div>
+        <div className="panel-in">
+          <KillSwitchHistory requests={haltHistory} />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-bar">
           <span>equity curve</span>
           <span className="mono">{equity.length} bars</span>
         </div>
@@ -189,6 +209,16 @@ export default function Page() {
               </tbody>
             </table>
           )}
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-bar">
+          <span>trade log</span>
+          <span className="mono">{trades.length}</span>
+        </div>
+        <div className="panel-in">
+          <TradeLog trades={trades} />
         </div>
       </section>
 

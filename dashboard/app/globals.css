@@ -196,10 +196,12 @@ section.panel {
   font-variant-numeric: tabular-nums;
 }
 
-.stat dd.up {
+.stat dd.up,
+td.up {
   color: var(--sage);
 }
-.stat dd.down {
+.stat dd.down,
+td.down {
   color: var(--clay);
 }
 

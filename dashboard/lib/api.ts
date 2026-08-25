@@ -62,6 +62,51 @@ export interface KillSwitchRequest {
   acted_on_at: string | null;
 }
 
+/**
+ * One completed (or still-open) round trip, exactly as `Trade.to_log_row()`
+ * writes it (algo/core/trade.py) — every field a string, `closed_at` and
+ * `r_multiple` empty rather than absent when there is nothing to report yet.
+ * This is the record brief §10 exists for: "why did this trade fire six weeks
+ * later" answered by what travelled with the trade itself, not a log file that
+ * may have rotated away.
+ */
+export interface Trade {
+  trade_id: string;
+  strategy_id: string;
+  signal_id: string;
+  opened_at: string;
+  closed_at: string;
+  legs: string;
+  gross_pnl: string;
+  charges_total: string;
+  net_pnl: string;
+  r_multiple: string;
+  exit_reason: string;
+  reason: string;
+}
+
+/**
+ * One leg of `Trade.legs`. The instrument key is itself colon-separated
+ * (`MCX:GOLDM:20260828:157000:CE`), so the split has to come from the *right* —
+ * side and lots are always the last two fields, everything before them is the
+ * key.
+ */
+export interface TradeLeg {
+  instrument: string;
+  side: string;
+  lots: string;
+}
+
+export function parseLegs(legs: string): TradeLeg[] {
+  if (!legs) return [];
+  return legs.split("|").map((leg) => {
+    const parts = leg.split(":");
+    const lots = parts.pop() ?? "";
+    const side = parts.pop() ?? "";
+    return { instrument: parts.join(":"), side, lots };
+  });
+}
+
 export class ApiError extends Error {}
 
 async function get<T>(path: string): Promise<T> {
@@ -79,7 +124,7 @@ export const api = {
   positions: () => get<Position[]>("positions"),
   signals: (limit = 20) => get<Signal[]>(`signals?limit=${limit}`),
   notes: (limit = 20) => get<Note[]>(`notes?limit=${limit}`),
-  trades: (limit = 50) => get<Record<string, unknown>[]>(`trades?limit=${limit}`),
+  trades: (limit = 50) => get<Trade[]>(`trades?limit=${limit}`),
   killSwitchHistory: () => get<KillSwitchRequest[]>("kill-switch"),
 
   async requestHalt(reason: string, flatten: boolean): Promise<{ note: string }> {

@@ -15,6 +15,7 @@ state is untouched, and assert the request survives for the engine to find.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -205,6 +206,33 @@ class TestReadOnly:
         store.record_note(NOW, "no entry at 9d: call at 0.25±0.05 not available")
         rows = client.get("/notes", headers=_auth()).json()
         assert "not available" in rows[0]["message"]
+
+
+class TestStateStoreCrossesRealThreads:
+    """The regression `TestClient` cannot see: it dispatches sync endpoints
+    through its own portal, not FastAPI's threadpool executor, so a request run
+    through it never actually lands its open and its close on different OS
+    threads - confirmed by running 30 requests through it against the
+    unpatched code with `check_same_thread` still defaulted True, and every one
+    of them passed. A real uvicorn server does not have that luxury: it
+    genuinely dispatches a sync dependency's open, yield and teardown to
+    whichever threadpool worker is free at each step, and that produced
+    `sqlite3.ProgrammingError: SQLite objects created in a thread can only be
+    used in that same thread` on `/positions` the first time a real browser
+    hit it. `ThreadPoolExecutor` here reproduces the actual mechanism - open on
+    one real thread, use and close on another - rather than trusting a test
+    harness that turned out not to exercise it."""
+
+    def test_a_store_opened_on_one_thread_is_usable_from_another(
+        self, state_path: Path
+    ) -> None:
+        with ThreadPoolExecutor(max_workers=1) as opener:
+            store = opener.submit(StateStore, state_path).result()
+        with ThreadPoolExecutor(max_workers=1) as user:
+            # Both a read and the close itself must survive landing on a
+            # thread that did not construct the connection.
+            user.submit(store.positions).result()
+            user.submit(store.close).result()
 
 
 class TestKillSwitchIsARequest:

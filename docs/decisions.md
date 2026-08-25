@@ -934,6 +934,38 @@ log files from this session were never committed (confirmed against
 thirty seconds, so the specific value that leaked was already unusable by the
 time it was found; the MPIN is not, which is the more serious half of this.
 
+### D-096 - The trade log and halt history are now on the dashboard, not just in the API
+`lib/api.ts` already had typed client methods for `/trades` and `/kill-switch` -
+both real, working backend endpoints - and `page.tsx` never called either. Added
+`TradeLog.tsx` and `KillSwitchHistory.tsx` and wired both in: the trade log is
+brief §10's "why did this fire six weeks later" question closed out (the
+signals panel already answered the entry half), and the halt history makes
+"who stopped trading, when, and did the engine ever act on it" answerable from
+the page instead of by inference.
+**Why:** a client method with no caller and a server endpoint with no consumer
+is exactly the kind of half-finished implementation brief §12 rules out, just
+distributed across two files where it is easy to miss.
+
+### D-097 - `StateStore` opens its SQLite connection with `check_same_thread=False`
+Found live, not in a test: the moment a second dashboard panel started hitting
+the API back to back with the first, `/positions` returned 500 -
+`sqlite3.ProgrammingError: SQLite objects created in a thread can only be used
+in that same thread`. `algo/api/app.py`'s `store()` dependency opens one
+`StateStore` per request; FastAPI's threadpool executor is free to run that
+request's open and its later close on different worker threads, and sqlite3
+refuses by default. Fixed by passing `check_same_thread=False` to
+`sqlite3.connect`.
+**Why safe:** each `StateStore` instance is still only ever touched by the one
+request that created it - never concurrently by two threads at once, which is
+the actual hazard `check_same_thread` exists to catch. This relaxes a check
+that was stricter than the real access pattern, not the discipline behind it.
+`fastapi.testclient.TestClient` could not reproduce this - confirmed by running
+30 requests through it against the unpatched code and watching all 30 pass; it
+dispatches through its own portal, not the real threadpool. The regression test
+(`tests/test_api.py::TestStateStoreCrossesRealThreads`) uses a real
+`ThreadPoolExecutor` instead, confirmed to fail against the unpatched code
+before trusting it.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting
