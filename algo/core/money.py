@@ -43,7 +43,7 @@ def dec(value: str | int | Decimal) -> Decimal:
         # of the function — `bool` is caught too, since it is an int subclass
         # that has no business being a rupee amount.
         raise DomainError(
-            f"refusing to build a Decimal from the float {value!r} — the precision is "
+            f"refusing to build a Decimal from the float {value!r} - the precision is "
             "already lost. Pass a string, and fix whatever produced a float."
         )
     if isinstance(value, bool):

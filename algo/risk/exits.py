@@ -84,7 +84,7 @@ class ViabilityCheck:
         verdict = "clears" if self.passes else "BELOW"
         return (
             f"stop {self.stop} is {self.ratio:.2f}x the round-trip cost of "
-            f"{self.round_trip_cost} — {verdict} the {self.threshold}x threshold"
+            f"{self.round_trip_cost} - {verdict} the {self.threshold}x threshold"
         )
 
 

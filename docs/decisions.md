@@ -858,6 +858,63 @@ importers in the test suite.
 a changed interface tomorrow. The cost of keeping code that is tested and imported
 is lower than the cost of re-deriving decisions that were already made (D-019).
 
+### D-091 - The real strategy now runs against real history: `backtest-bhavcopy`
+`algo/backtest/bhavcopy_runner.py` builds everything `BacktestEngine` needs -
+bars, a chain provider, an expiry table - directly from bhavcopy rows, and
+`algo backtest-bhavcopy` runs `DeltaStrangle` itself against it. Until this, no
+runnable command in the repository had ever executed the actual strategy: the
+`backtest` command is hardwired to `coin_flip`/`buy_and_hold` on synthetic bars
+(the M3 falsification, by design), and `DeltaStrangle` had only ever run inside
+`tests/test_strangle_end_to_end.py`.
+**Why:** the strangle's edge, if any, cannot be assessed from a component that
+has never seen a real cycle. This is the first command that can - see D-092 for
+what it honestly cannot yet tell you.
+
+### D-092 - Bhavcopy backtests use two bars a session: entry (09:30, day's open) and close
+Bhavcopy is end-of-day. There is no 09:30 print and no intraday grid, so rather
+than fabricate one, each session becomes exactly two ticks: entry, stamped 09:30
+IST and priced from the day's open (the closest real proxy to what the fixed
+entry gate would have seen), and close, stamped at the real session close (read
+from a `MarketCalendar`, DST-correct) and priced from the day's close, high and
+low. Every exit check in between - a stop that would have fired and reversed by
+the close - is invisible to the run, and the CLI command prints this as a
+standing warning on every result, not a footnote.
+**Why:** this is what makes `backtest-bhavcopy` a **shape test** (has the
+strategy ever come out ahead across many real cycles) rather than a
+fill-accurate one (what it would actually have been filled at) - the same
+distinction D-081 through D-085 already draw for the loader itself, carried
+through to the engine that consumes it.
+
+### D-093 - CLI output ASCII stayed local to `main.py`; the mojibake was not
+D-086 made `algo/cli/main.py` ASCII and added a CI grep for it. Building
+`backtest-bhavcopy` surfaced that the em dashes, section signs and `±` in
+*runtime message strings* elsewhere - warnings, raised errors, note text in
+`algo/backtest/engine.py`, `algo/risk/*.py`, `algo/strategy/delta_strangle.py`,
+and ten more modules - reach the exact same cp1252 console the CLI guard was
+built to protect, because the CLI echoes them. Confirmed live: running the
+shipped `backtest` command printed a `?` in place of an em dash in its own
+warning line before this fix. Fixed at each of the 25 call sites that are
+runtime-visible text (not docstrings or comments, and not `tearsheet.py`, which
+writes HTML and is correctly typographic).
+**Why:** the CI grep only ever covered the file it was written against. The
+actual hazard is any string that reaches `typer.echo` or an uncaught exception's
+message, wherever in `algo/` it is written - a boundary the original guard did
+not draw.
+
+### D-094 - `ExpiryCalendar.nearest_expiry_on_or_after` now tolerates an unlisted starting month
+Found building the bhavcopy bridge: a session in a calendar month with no table
+entry (a session predates the file's only listed expiry) raised immediately,
+even when the *next* month's contract was in the table and would have satisfied
+the query. `BarContext.option_expiries` already tolerates exactly this gap
+(`with suppress(CalendarError)` per month, `context.py`); the nearer-expiry
+lookup did not, because every prior caller's table happened to cover every month
+it queried. Fixed to match: a missing month is skipped, not fatal, within the
+same `horizon`.
+**Why:** the same gap is real outside a bhavcopy backtest - a live session in a
+month whose own contract has already expired and rolled off the master, with
+next month's very much listed, is an ordinary calendar position, not an edge
+case. Regression test in `tests/test_expiries.py`.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting

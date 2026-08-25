@@ -35,7 +35,7 @@ class TickSlippage:
         if stop_ticks < market_ticks:
             raise DomainError(
                 f"stops must slip at least as much as market orders "
-                f"({stop_ticks} < {market_ticks}) — see brief §6"
+                f"({stop_ticks} < {market_ticks}) - see brief section 6"
             )
         self._market_ticks = market_ticks
         self._stop_ticks = stop_ticks

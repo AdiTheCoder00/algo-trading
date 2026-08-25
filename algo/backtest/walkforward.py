@@ -385,7 +385,7 @@ def run_walk_forward(
         eligible = [c for c in candidates if c.score is not None]
         if not eligible:
             raise DomainError(
-                f"no eligible parameter set for {window} — every candidate was "
+                f"no eligible parameter set for {window} - every candidate was "
                 "excluded by the objective. Widen the grid or relax the objective "
                 "rather than lowering the bar silently."
             )

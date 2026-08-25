@@ -39,7 +39,7 @@ def ensure_utc(value: datetime) -> datetime:
     a bug, not something to guess a zone for.
     """
     if value.tzinfo is None:
-        raise DomainError(f"naive datetime {value!r} — every timestamp must be tz-aware")
+        raise DomainError(f"naive datetime {value!r} - every timestamp must be tz-aware")
     return value.astimezone(UTC)
 
 

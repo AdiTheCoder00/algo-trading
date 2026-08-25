@@ -104,6 +104,18 @@ class TestExpirySelection:
         chosen = cycle_calendar.nearest_expiry_on_or_after("GOLDM", date(2026, 8, 29))
         assert chosen.option_expiry == date(2026, 9, 25)
 
+    def test_a_starting_month_with_no_listed_contract_is_skipped_not_fatal(
+        self, cycle_calendar: ExpiryCalendar
+    ) -> None:
+        """A table built from one bhavcopy archive's worth of history may have no
+        entry at all for the calendar month a session falls in — the archive's
+        earliest sessions predate the month of its only listed expiry. The nearest
+        listed contract still has to be found within the horizon, the same way
+        `BarContext.option_expiries` already tolerates a month with nothing
+        recorded (context.py) rather than raising on the very first miss."""
+        chosen = cycle_calendar.nearest_expiry_on_or_after("GOLDM", date(2026, 7, 27))
+        assert chosen.option_expiry == date(2026, 8, 28)
+
     def test_expiry_day_itself_still_counts_as_current(
         self, cycle_calendar: ExpiryCalendar
     ) -> None:

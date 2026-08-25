@@ -22,6 +22,7 @@ dependencies = [
     "logzero>=1.7",
     "websocket-client>=1.8",
     "openpyxl>=3.1",
+    "truststore>=0.9",
 ]
 
 [project.optional-dependencies]

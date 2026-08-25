@@ -224,9 +224,9 @@ class DeltaStrangle(Strategy):
         """
         missing = []
         if call is None:
-            missing.append(f"call at {self._target}±{self._tolerance}")
+            missing.append(f"call at {self._target}+/-{self._tolerance}")
         if put is None:
-            missing.append(f"put at {self._target}±{self._tolerance}")
+            missing.append(f"put at {self._target}+/-{self._tolerance}")
 
         tradeable = [r for r in chain.rows if r.is_tradeable and r.delta is not None]
         if not tradeable:
@@ -251,6 +251,6 @@ class DeltaStrangle(Strategy):
                 nearest += f"; furthest quoted call is {best_call.strike} at {best_call.delta:.3f}"
 
         return (
-            f"no entry at {dte}d: {' and '.join(missing)} not available — {nearest}. "
+            f"no entry at {dte}d: {' and '.join(missing)} not available - {nearest}. "
             f"{len(tradeable)} of {len(chain.rows)} rows were tradeable."
         )

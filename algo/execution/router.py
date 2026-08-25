@@ -133,7 +133,7 @@ class OrderRouter:
                 outcome=Outcome.ALREADY_IN_FLIGHT,
                 client_order_id=coid,
                 detail=(
-                    f"already {existing.state}. Not re-sending — retrying an "
+                    f"already {existing.state}. Not re-sending - retrying an "
                     "unconfirmed order is how a position doubles"
                 ),
             )
@@ -162,7 +162,7 @@ class OrderRouter:
                 outcome=Outcome.UNCONFIRMED,
                 client_order_id=coid,
                 detail=(
-                    f"{exc} — the order stays SENT and unresolved. Reconcile before "
+                    f"{exc} - the order stays SENT and unresolved. Reconcile before "
                     "doing anything else with it"
                 ),
             )

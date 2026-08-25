@@ -15,6 +15,13 @@ This repo has no sourced MCX holiday calendar yet (algo/exchange/calendar.py
 only ships a synthetic one), so `market_is_open` checks weekday + session
 hours only. A poll that lands on an unlisted holiday just gets back a stale
 last-traded price rather than a fresh one.
+
+**Certificates.** `requests`' bundled `certifi` CA file does not trust
+Kotak's certificate chain on at least some Windows machines, while the OS
+trust store does. `truststore.inject_into_ssl()` below makes `requests` (and
+therefore the Kotak SDK) validate against the OS store instead — the same
+one Windows and every browser on the machine already trust — rather than
+skipping verification.
 """
 
 from __future__ import annotations
@@ -28,22 +35,26 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import truststore
+
+truststore.inject_into_ssl()
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from dotenv import load_dotenv
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font
-from structlog import get_logger
+from dotenv import load_dotenv  # noqa: E402
+from openpyxl import Workbook, load_workbook  # noqa: E402
+from openpyxl.styles import Font  # noqa: E402
+from structlog import get_logger  # noqa: E402
 
-from algo.core.enums import Exchange
-from algo.core.timeutil import is_us_dst
-from algo.data.kotak_feed import NeoQuotesTransport
-from algo.exchange.master import (
+from algo.core.enums import Exchange  # noqa: E402
+from algo.core.timeutil import is_us_dst  # noqa: E402
+from algo.data.kotak_feed import NeoQuotesTransport  # noqa: E402
+from algo.exchange.master import (  # noqa: E402
     InstrumentMaster,
     KotakMasterSource,
     fetch_master,
 )
-from algo.execution.kotak import credentials_from_env
+from algo.execution.kotak import credentials_from_env  # noqa: E402
 
 log = get_logger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -112,6 +123,24 @@ def _num(value: Any) -> Decimal | None:
         return None
 
 
+def _to_float(value: Decimal | None) -> float | None:
+    return float(value) if value is not None else None
+
+
+def _best_price(quote: dict[str, Any], side: str, flat_key: str) -> Decimal | None:
+    """The best bid/ask. Kotak nests the depth book under `depth.buy`/`depth.sell`
+    ({"price": ..., "quantity": ...} per level) rather than flat `bid`/`ask` keys
+    (see `_QuoteBuilder.depth` in algo/data/kotak_feed.py); fall back to the flat
+    key when depth is absent."""
+    nested = quote.get("depth")
+    levels = nested.get(side) if isinstance(nested, dict) else None
+    if isinstance(levels, list) and levels and isinstance(levels[0], dict):
+        price = _num(levels[0].get("price"))
+        if price is not None:
+            return price
+    return _num(quote.get(flat_key))
+
+
 def poll_once(
     *,
     symbol: str,
@@ -167,8 +196,8 @@ def poll_once(
             row.tradingsymbol,
             row.expiry.isoformat() if row.expiry else "",
             float(_num(quote.get("ltp") or quote.get("last_traded_price")) or 0),
-            float(_num(quote.get("bid")) or 0) or None,
-            float(_num(quote.get("ask")) or 0) or None,
+            _to_float(_best_price(quote, "buy", "bid")),
+            _to_float(_best_price(quote, "sell", "ask")),
             int(_num(quote.get("volume") or quote.get("vol")) or 0),
             int(_num(quote.get("open_int") or quote.get("openInterest")) or 0),
         ],

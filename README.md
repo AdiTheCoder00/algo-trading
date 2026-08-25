@@ -134,6 +134,34 @@ So a bhavcopy backtest answers "has this shape ever worked, across many real cyc
 It does not answer "what would I actually have been filled at". Shape over a hundred
 cycles still beats precision over none.
 
+### Running the real strategy against it
+
+`backtest` (above) proves the engine's cost arithmetic on synthetic data and
+deliberately trades nothing resembling the actual strategy. This runs
+`DeltaStrangle` itself, against every real monthly cycle the bhavcopy archive
+covers:
+
+```bash
+.venv/Scripts/algo.exe backtest-bhavcopy path/to/bhavcopy/ --config config/goldm.yaml
+```
+
+Each session becomes exactly two bars - entry (09:30 IST, priced from the day's
+open) and close (the real session close, priced from the day's close, high and
+low) - because that is what end-of-day data can honestly support. Every exit
+check in between is invisible to the run, not approximated: a stop that would
+have fired and reversed by the close simply is not seen. The command prints this
+as a standing warning on every result:
+
+```
+  ! SHAPE TEST ONLY - two ticks a day (open, close), not a real
+    intraday grid. See the command's --help for what that trades away.
+```
+
+`--config` pulls sizing, caps, the kill switch, the devolvement window and the
+strategy's own parameters (target delta, DTE band, exit levels) from a config
+file instead of the brief's own stated defaults. `--tearsheet` and `--trade-log`
+work exactly as they do for `backtest`.
+
 ## The dashboard
 
 Two processes. The API reads a state file the engine writes; it never holds the engine.
@@ -216,19 +244,24 @@ algo/
 ├── execution/   the fill simulator, shared by backtest and paper
 ├── portfolio/   position book, cash, the equity identity
 ├── risk/        sizing and the caps
-├── backtest/    the bar-by-bar event loop
+├── backtest/    the bar-by-bar event loop, and the bhavcopy-to-engine bridge
 ├── reporting/   metrics
 ├── strategy/    Strategy contract, BarContext, the strangle, two reference strategies
 ├── persistence/ the write-ahead order journal and the dashboard state store
 ├── api/         FastAPI read-only monitoring + the kill-switch request
-└── cli/         verify, config, backtest, walkforward, serve
+└── cli/         verify, config, backtest, backtest-bhavcopy, walkforward, live,
+                 serve, killswitch, credentials, bhavcopy
 
 dashboard/       Next.js monitoring page (4 runtime dependencies, no chart library)
 ```
 
-Still to come: the **chain recorder (M1.5)** and the **live adapters (M7)**: Kotak
-Neo trades the chain live while Angel SmartAPI supplies the historical/closed
-bars — see `docs/open-questions.md` Q10/Q11.
+The Kotak Neo (live broker) and Angel SmartAPI (historical bars) adapters are built
+and tested — `algo live` connects both sessions, reconciles against the broker, and
+reports; see `docs/open-questions.md` Q10/Q11 for the credentials it needs. What is
+**not** built yet: the **chain recorder (M1.5)** that would persist a live book
+continuously (`backtest-bhavcopy`, above, is the substitute until then), and the live
+trading loop itself — `algo live` proves the connection end to end but does not yet
+construct a strategy or place an order.
 
 ## Design notes worth knowing before reading the code
 

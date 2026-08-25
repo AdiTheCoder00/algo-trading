@@ -123,7 +123,7 @@ class Signal(BaseModel):
     @classmethod
     def _meaningful_reason(cls, v: str) -> str:
         if not v.strip():
-            raise ValueError("signal reason must not be blank — see brief §5")
+            raise ValueError("signal reason must not be blank - see brief section 5")
         return v
 
     @field_validator("legs")

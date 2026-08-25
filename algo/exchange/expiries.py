@@ -152,11 +152,22 @@ class ExpiryCalendar:
 
         Looks forward `horizon` contract months, no further. Silently scanning
         further would let the engine pick a contract that is not yet listed.
+
+        A contract month with nothing recorded is skipped rather than treated as
+        the end of the search — `option_expiries` (BarContext) already tolerates
+        this same gap for the identical reason: the *calendar* month `on` falls in
+        need not itself have a listed contract (its own contract may already have
+        expired and rolled off, or — for a table built from a bhavcopy archive
+        that only ever saw one expiry — never have existed at all). What matters
+        is finding the nearest listed one within the horizon, not the first one.
         """
         year, month = on.year, on.month
         for _ in range(horizon):
-            candidate = self.expiry_set(underlying, year, month)
-            if candidate.option_expiry >= on:
+            try:
+                candidate = self.expiry_set(underlying, year, month)
+            except CalendarError:
+                candidate = None
+            if candidate is not None and candidate.option_expiry >= on:
                 return candidate
             month += 1
             if month > 12:

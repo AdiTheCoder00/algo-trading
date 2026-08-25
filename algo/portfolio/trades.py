@@ -193,7 +193,7 @@ def summarise(trades: list[Trade]) -> str:
             f"{'sold' if leg.side is Side.SELL else 'bought'} {leg.instrument.key}"
             for leg in trade.legs
         )
-        r = f"{trade.r_multiple:+.2f}R" if trade.r_multiple is not None else "—"
+        r = f"{trade.r_multiple:+.2f}R" if trade.r_multiple is not None else "-"
         lines.append(
             f"{trade.opened_at:%Y-%m-%d %H:%M} .. "
             f"{trade.closed_at:%H:%M}  net {trade.net_pnl:>10,}  {r:>8}  "

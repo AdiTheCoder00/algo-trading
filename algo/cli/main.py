@@ -809,5 +809,219 @@ def inspect_bhavcopy(
     typer.echo("  stays an assumption until the recorder has live quotes.")
 
 
+@app.command("backtest-bhavcopy")
+def backtest_bhavcopy(
+    path: Path = typer.Argument(..., help="A bhavcopy CSV, or a directory of them."),
+    symbol: str = typer.Option("GOLDM", help="Which underlying to trade."),
+    config: Path | None = typer.Option(
+        None,
+        "--config",
+        help="A config file whose sizing, caps, kill switch, devolvement window, "
+        "strategy parameters and equity this run uses",
+    ),
+    min_volume: int = typer.Option(
+        1,
+        "--min-volume",
+        help="Minimum day volume before a strike is considered quotable "
+        "(bhavcopy has no bid/ask of its own, so this is the only tradeability gate)",
+    ),
+    spread_ticks: int = typer.Option(
+        2,
+        "--spread-ticks",
+        help="Modelled spread, in ticks - this is what actually moves the fill "
+        "price away from the mid; see the command's --help",
+    ),
+    risk_free_rate: float = typer.Option(0.065, "--risk-free-rate"),
+    tearsheet: Path | None = typer.Option(None, help="Write an HTML tearsheet here"),
+    trade_log: Path | None = typer.Option(None, help="Write the trade log CSV here"),
+) -> None:
+    """Run the real GOLDM short-strangle strategy over recorded MCX bhavcopy history.
+
+    Where `backtest` proves the engine's cost arithmetic on generated data and
+    trades nothing resembling the actual strategy, this runs `DeltaStrangle`
+    itself against every real monthly cycle the bhavcopy archive covers.
+
+    It is a **shape test**, not a fill-accurate one, and says so in its own
+    output. Bhavcopy is end-of-day: there is no 09:30 print and no intraday grid,
+    so each session becomes exactly two bars - entry (09:30 IST, priced from the
+    day's open) and close (the real session close, priced from the day's close,
+    high and low). Every exit check in between - a stop that would have fired and
+    reversed by the close - is invisible to this run. See
+    algo/backtest/bhavcopy_runner.py and D-081 through D-085 for the rest of what
+    that trades away, and algo/data/bhavcopy.py for why the column mapping itself
+    is an unverified assumption until checked against a real file.
+    """
+    from decimal import Decimal
+
+    from algo.backtest.bhavcopy_runner import build_dataset
+    from algo.backtest.engine import BacktestEngine
+    from algo.backtest.prices import ChainFeedProvider, ChainPriceSource, CompositePriceSource
+    from algo.core.errors import DataError
+    from algo.core.signal import ComboExit
+    from algo.costs.charges import McxChargeModel
+    from algo.costs.margin import SpanApproxMargin
+    from algo.costs.slippage import TickSlippage
+    from algo.costs.spread import FixedTickSpread
+    from algo.data.bhavcopy import load_directory, parse_rows
+    from algo.execution.fills import FillSimulator
+    from algo.portfolio.book import Portfolio
+    from algo.reporting import metrics as metrics_mod
+    from algo.risk.devolvement import DevolvementGuard
+    from algo.risk.engine import FixedLotSizer, RiskEngine
+    from algo.risk.killswitch import KillSwitch
+    from algo.strategy.delta_strangle import DeltaStrangle
+
+    calendar = synthetic_calendar()
+
+    try:
+        rows = (
+            load_directory(path, symbol=symbol)
+            if path.is_dir()
+            else parse_rows(path, symbols=frozenset({symbol}))
+        )
+        typer.echo(f"read {path}")
+        dataset = build_dataset(
+            rows,
+            symbol=symbol,
+            calendar=calendar,
+            min_volume=min_volume,
+            risk_free_rate=risk_free_rate,
+        )
+    except DataError as exc:
+        typer.echo("")
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(
+        f"sessions       {dataset.sessions_used} used, {len(dataset.skipped_sessions)} skipped"
+    )
+    for reason in dataset.skipped_sessions:
+        typer.echo(f"  ! {reason}")
+    if not dataset.bars:
+        typer.echo("no usable sessions - nothing to run")
+        raise typer.Exit(code=1)
+
+    if config is not None:
+        from algo.config.loader import load_config as resolve
+
+        cfg = resolve(config)
+        strategy = DeltaStrangle(
+            underlying=symbol,
+            target_delta=cfg.strategy.target_delta,
+            delta_tolerance=cfg.strategy.delta_tolerance,
+            entry_times_ist=cfg.strategy.entry_bars_ist,
+            min_dte=cfg.strategy.min_dte,
+            max_dte=cfg.strategy.max_dte,
+            take_profit=ComboExit(
+                kind=cfg.strategy.exit.take_profit_kind, value=cfg.strategy.exit.take_profit_value
+            ),
+            stop_loss=ComboExit(
+                kind=cfg.strategy.exit.stop_loss_kind, value=cfg.strategy.exit.stop_loss_value
+            ),
+        )
+        starting_equity = cfg.risk.starting_equity
+        lots = cfg.risk.sizing.fixed_lots
+        max_lots = cfg.risk.caps.max_lots_per_underlying
+        margin_cap_pct = cfg.risk.caps.max_total_margin_pct
+        kill_switch = KillSwitch(
+            daily_loss_limit_pct=cfg.risk.kill_switch.daily_loss_limit_pct,
+            max_consecutive_losses=cfg.risk.kill_switch.max_consecutive_losses,
+            max_drawdown_pct=cfg.risk.kill_switch.max_drawdown_pct,
+        )
+        force_exit = cfg.risk.devolvement.force_exit_sessions_before_expiry
+        block_within = cfg.risk.devolvement.block_new_entries_within_dte
+        stop_viability = cfg.strategy.exit.min_stop_to_cost_ratio
+        on_breach = cfg.strategy.exit.on_stop_viability_breach
+        typer.echo(f"config         {config} ({lots} lot(s), equity {starting_equity})")
+    else:
+        strategy = DeltaStrangle(underlying=symbol)
+        starting_equity = Decimal("1000000.00")
+        lots = 1
+        max_lots = 5
+        margin_cap_pct = Decimal("50")
+        kill_switch = KillSwitch(
+            daily_loss_limit_pct=Decimal("2"),
+            max_consecutive_losses=3,
+            max_drawdown_pct=Decimal("10"),
+        )
+        force_exit = 1
+        block_within = 2
+        stop_viability = None
+        on_breach = "warn"
+
+    engine = BacktestEngine(
+        bars=dataset.bars,
+        calendar=calendar,
+        specs=ContractSpecStore.default(),
+        strategy=strategy,
+        risk=RiskEngine(
+            sizer=FixedLotSizer(lots),
+            spec_for=None,
+            max_concurrent_positions=2,  # a strangle is two positions
+            max_lots_per_underlying=max_lots,
+            margin_cap_pct=margin_cap_pct,
+        ),
+        simulator=FillSimulator(
+            spread=FixedTickSpread(spread_ticks),
+            slippage=TickSlippage(market_ticks=0, stop_ticks=2),
+            charges=McxChargeModel.default(),
+        ),
+        portfolio=Portfolio(starting_equity),
+        instrument=dataset.instrument,
+        timeframe=Timeframe(minutes=30),
+        is_option=True,
+        price_source=CompositePriceSource(ChainPriceSource(dataset.chain_snapshots)),
+        chain_provider=ChainFeedProvider(dataset.chain_snapshots),
+        expiries=dataset.expiries,
+        devolvement=DevolvementGuard(
+            calendar=calendar,
+            force_exit_sessions_before_expiry=force_exit,
+            block_new_entries_within_dte=block_within,
+        ),
+        kill_switch=kill_switch,
+        margin=SpanApproxMargin(),
+        mode="backtest",
+        broker="backtest",
+        stop_viability_threshold=stop_viability,
+        on_stop_viability_breach=on_breach,
+    )
+    result = engine.run()
+
+    typer.echo("")
+    typer.echo(f"cycles         {len(result.trades)} round trip(s)")
+    summary = metrics_mod.compute(
+        result.equity_curve,
+        trade_count=result.round_trips,
+        total_cost=result.realised_cost,
+        trades=result.trades,
+    )
+    typer.echo(summary.summary())
+    typer.echo("")
+    typer.echo(f"  spread paid     {result.spread_cost:,}")
+    typer.echo(f"  charges paid    {result.total_charges:,}")
+    for warning in result.warnings:
+        typer.echo(f"  ! {warning}")
+    typer.echo("  ! SHAPE TEST ONLY - two ticks a day (open, close), not a real")
+    typer.echo("    intraday grid. See the command's --help for what that trades away.")
+
+    if trade_log is not None:
+        from algo.reporting.export import write_trade_log
+
+        typer.echo(f"  trade log  -> {write_trade_log(result.trades, trade_log)}")
+    if tearsheet is not None:
+        from algo.reporting.tearsheet import render, write
+
+        markup = render(
+            title=f"GOLDM strangle - {symbol} bhavcopy",
+            metrics=summary,
+            curve=result.equity_curve,
+            trades=result.trades,
+            warnings=(*result.warnings, "SHAPE TEST: two ticks a day, not a real intraday grid"),
+            dataset_hash=result.dataset_hash,
+            config_hash=result.config_hash,
+        )
+        typer.echo(f"  tearsheet  -> {write(tearsheet, markup)}")
+
+
 if __name__ == "__main__":
     app()

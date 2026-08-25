@@ -143,3 +143,20 @@ class TestConfigHash:
         base: AppConfig = load_config(REFERENCE_CONFIG, env={})
         rebuilt = AppConfig.model_validate(base.model_dump(mode="json"))
         assert config_hash(base) == config_hash(rebuilt)
+
+
+class TestComboExitKindStaysInSync:
+    """`ExitConfig`'s kind fields are a second Literal, not an import of
+    `ComboExit.kind` (config would otherwise pull in core.signal's frozen-model
+    machinery for one type alias). A second copy can silently drift, so it is
+    checked here instead of trusted."""
+
+    def test_config_and_signal_declare_the_same_exit_kinds(self) -> None:
+        from typing import get_args
+
+        from algo.config.schema import ComboExitKind
+        from algo.core.signal import ComboExit
+
+        config_kinds = set(get_args(ComboExitKind))
+        signal_kinds = set(get_args(ComboExit.model_fields["kind"].annotation))
+        assert config_kinds == signal_kinds

@@ -16,10 +16,26 @@ from __future__ import annotations
 from datetime import time
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from algo.core.enums import Exchange, Mode
+
+#: Mirrors `algo.core.signal.ComboExit.kind` exactly. Kept as a second Literal
+#: rather than imported from there: importing core.signal into config would pull
+#: pydantic's frozen-model machinery into the config-loading path for a single
+#: type alias, and the two are checked against each other by
+#: tests/test_config.py so they cannot silently drift apart.
+ComboExitKind = Literal[
+    "PCT_OF_MARGIN_AT_ENTRY",
+    "PCT_OF_EQUITY_AT_ENTRY",
+    "PCT_OF_CREDIT",
+    "MULTIPLE_OF_CREDIT",
+    "ABS_INR",
+    "DELTA_BREACH",
+    "UNDERLYING_MOVE_PCT",
+]
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
 
@@ -153,9 +169,9 @@ class RiskConfig(BaseModel):
 class ExitConfig(BaseModel):
     model_config = _FROZEN
 
-    take_profit_kind: str = "PCT_OF_MARGIN_AT_ENTRY"
+    take_profit_kind: ComboExitKind = "PCT_OF_MARGIN_AT_ENTRY"
     take_profit_value: Decimal = Decimal("2")
-    stop_loss_kind: str = "PCT_OF_MARGIN_AT_ENTRY"
+    stop_loss_kind: ComboExitKind = "PCT_OF_MARGIN_AT_ENTRY"
     stop_loss_value: Decimal = Decimal("1")
     evaluate_on: str = Field(default="bar_close", pattern="^(bar_close|tick)$")
     min_stop_to_cost_ratio: Decimal = Decimal("3")

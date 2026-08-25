@@ -346,7 +346,7 @@ class BacktestEngine:
         reference = self._prices.fill_reference(order.instrument.key, bar.ts)
         if reference is None:
             raise DomainError(
-                f"no price available to fill {order.instrument.key} at {bar.ts} — "
+                f"no price available to fill {order.instrument.key} at {bar.ts} - "
                 "an order cannot be filled against a price nobody quoted"
             )
         spec = self._spec_for(order.instrument, session_day)
@@ -700,7 +700,7 @@ class BacktestEngine:
             state = self._kill_switch.state
             return (
                 RejectReason.KILL_SWITCH_TRIPPED,
-                f"kill switch tripped: {state.reason} — {state.detail}",
+                f"kill switch tripped: {state.reason} - {state.detail}",
             )
 
         if self._devolvement is None or self._expiries is None:
@@ -759,16 +759,16 @@ class BacktestEngine:
         warnings: list[str] = []
         if not self._sim.costs_verified:
             warnings.append(
-                "CHARGE RATES ARE PLACEHOLDERS — net P&L is not calibrated (D-011, Q6)"
+                "CHARGE RATES ARE PLACEHOLDERS - net P&L is not calibrated (D-011, Q6)"
             )
         if not self._sim.spread_measured:
             warnings.append(
-                "SPREAD IS MODELLED, NOT MEASURED — the recorder replaces this at M1.5"
+                "SPREAD IS MODELLED, NOT MEASURED - the recorder replaces this at M1.5"
             )
         margin_calibrated = self._margin is None or self._margin.is_calibrated
         if not margin_calibrated:
             warnings.append(
-                "MARGIN IS APPROXIMATED — and the stop is a percentage of margin, so "
+                "MARGIN IS APPROXIMATED - and the stop is a percentage of margin, so "
                 "the stop level is approximate too (Q18)"
             )
 

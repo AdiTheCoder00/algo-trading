@@ -94,7 +94,7 @@ def _reject_float_money(raw: dict[str, Any], path: Path) -> None:
             raise ConfigError(
                 f"{path}: '{dotted}' is {value!r}, an unquoted YAML float. Money and "
                 f"percentage values must be quoted strings so they convert to Decimal "
-                f'exactly — write "{value}" instead.'
+                f'exactly - write "{value}" instead.'
             )
 
 

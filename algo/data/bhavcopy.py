@@ -226,6 +226,26 @@ def futures_close(rows: Sequence[BhavcopyRow], *, symbol: str, on: date) -> Deci
     return min(candidates, key=lambda r: r.expiry).close
 
 
+def nearest_futures_expiry(
+    rows: Sequence[BhavcopyRow], *, symbol: str
+) -> Callable[[date], date]:
+    """The default option-expiry -> futures-expiry resolver: earliest futures
+    contract expiring on or after the option.
+
+    A documented heuristic, not a fact — open question **Q1c** exists to replace
+    it. Public so a caller building bars or an expiry table from the same rows
+    (`algo/backtest/bhavcopy_runner.py`) uses the identical pairing `build_snapshots`
+    uses, rather than a second, possibly-diverging guess.
+    """
+    futures_expiries = sorted({r.expiry for r in rows if r.symbol == symbol and not r.is_option})
+
+    def resolve(option_expiry: date) -> date:
+        later = [e for e in futures_expiries if e >= option_expiry]
+        return later[0] if later else option_expiry
+
+    return resolve
+
+
 def build_snapshots(
     rows: Sequence[BhavcopyRow],
     *,
@@ -240,18 +260,17 @@ def build_snapshots(
     prices are closing prices — dating them to the start of the day would place
     the whole chain before the market that produced it.
 
+    `session_close_ist` is a fixed hour and minute, not DST-aware — MCX actually
+    closes at 23:30 IST during US daylight saving and 23:55 otherwise (D-014), so
+    this stamps roughly a third of the year's snapshots up to 25 minutes early.
+    Acceptable for the `algo bhavcopy` inspector this feeds; a caller building bars
+    for the engine (`algo/backtest/bhavcopy_runner.py`) uses a real `MarketCalendar`
+    instead and does not go through this function's default.
+
     `resolve_underlying` maps an option expiry to the futures expiry it settles
-    into. The default pairs it with the earliest futures contract expiring on or
-    after the option — a documented heuristic, and the thing open question **Q1c**
-    exists to replace with fact.
+    into; see `nearest_futures_expiry` for the default.
     """
-    futures_expiries = sorted({r.expiry for r in rows if r.symbol == symbol and not r.is_option})
-
-    def default_underlying(option_expiry: date) -> date:
-        later = [e for e in futures_expiries if e >= option_expiry]
-        return later[0] if later else option_expiry
-
-    resolver = resolve_underlying or default_underlying
+    resolver = resolve_underlying or nearest_futures_expiry(rows, symbol=symbol)
     hour, minute = session_close_ist
 
     grouped: dict[tuple[date, date], list[BhavcopyRow]] = {}

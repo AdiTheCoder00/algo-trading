@@ -137,7 +137,7 @@ def create_app(
 
         warnings: list[str] = []
         if detail.get("costs_verified") == "false":
-            warnings.append("charge rates are placeholders — net P&L is not calibrated")
+            warnings.append("charge rates are placeholders - net P&L is not calibrated")
         if detail.get("spread_measured") == "false":
             warnings.append("spread is modelled, not measured")
         if detail.get("margin_calibrated") == "false":

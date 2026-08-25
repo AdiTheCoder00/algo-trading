@@ -122,7 +122,7 @@ class DevolvementGuard:
                 reason=RejectReason.DEVOLVEMENT_WINDOW,
                 detail=(
                     f"{on} is past the exit deadline of {self.exit_deadline(expiry)} "
-                    f"for the {expiry.option_expiry} expiry — an in-the-money short leg "
+                    f"for the {expiry.option_expiry} expiry - an in-the-money short leg "
                     "would devolve into a GOLDM futures position bound for physical delivery"
                 ),
             )

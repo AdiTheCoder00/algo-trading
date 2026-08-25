@@ -98,7 +98,7 @@ def validate_bars(
                     code="ZERO_VOLUME",
                     severity=Severity.WARN,
                     at=bar.ts,
-                    detail="untradeable — no fill may be simulated against this bar",
+                    detail="untradeable - no fill may be simulated against this bar",
                 )
             )
         if bar.high == bar.low and bar.volume > 0:

@@ -145,7 +145,7 @@ class BarWindow:
         n = len(self._bars)
         if index >= n or index < -n:
             raise LookAheadError(
-                f"bar index {index} is outside the visible window of {n} closed bars — "
+                f"bar index {index} is outside the visible window of {n} closed bars - "
                 "there is no data beyond the current bar"
             )
         return self._bars[index]
