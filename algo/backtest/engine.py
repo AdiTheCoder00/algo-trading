@@ -163,6 +163,7 @@ class BacktestEngine:
         "_entry_credit",
         "_exchange",
         "_expiries",
+        "_flatten_on_trip",
         "_flatten_requested",
         "_instrument",
         "_is_option",
@@ -206,6 +207,7 @@ class BacktestEngine:
         expiries: ExpiryCalendar | None = None,
         devolvement: DevolvementGuard | None = None,
         kill_switch: KillSwitch | None = None,
+        flatten_on_trip: bool = False,
         margin: MarginModel | None = None,
         state: StateStore | None = None,
         mode: str = "backtest",
@@ -241,6 +243,7 @@ class BacktestEngine:
         self._levels: ExitLevels | None = None
         self._entry_credit = Decimal("0")
         self._flatten_requested = False
+        self._flatten_on_trip = flatten_on_trip
         self._bar_counts: dict[date, int] = {}
         self._trade_builder = TradeBuilder(strategy.strategy_id)
         self._signal_meta: dict[str, tuple[str, dict[str, str]]] = {}
@@ -653,6 +656,16 @@ class BacktestEngine:
             # alone stops new orders; flattening is the caller's decision.
             reason = ExitReason.KILL_SWITCH
             detail = "flatten requested with the halt"
+        elif self._flatten_on_trip and self._kill_switch is not None and (
+            self._kill_switch.is_tripped
+        ):
+            # The switch tripped on its *own* limits rather than on a dashboard
+            # request. Until D-115 this branch did not exist and the configured
+            # `flatten_on_trip` decided nothing at all - the engine halted new
+            # entries and left an open position running whatever the file said.
+            state = self._kill_switch.state
+            reason = ExitReason.KILL_SWITCH
+            detail = f"flatten_on_trip: {state.reason} - {state.detail}"
 
         cycle = self._current_cycle()
         if self._devolvement is not None and cycle is not None:

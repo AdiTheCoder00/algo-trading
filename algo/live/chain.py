@@ -59,8 +59,8 @@ class LiveChainProvider:
         self,
         *,
         feed: KotakChainFeed,
+        max_staleness_s: float,
         risk_free_rate: float = 0.065,
-        max_staleness_s: float = 120.0,
     ) -> None:
         self._feed = feed
         self._risk_free_rate = risk_free_rate

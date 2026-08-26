@@ -198,6 +198,7 @@ def backtest(
             max_consecutive_losses=cfg.risk.kill_switch.max_consecutive_losses,
             max_drawdown_pct=cfg.risk.kill_switch.max_drawdown_pct,
         )
+        flatten_on_trip = cfg.risk.kill_switch.flatten_on_trip
         margin = SpanApproxMargin()
         stop_viability = cfg.strategy.exit.min_stop_to_cost_ratio
         on_breach = cfg.strategy.exit.on_stop_viability_breach
@@ -251,6 +252,7 @@ def backtest(
             timeframe=tf,
             is_option=False,
             kill_switch=kill_switch,
+            flatten_on_trip=flatten_on_trip,
             margin=margin,
             state=store,
             mode=mode,
@@ -628,7 +630,8 @@ def _run_paper_loop(
             clock=clock,
             session=SessionWindow(calendar),
             poll_interval_s=0.0,
-        )
+        ),
+        max_staleness_s=float(config.data.quality.max_stale_seconds),
     )
     expiries = _expiries_from_master(live_master, underlying, exchange)
     try:
@@ -1396,6 +1399,7 @@ def backtest_bhavcopy(
             max_consecutive_losses=cfg.risk.kill_switch.max_consecutive_losses,
             max_drawdown_pct=cfg.risk.kill_switch.max_drawdown_pct,
         )
+        flatten_on_trip = cfg.risk.kill_switch.flatten_on_trip
         force_exit = cfg.risk.devolvement.force_exit_sessions_before_expiry
         block_within = cfg.risk.devolvement.block_new_entries_within_dte
         stop_viability = cfg.strategy.exit.min_stop_to_cost_ratio
@@ -1457,6 +1461,7 @@ def backtest_bhavcopy(
                 block_new_entries_within_dte=block_within,
             ),
             kill_switch=kill_switch,
+            flatten_on_trip=flatten_on_trip,
             margin=SpanApproxMargin(),
             state=store,
             mode="backtest",
@@ -1669,6 +1674,7 @@ def backtest_smartapi(
             max_consecutive_losses=cfg.risk.kill_switch.max_consecutive_losses,
             max_drawdown_pct=cfg.risk.kill_switch.max_drawdown_pct,
         )
+        flatten_on_trip = cfg.risk.kill_switch.flatten_on_trip
         force_exit = cfg.risk.devolvement.force_exit_sessions_before_expiry
         block_within = cfg.risk.devolvement.block_new_entries_within_dte
         stop_viability = cfg.strategy.exit.min_stop_to_cost_ratio
@@ -1730,6 +1736,7 @@ def backtest_smartapi(
                 block_new_entries_within_dte=block_within,
             ),
             kill_switch=kill_switch,
+            flatten_on_trip=flatten_on_trip,
             margin=SpanApproxMargin(),
             state=store,
             mode="backtest",

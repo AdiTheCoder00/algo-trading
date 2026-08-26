@@ -50,6 +50,7 @@ class StubFeed:
 
 
 def _provider(feed: StubFeed, **kwargs: object) -> LiveChainProvider:
+    kwargs.setdefault("max_staleness_s", 120.0)
     return LiveChainProvider(feed=feed, **kwargs)  # type: ignore[arg-type]
 
 
