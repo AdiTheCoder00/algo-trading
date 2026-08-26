@@ -22,9 +22,11 @@ const READABLE = new Set([
   "equity",
   "positions",
   "trades",
+  "trade-stats",
   "signals",
   "notes",
   "kill-switch",
+  "chain",
 ]);
 
 /** The only path that may be written to. */

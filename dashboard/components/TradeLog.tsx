@@ -16,9 +16,12 @@ import { inr, shortTime } from "@/lib/api";
 
 interface Props {
   trades: Trade[];
+  /** trade_ids that arrived since the previous poll - flashed once so a new
+   * entry is noticed without depending on the reader having watched it land. */
+  newIds?: Set<string>;
 }
 
-export function TradeLog({ trades }: Props) {
+export function TradeLog({ trades, newIds }: Props) {
   if (trades.length === 0) {
     return <p className="empty">No completed trades yet.</p>;
   }
@@ -42,7 +45,7 @@ export function TradeLog({ trades }: Props) {
             const net = Number(trade.net_pnl);
             const r = trade.r_multiple ? Number(trade.r_multiple) : null;
             return (
-              <tr key={trade.trade_id}>
+              <tr key={trade.trade_id} className={newIds?.has(trade.trade_id) ? "row-new" : ""}>
                 <td className="mono">{shortTime(trade.opened_at)}</td>
                 <td className="mono">
                   {trade.closed_at ? shortTime(trade.closed_at) : "open"}

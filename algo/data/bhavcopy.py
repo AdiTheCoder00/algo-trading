@@ -29,15 +29,27 @@ So a bhavcopy backtest is a **shape test**: has this strategy ever worked, acros
 many real cycles. It is not a fill-accurate one. Shape over a hundred cycles still
 beats precision over none.
 
-## The column mapping is unverified
+## The column mapping — now verified for one layout
 
-MCX serves the file through a browser flow behind bot protection, so no sample
-could be fetched to confirm the headers. `MCX_DEFAULT_COLUMNS` is therefore a
-**stated assumption**, not a checked fact. `parse_rows` validates the header line
-on load and, when it does not match, raises with the columns it actually found
-next to the ones it wanted — so correcting it is a one-line remap rather than a
-debugging session. Drop a real file in and it either works or tells you exactly
-which name to change.
+`MCX_DEFAULT_COLUMNS` was written blind, because MCX serves the file through a
+browser flow behind bot protection. A real "commodity wise" export has since been
+read (D-105) and the guess was **almost** right: only `Volume` and
+`Open Interest` were wrong, both carrying a unit suffix in the real file.
+`MCX_COMMODITY_WISE_COLUMNS` records the checked layout. `MCX_DEFAULT_COLUMNS`
+remains **unverified** and is kept only because it may still match the plain CSV
+bhavcopy, which has never been seen — do not trust anything derived through it
+until a real CSV confirms it.
+
+`parse_rows` tries every known layout and, when none fit, raises with the columns
+it actually found next to each candidate — so correcting it stays a one-line
+remap rather than a debugging session.
+
+## The file is not always a CSV, or an Excel workbook
+
+The "commodity wise" download arrives with an `.xls` extension and is neither: it
+is an **HTML `<table>`**. Opening it with a CSV reader yields one meaningless
+column, and with an Excel reader an error. `parse_rows` sniffs the content and
+reads either form, because the extension is not evidence of anything.
 """
 
 from __future__ import annotations
@@ -46,6 +58,7 @@ import csv
 from collections.abc import Callable, Iterable, Sequence
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from html.parser import HTMLParser
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
@@ -106,8 +119,28 @@ MCX_DEFAULT_COLUMNS = BhavcopyColumns(
     open_interest="Open Interest",
 )
 
+#: VERIFIED against a real MCX "commodity wise" export, 2026-08-27 (D-105).
+#: Differs from the blind guess above in exactly two places: both the volume and
+#: open-interest headers carry a unit suffix.
+MCX_COMMODITY_WISE_COLUMNS = MCX_DEFAULT_COLUMNS.model_copy(
+    update={"volume": "Volume(Lots)", "open_interest": "Open Interest(Lots)"}
+)
+
+#: Tried in order by `parse_rows`. The verified layout goes first so a real file
+#: matches on the first attempt and the unverified guess stays a fallback.
+KNOWN_LAYOUTS: tuple[BhavcopyColumns, ...] = (
+    MCX_COMMODITY_WISE_COLUMNS,
+    MCX_DEFAULT_COLUMNS,
+)
+
+#: Extensions a bhavcopy actually arrives with. `.xls` is in here because the
+#: commodity-wise export uses it for HTML - the content is sniffed either way.
+DATA_FILE_PATTERNS = ("*.csv", "*.xls")
+
 #: Date formats seen in Indian exchange files. Tried in order.
-DATE_FORMATS = ("%d-%b-%Y", "%d%b%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y")
+#: `%d %b %Y` is the commodity-wise trade date ("29 Jul 2026"); `%d%b%Y` is the
+#: expiry in the same file ("29JUL2026").
+DATE_FORMATS = ("%d-%b-%Y", "%d%b%Y", "%d %b %Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y")
 
 
 class BhavcopyRow(BaseModel):
@@ -139,15 +172,79 @@ class BhavcopyRow(BaseModel):
         return self.volume > 0
 
 
+class _TableRows(HTMLParser):
+    """Pull one `<table>` out of the HTML that MCX serves as an `.xls`.
+
+    Deliberately stdlib: the project carries no HTML dependency, and this is a
+    single flat table with no nesting to resolve. Cells are taken in document
+    order and zipped against the header row, which is the same contract
+    `csv.DictReader` offers — so `_to_row` cannot tell the two sources apart.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.header: list[str] = []
+        self.rows: list[list[str]] = []
+        self._cell: list[str] | None = None
+        self._row: list[str] = []
+        self._is_header = False
+
+    def handle_starttag(self, tag: str, attrs: object) -> None:
+        if tag == "tr":
+            self._row = []
+            self._is_header = False
+        elif tag in ("td", "th"):
+            self._cell = []
+            self._is_header = self._is_header or tag == "th"
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("td", "th") and self._cell is not None:
+            self._row.append("".join(self._cell).strip())
+            self._cell = None
+        elif tag == "tr" and self._row:
+            if self._is_header and not self.header:
+                self.header = self._row
+            else:
+                self.rows.append(self._row)
+            self._row = []
+
+
+def _read_table(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    """Header and records, from either a CSV or an HTML table.
+
+    The extension is not consulted. The commodity-wise export is named `.xls`
+    while being HTML, so trusting the name is how a file gets read as one
+    meaningless column without anything raising.
+    """
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    if text.lstrip()[:1] == "<":
+        parser = _TableRows()
+        parser.feed(text)
+        if not parser.header:
+            raise DataError(f"{path} is HTML but contains no table header row")
+        return parser.header, [
+            dict(zip(parser.header, cells, strict=False)) for cells in parser.rows
+        ]
+
+    reader = csv.DictReader(text.splitlines())
+    header = [name.strip() for name in (reader.fieldnames or [])]
+    return header, list(reader)
+
+
 def parse_rows(
     path: Path,
     *,
-    columns: BhavcopyColumns = MCX_DEFAULT_COLUMNS,
+    columns: BhavcopyColumns | None = None,
     symbols: frozenset[str] | None = None,
 ) -> list[BhavcopyRow]:
-    """Read a bhavcopy CSV.
+    """Read a bhavcopy, as CSV or as the HTML table MCX serves with an `.xls` name.
 
-    Raises with the headers it actually found when the mapping does not fit,
+    With `columns=None` every layout in `KNOWN_LAYOUTS` is tried and the first
+    that fits is used. Raises with the headers it actually found when none fit,
     rather than parsing whatever happens to be in the right position. A file
     silently read against the wrong columns is the worst possible outcome here —
     every downstream number would be confidently wrong.
@@ -155,27 +252,33 @@ def parse_rows(
     if not path.exists():
         raise DataError(f"bhavcopy not found: {path}")
 
-    with path.open(newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle)
-        found = [name.strip() for name in (reader.fieldnames or [])]
-        missing = [name for name in columns.required() if name not in found]
-        if missing:
-            raise DataError(
-                f"{path} does not match the expected bhavcopy layout.\n"
-                f"  missing:   {', '.join(missing)}\n"
-                f"  file has:  {', '.join(found) or '(no header row)'}\n"
-                "The mapping in MCX_DEFAULT_COLUMNS is an unverified assumption - "
-                "pass a corrected BhavcopyColumns rather than editing the parser."
-            )
+    found, records = _read_table(path)
+    candidates = (columns,) if columns is not None else KNOWN_LAYOUTS
+    layout = next(
+        (c for c in candidates if not [n for n in c.required() if n not in found]), None
+    )
+    if layout is None:
+        detail = "\n".join(
+            f"  layout {i}: missing {', '.join(n for n in c.required() if n not in found)}"
+            for i, c in enumerate(candidates, start=1)
+        )
+        raise DataError(
+            f"{path} does not match any known bhavcopy layout.\n"
+            f"{detail}\n"
+            f"  file has:  {', '.join(found) or '(no header row)'}\n"
+            "MCX_DEFAULT_COLUMNS is still an unverified assumption (only the "
+            "commodity-wise layout has been checked against a real file) - "
+            "pass a corrected BhavcopyColumns rather than editing the parser."
+        )
 
-        rows: list[BhavcopyRow] = []
-        for line_no, raw in enumerate(reader, start=2):
-            row = _to_row(raw, columns, path, line_no)
-            if row is None:
-                continue
-            if symbols is not None and row.symbol not in symbols:
-                continue
-            rows.append(row)
+    rows: list[BhavcopyRow] = []
+    for line_no, raw in enumerate(records, start=2):
+        row = _to_row(raw, layout, path, line_no)
+        if row is None:
+            continue
+        if symbols is not None and row.symbol not in symbols:
+            continue
+        rows.append(row)
     return rows
 
 
@@ -199,9 +302,15 @@ def _to_row(
             is_option=is_option,
             strike=_decimal(strike_text) if is_option and strike_text else None,
             right=Right(right_text) if is_option and right_text in ("CE", "PE") else None,
-            open=_decimal(raw[columns.open]),
-            high=_decimal(raw[columns.high]),
-            low=_decimal(raw[columns.low]),
+            # A contract that never traded has an empty open/high/low and only a
+            # settlement close. Falling back to the close is not inventing a
+            # price - it is saying the only price this contract had all day was
+            # its settlement, which is exactly what an empty cell means here. The
+            # row still reports volume 0, so `traded` and `assume_spread` both
+            # continue to treat it as untradeable.
+            open=_decimal_or(raw[columns.open], raw[columns.close]),
+            high=_decimal_or(raw[columns.high], raw[columns.close]),
+            low=_decimal_or(raw[columns.low], raw[columns.close]),
             close=_decimal(raw[columns.close]),
             volume=_int(raw.get(columns.volume, "0")),
             open_interest=_int(raw.get(columns.open_interest, "0")),
@@ -399,11 +508,22 @@ def load_directory(
     directory: Path,
     *,
     symbol: str,
-    columns: BhavcopyColumns = MCX_DEFAULT_COLUMNS,
-    pattern: str = "*.csv",
+    columns: BhavcopyColumns | None = None,
+    pattern: str | None = None,
 ) -> list[BhavcopyRow]:
-    """Read every bhavcopy in `directory`, sorted by filename for determinism."""
-    files = sorted(directory.glob(pattern))
+    """Read every bhavcopy in `directory`, sorted by filename for determinism.
+
+    `columns=None` lets each file match against `KNOWN_LAYOUTS` independently, so
+    a directory holding both a CSV bhavcopy and a commodity-wise HTML export
+    loads without the caller having to separate them first.
+
+    `pattern=None` picks up both extensions. The commodity-wise export is HTML
+    named `.xls`, so keying the default off `.csv` alone would silently find
+    nothing in a directory that is entirely full of usable data - which is
+    exactly what happened the first time real files arrived.
+    """
+    patterns = DATA_FILE_PATTERNS if pattern is None else (pattern,)
+    files = sorted({f for p in patterns for f in directory.glob(p)})
     if not files:
         raise DataError(f"no files matching {pattern} in {directory}")
     rows: list[BhavcopyRow] = []
@@ -457,6 +577,11 @@ def _parse_date(value: str, column: str) -> date:
         except ValueError:
             continue
     raise ValueError(f"{column}={text!r} is not a date in any known format {DATE_FORMATS}")
+
+
+def _decimal_or(value: str, fallback: str) -> Decimal:
+    """`value` when it holds a number, otherwise `fallback`. See `_to_row`."""
+    return _decimal(value) if _clean(value) else _decimal(fallback)
 
 
 def _decimal(value: str) -> Decimal:

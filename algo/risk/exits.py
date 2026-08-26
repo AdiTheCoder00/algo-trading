@@ -5,18 +5,26 @@ strangle they have to be *combo* level: the position is two legs whose P&L only
 means anything together. A per-leg stop on a strangle closes the winning side and
 leaves the losing one open, which is the opposite of what a stop is for.
 
-Two decisions carry through this module.
+Three decisions carry through this module.
 
-**D-025 — levels are resolved once, at entry, and frozen.** Take profit is 2% of
-margin blocked; stop loss is 1%. Both become absolute rupee figures the moment the
-position opens. A level that floated with live equity would make the same trade
-exit at a different price because of unrelated P&L elsewhere in the account.
+**D-025 — levels are resolved once, at entry, and frozen.** Both become absolute
+rupee figures the moment the position opens. A level that floated with live equity
+would make the same trade exit at a different price because of unrelated P&L
+elsewhere in the account.
 
 **D-024 — the stop is compared against the round-trip cost.** On the margin basis
 the stop lands near ₹1,000 a lot while round-trip friction on a thin option book
 plausibly runs ₹500–1,500. A position that opens at its own stop is not a
 strategy. The check defaults to `warn` rather than `refuse`, because the basis was
 chosen with that arithmetic in view — the engine's job is to report, not to veto.
+
+**D-102 — the stop is optional, and its absence is never silent.** `stop_loss` of
+None means the position has no loss exit at all: it runs to take profit, to the
+forced pre-expiry exit, or to the end of the run. On a short strangle that is an
+unbounded loss on the call side, so the engine raises a standing warning for the
+whole run rather than letting a missing level pass unremarked. Omitting the
+setting does *not* disable it — the default stop stays in place, and turning it
+off takes an explicit `null` in config.
 """
 
 from __future__ import annotations
@@ -40,10 +48,13 @@ class ExitReason(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ExitLevels:
-    """Absolute rupee levels for one open position, fixed at entry."""
+    """Absolute rupee levels for one open position, fixed at entry.
+
+    `stop_loss` of None means the position has no loss exit (D-102).
+    """
 
     take_profit: Decimal
-    stop_loss: Decimal
+    stop_loss: Decimal | None
     margin_at_entry: Decimal
     equity_at_entry: Decimal
     credit_at_entry: Decimal
@@ -57,8 +68,11 @@ class ExitLevels:
         that is the same assumption the fill simulator makes for intrabar order
         (brief §6). Being consistent about it matters more than which one is
         chosen.
+
+        With no stop configured there is nothing to test on the losing side, and
+        a loss of any size passes straight through this check.
         """
-        if combo_pnl <= -self.stop_loss:
+        if self.stop_loss is not None and combo_pnl <= -self.stop_loss:
             return ExitReason.STOP_LOSS
         if combo_pnl >= self.take_profit:
             return ExitReason.TAKE_PROFIT
@@ -91,15 +105,24 @@ class ViabilityCheck:
 def resolve_levels(
     *,
     take_profit: ComboExit,
-    stop_loss: ComboExit,
+    stop_loss: ComboExit | None,
     margin: Decimal,
     equity: Decimal,
     credit: Decimal,
 ) -> ExitLevels:
-    """Turn percentage exits into absolute rupee levels, once."""
+    """Turn percentage exits into absolute rupee levels, once.
+
+    `stop_loss=None` resolves to no stop level at all, not to a stop of zero — a
+    zero would read as "exit the instant the position is down a rupee", which is
+    the opposite of what disabling it means.
+    """
     return ExitLevels(
         take_profit=_absolute(take_profit, margin=margin, equity=equity, credit=credit),
-        stop_loss=_absolute(stop_loss, margin=margin, equity=equity, credit=credit),
+        stop_loss=(
+            _absolute(stop_loss, margin=margin, equity=equity, credit=credit)
+            if stop_loss is not None
+            else None
+        ),
         margin_at_entry=margin,
         equity_at_entry=equity,
         credit_at_entry=credit,

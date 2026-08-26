@@ -63,6 +63,66 @@ export interface KillSwitchRequest {
 }
 
 /**
+ * Brief §10's summary half - win rate, profit factor, expectancy, the
+ * R-multiple distribution - computed server-side by the same `trade_stats()`
+ * the CLI's tearsheet uses (algo/reporting/metrics.py), not reimplemented
+ * here. Every ratio and money field is `None`/string rather than a bare 0:
+ * a profit factor of 0.0 reads as "loses everything", None reads as
+ * "nothing to divide by yet" - a different, truer statement with no trades.
+ */
+export interface TradeStats {
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate: string | null;
+  profit_factor: string | null;
+  gross_profit: string;
+  gross_loss: string;
+  largest_win: string | null;
+  largest_loss: string | null;
+  longest_losing_streak: number;
+  trades_with_r: number;
+  expectancy_r: string | null;
+  average_win_r: string | null;
+  average_loss_r: string | null;
+  histogram: { label: string; count: number }[];
+}
+
+/**
+ * One strike/right, as the engine actually saw it at the last recorded bar -
+ * built by `algo/backtest/engine.py`'s `_record_chain_snapshot`, which mirrors
+ * exactly what `BarContext.chain()` hands the strategy, so this is not a
+ * second, possibly-diverging view of the chain.
+ */
+export interface ChainRow {
+  strike: string;
+  right: "CE" | "PE";
+  bid: string | null;
+  ask: string | null;
+  ltp: string | null;
+  volume: number;
+  iv: number | null;
+  delta: number | null;
+  tradeable: boolean;
+  /** `QuoteFlag` — why this row is not tradeable, when it is not. Absent on
+   * chains recorded before the flag was carried through. */
+  flag?: string;
+  held: boolean;
+}
+
+export interface ChainSnapshot {
+  ts: string;
+  underlying: string;
+  option_expiry: string;
+  futures_price: string;
+  dte: number;
+  /** `null` when the run has no devolvement guard wired in at all - a run
+   * that never enforces the rule should not claim to track its deadline. */
+  forced_exit_in_sessions: number | null;
+  rows: ChainRow[];
+}
+
+/**
  * One completed (or still-open) round trip, exactly as `Trade.to_log_row()`
  * writes it (algo/core/trade.py) — every field a string, `closed_at` and
  * `r_multiple` empty rather than absent when there is nothing to report yet.
@@ -125,6 +185,8 @@ export const api = {
   signals: (limit = 20) => get<Signal[]>(`signals?limit=${limit}`),
   notes: (limit = 20) => get<Note[]>(`notes?limit=${limit}`),
   trades: (limit = 50) => get<Trade[]>(`trades?limit=${limit}`),
+  tradeStats: () => get<TradeStats>("trade-stats"),
+  chain: () => get<ChainSnapshot | null>("chain"),
   killSwitchHistory: () => get<KillSwitchRequest[]>("kill-switch"),
 
   async requestHalt(reason: string, flatten: boolean): Promise<{ note: string }> {

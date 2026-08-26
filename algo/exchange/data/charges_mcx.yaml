@@ -1,18 +1,21 @@
 # MCX charge rates.
 #
 # ############################################################################
-# #  PLACEHOLDER VALUES.  `verified: false`.                                  #
+# #  `verified: false` — and it stays false here, regardless of sourcing.     #
 # #                                                                           #
-# #  Every number below came from secondary sources while planning, not from  #
-# #  a contract note. They are here so the engine can run and so the shape    #
-# #  of the model can be tested — not so anyone can trust a net P&L figure.   #
+# #  Decision D-011 sets a specific, deliberately strict bar for `verified`:  #
+# #  rates reverse-engineered from a real Angel One MCX options contract      #
+# #  note, locked by a test that reproduces that note to the paisa. Nothing   #
+# #  short of that flips it — not a broker's own published rate card, not an  #
+# #  exchange circular, however well cited. Both are used below, and both     #
+# #  still leave open exactly what D-011 exists to catch: a real contract     #
+# #  note reflects the specific plan, GST state, and any account-level        #
+# #  adjustment on the actual account, and a rate card does not.              #
 # #                                                                           #
-# #  Decision D-011: these are replaced by rates reverse-engineered from a    #
-# #  real Angel One MCX options contract note, locked by a test that          #
-# #  reproduces that note to the paisa. Until then `verified` stays false,    #
-# #  every report carries the flag, and the live path refuses to use them.    #
-# #                                                                           #
-# #  See docs/open-questions.md Q6.                                           #
+# #  So this is a real improvement over the previous placeholder — cited,     #
+# #  dated, and checked against more than one source per figure — not a       #
+# #  substitute for what D-011 asks for. The live path still refuses to use   #
+# #  it while `verified` is false. See docs/open-questions.md Q6.             #
 # ############################################################################
 #
 # Notes on the bases, which differ and are easy to conflate:
@@ -30,21 +33,30 @@ rates:
     effective_from: "2026-01-01"
     effective_to: null
     source: >-
-      PLACEHOLDER. Assembled from secondary sources (broker calculators and
-      published fee summaries) during Milestone 0 planning, not from a contract
-      note. Not to be trusted to the paisa. Replace per D-011 / Q6.
+      Sourced 2026-08-26, not from a contract note (D-011 / Q6 still open).
+      Brokerage: Kotak Neo's own published Trade Free plan page states a flat
+      Rs 10 per executed order for Commodity & Currency, conditional on
+      maintaining exchange-prescribed margins
+      (kotakneo.com/pricing/trade-free-plan) — assumes that plan; a different
+      Kotak Neo plan tier would need a different figure. Exchange transaction
+      charge (options): MCX's own fee revision, reported at Rs 41.80 per lakh
+      of premium turnover = 0.0418%, effective 2024-10-01 (Upstox market news,
+      corroborated by Rupeezy's exchange-and-government charges page). CTT,
+      stamp duty, SEBI turnover fee, GST: fixed by regulation/exchange circular
+      rather than broker-set, cross-checked against Rupeezy's breakdown and
+      unchanged from the prior figures, which already had these right.
 
-    brokerage_per_order: "20"
+    brokerage_per_order: "10" # Kotak Neo Trade Free plan, commodity & currency
     brokerage_pct_of_turnover: "0"
-    sebi_pct: "0.0001" # approx Rs 10 per crore of turnover
+    sebi_pct: "0.0001" # Rs 10 per crore of turnover, regulatory, not broker-set
     gst_pct: "18"
 
     option:
       ctt_sell_pct: "0.05" # on premium, sell side, paid by the writer
-      exchange_txn_pct: "0.0418" # UNVERIFIED - MCX options rate differs from futures
+      exchange_txn_pct: "0.0418" # MCX circular, Rs 41.80/lakh premium turnover, eff. 2024-10-01
       stamp_duty_buy_pct: "0.003"
 
     future:
       ctt_sell_pct: "0.01" # on notional, sell side, non-agri
-      exchange_txn_pct: "0.0026" # approx Rs 260 per crore, non-agri
+      exchange_txn_pct: "0.0021" # Rs 210 per crore, non-agri — corrected from an unsourced 0.0026
       stamp_duty_buy_pct: "0.002"

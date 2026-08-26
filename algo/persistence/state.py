@@ -95,6 +95,14 @@ CREATE TABLE IF NOT EXISTS kill_switch_requests (
     acted_on_at  TEXT
 );
 
+-- A snapshot, not a log, same reasoning as positions: the dashboard wants to
+-- know what the chain looks like right now, not a bar-by-bar archive of every
+-- chain the run ever saw. One row, replaced each time it changes.
+CREATE TABLE IF NOT EXISTS chain_snapshot (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    payload  TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS signals_ts ON signals(ts);
 CREATE INDEX IF NOT EXISTS trades_opened ON trades(opened_at);
 """
@@ -241,6 +249,18 @@ class StateStore:
                 ],
             )
 
+    def record_chain_snapshot(self, payload: dict[str, Any]) -> None:
+        """The option chain as of the most recent bar. A snapshot, not a log -
+        `replace_positions`'s reasoning applies here too: an operator wants to
+        know what the chain looks like right now, not page through every chain
+        a run ever saw."""
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO chain_snapshot (id, payload) VALUES (1, ?) "
+                "ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
+                (json.dumps(payload, sort_keys=True, default=str),),
+            )
+
     def record_signal(self, row: SignalRow) -> None:
         with self._tx() as conn:
             conn.execute(
@@ -315,6 +335,13 @@ class StateStore:
                 )
                 for r in cursor.fetchall()
             ]
+
+    def chain_snapshot(self) -> dict[str, Any] | None:
+        with closing(
+            self._conn.execute("SELECT payload FROM chain_snapshot WHERE id = 1")
+        ) as cursor:
+            row = cursor.fetchone()
+            return json.loads(row["payload"]) if row else None
 
     def signals(self, limit: int = 50) -> list[SignalRow]:
         with closing(

@@ -1,9 +1,15 @@
-# GOLDM short strangle — reference configuration.
+# GOLDM short strangle - BHAVCOPY VARIANT of config/goldm.yaml.
 #
-# Money and percentage values are QUOTED STRINGS. YAML would parse a bare
-# 1000000.00 as a float, handing a float into money math at the very first step
-# and defeating brief §2.5 before the engine starts. The loader refuses unquoted
-# values on these paths rather than accepting one it knows to be slightly wrong.
+# This is NOT the configured strategy. It exists because the bhavcopy export
+# lists only the FRONT option expiry on any session, and D-104's roll needs the
+# NEXT cycle quoted on the front cycle's expiry day. Those rows do not exist in
+# the data, so the roll cannot be tested against it (D-106).
+#
+# Everything else is identical to goldm.yaml - no stop loss, a 4% target, and
+# strikes restricted to multiples of 1000. Only the two roll settings differ,
+# and they are set back to the front-cycle behaviour the data can actually
+# support. Read any result from this file as "the strangle shape, on real
+# cycles", never as "the roll strategy".
 
 mode: backtest # backtest | paper | live. Live is gated twice — see algo/config/modes.py
 
@@ -67,8 +73,7 @@ strategy:
   strike_multiple: "1000" # GOLDM lists every 500; the round thousands hold the
     # book — 3.8x the median volume on a measured chain, and 165k vs 50k inside
     # the 0.15–0.30 delta band (D-103). A filter, never a rounding.
-  roll_at_front_dte: 0 # enter on the front cycle's expiry day itself...
-  cycle_offset: 1 # ...selling the NEXT listed cycle, ~30 DTE (D-104)
+  # roll_at_front_dte / cycle_offset deliberately omitted - see header.
   exit:
     take_profit_kind: PCT_OF_MARGIN_AT_ENTRY
     take_profit_value: "4"

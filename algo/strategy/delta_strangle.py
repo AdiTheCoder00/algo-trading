@@ -38,11 +38,13 @@ from decimal import Decimal
 
 from algo.core.chain import ChainRow, OptionChainSnapshot
 from algo.core.enums import Atomicity, Right, Side, SignalAction
+from algo.core.errors import CalendarError
 from algo.core.fill import Fill
 from algo.core.ids import signal_id
 from algo.core.instrument import OptionId
 from algo.core.signal import ComboExit, PriceIntent, Signal, SignalLeg
-from algo.core.timeutil import iso, to_ist
+from algo.core.timeutil import iso, ist_date, to_ist
+from algo.exchange.expiries import ExpirySet
 from algo.strategy.base import Strategy
 from algo.strategy.context import BarContext
 
@@ -63,6 +65,10 @@ class DeltaStrangle(Strategy):
         max_dte: int = 45,
         take_profit: ComboExit | None = None,
         stop_loss: ComboExit | None = None,
+        no_stop: bool = False,
+        strike_multiple: Decimal | None = None,
+        roll_at_front_dte: int | None = None,
+        cycle_offset: int = 0,
         config_hash: str = "",
     ) -> None:
         super().__init__()
@@ -75,9 +81,18 @@ class DeltaStrangle(Strategy):
         self._take_profit = take_profit or ComboExit(
             kind="PCT_OF_MARGIN_AT_ENTRY", value=Decimal("2")
         )
-        self._stop_loss = stop_loss or ComboExit(
-            kind="PCT_OF_MARGIN_AT_ENTRY", value=Decimal("1")
+        # `no_stop` is a separate flag rather than simply passing stop_loss=None,
+        # because None is also what a caller that just did not specify one
+        # passes - and those two must not mean the same thing for a safety
+        # level (D-102). Disabling the stop has to be said out loud.
+        self._stop_loss = (
+            None
+            if no_stop
+            else (stop_loss or ComboExit(kind="PCT_OF_MARGIN_AT_ENTRY", value=Decimal("1")))
         )
+        self._strike_multiple = strike_multiple
+        self._roll_at_front_dte = roll_at_front_dte
+        self._cycle_offset = cycle_offset
         self._config_hash = config_hash
         self._traded_cycles: set[date] = set()
 
@@ -104,7 +119,18 @@ class DeltaStrangle(Strategy):
             "min_dte": str(self._min_dte),
             "max_dte": str(self._max_dte),
             "take_profit": f"{self._take_profit.kind}:{self._take_profit.value}",
-            "stop_loss": f"{self._stop_loss.kind}:{self._stop_loss.value}",
+            "stop_loss": (
+                f"{self._stop_loss.kind}:{self._stop_loss.value}"
+                if self._stop_loss is not None
+                else "NONE"
+            ),
+            "strike_multiple": (
+                str(self._strike_multiple) if self._strike_multiple is not None else ""
+            ),
+            "roll_at_front_dte": (
+                str(self._roll_at_front_dte) if self._roll_at_front_dte is not None else ""
+            ),
+            "cycle_offset": str(self._cycle_offset),
         }
 
     # ------------------------------------------------------------------ logic
@@ -121,13 +147,44 @@ class DeltaStrangle(Strategy):
         if local not in self._entry_times:
             return []
 
-        cycle = ctx.nearest_expiry(self._underlying)
+        today = ist_date(ctx.now)
+        front = ctx.nearest_expiry(self._underlying)
+
+        # The roll gate: only enter once the FRONT cycle is within this many days
+        # of expiring. With 0 that is its expiry day itself, which is what "trade
+        # on the current month's expiry date" means.
+        #
+        # Expressed as a threshold rather than an equality so a holiday cannot
+        # skip the roll entirely: if the expiry date is not a trading session,
+        # the last session before it still satisfies `<=` and the cycle is
+        # traded. It can therefore be true on several consecutive sessions, and
+        # is not what limits the strategy to one entry - the cadence check below
+        # is, keyed on the cycle actually sold.
+        if self._roll_at_front_dte is not None:
+            front_dte = front.days_to_option_expiry(today)
+            if front_dte > self._roll_at_front_dte:
+                return []
+
+        # Which cycle to sell. Offset 0 is the front one; 1 is the next listed
+        # cycle after it, which is what pairs with rolling on expiry day.
+        # Resolved by date rather than by adding a month, because gold does not
+        # list every calendar month and "the month after" is not the same fact
+        # as "the next contract".
+        try:
+            cycle = self._cycle_to_trade(ctx, front)
+        except CalendarError as exc:
+            self.note(
+                f"no entry: the cycle {self._cycle_offset} after {front.option_expiry} "
+                f"is not listed yet ({exc})"
+            )
+            return []
+
         if cycle.option_expiry in self._traded_cycles:
             # Cadence: one strangle per monthly cycle. Without this the strategy
             # re-enters the moment an exit leaves it flat, turning ~12 trades a
             # year into as many as the exits allow.
             return []
-        dte = ctx.days_to_expiry(self._underlying)
+        dte = cycle.days_to_option_expiry(today)
         if not self._min_dte <= dte <= self._max_dte:
             self.note(
                 f"no entry: {dte} days to the {cycle.option_expiry} expiry is outside "
@@ -198,9 +255,19 @@ class DeltaStrangle(Strategy):
         ]
 
     # ---------------------------------------------------------------- helpers
+    def _cycle_to_trade(self, ctx: BarContext, front: ExpirySet) -> ExpirySet:
+        """Walk `cycle_offset` listed cycles past the front one."""
+        cycle = front
+        for _ in range(self._cycle_offset):
+            cycle = ctx.expiry_after(self._underlying, cycle)
+        return cycle
+
     def _select(self, chain: OptionChainSnapshot, right: Right) -> ChainRow | None:
         return chain.nearest_delta(
-            float(self._target), right, tolerance=float(self._tolerance)
+            float(self._target),
+            right,
+            tolerance=float(self._tolerance),
+            strike_multiple=self._strike_multiple,
         )
 
     def _credit(self, call: ChainRow, put: ChainRow) -> Decimal:

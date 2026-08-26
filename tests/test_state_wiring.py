@@ -19,6 +19,7 @@ import pytest
 
 from algo.backtest.engine import BacktestEngine
 from algo.core.bar import Bar, Timeframe
+from algo.core.enums import QuoteFlag
 from algo.core.instrument import FutureId
 from algo.core.timeutil import utc
 from algo.costs.charges import McxChargeModel
@@ -52,6 +53,7 @@ def _run(
     *,
     strategy: str = "coin_flip",
     kill_switch: KillSwitch | None = None,
+    margin_cap_pct: Decimal | None = None,
 ) -> BacktestEngine:
     """Run the same wiring the CLI builds for `algo backtest --state`."""
     bars = _bars()
@@ -69,6 +71,7 @@ def _run(
             spec_for=None,
             max_concurrent_positions=1,
             max_lots_per_underlying=5,
+            margin_cap_pct=margin_cap_pct,
         ),
         simulator=FillSimulator(
             spread=FixedTickSpread(2),
@@ -216,6 +219,151 @@ class TestEngineConsumesKillSwitchRequests:
         assert result.exits == ()
         # The halt stopped new orders; without flatten the position is untouched.
         assert store.positions()
+
+
+class TestChainSnapshotIsRecorded:
+    """The dashboard's chain panel needs a real chain, not just an equity
+    number - this is the wiring that gets it there."""
+
+    def test_no_chain_provider_skips_silently(self, store: StateStore) -> None:
+        """`TestEngineWritesTheDashboard` and friends run coin_flip/buy_and_hold
+        on the underlying future directly - no chain_provider, no expiries. That
+        must not raise; it must simply have nothing to record."""
+        engine = _run(store, strategy="coin_flip")
+        engine.run()
+        assert store.chain_snapshot() is None
+
+    def test_a_real_strangle_run_records_a_real_chain(self, store: StateStore) -> None:
+        from algo.backtest.prices import ChainFeedProvider, ChainPriceSource, CompositePriceSource
+        from algo.core.enums import Exchange
+        from algo.core.instrument import FutureId as _FutureId
+        from algo.data.synthetic_chain import build_chain
+        from algo.exchange.expiries import ExpiryCalendar, ExpirySet, InstrumentMasterExpiries
+        from algo.risk.devolvement import DevolvementGuard
+        from algo.strategy.delta_strangle import DeltaStrangle
+
+        calendar = synthetic_calendar()
+        option_expiry = date(2026, 8, 28)
+        future = _FutureId(underlying="GOLDM", expiry=date(2026, 9, 4), exchange=Exchange.MCX)
+        expires_at = calendar.session_close(option_expiry)
+
+        bars = _bars()
+        chains = [
+            build_chain(
+                ts=bar.ts,
+                underlying_future=future,
+                option_expiry=option_expiry,
+                futures_price=bar.close,
+                expires_at=expires_at,
+                vol=0.2175,
+                strikes_each_side=14,
+                strike_centre=Decimal("156640"),
+                populate_greeks=True,
+            )
+            for bar in bars
+        ]
+        master = InstrumentMasterExpiries(
+            {
+                ("GOLDM", 2026, 8): ExpirySet(
+                    option_expiry=option_expiry, futures_expiry=date(2026, 9, 4)
+                )
+            }
+        )
+
+        engine = BacktestEngine(
+            bars=bars,
+            calendar=calendar,
+            specs=ContractSpecStore.default(),
+            strategy=DeltaStrangle(underlying="GOLDM", min_dte=3, max_dte=45),
+            risk=RiskEngine(
+                sizer=FixedLotSizer(1),
+                spec_for=None,
+                max_concurrent_positions=2,
+                max_lots_per_underlying=10,
+            ),
+            simulator=FillSimulator(
+                spread=FixedTickSpread(2),
+                slippage=TickSlippage(market_ticks=0, stop_ticks=2),
+                charges=McxChargeModel.default(),
+            ),
+            portfolio=Portfolio(STARTING),
+            instrument=future,
+            timeframe=Timeframe(minutes=30),
+            is_option=True,
+            price_source=CompositePriceSource(ChainPriceSource(chains)),
+            chain_provider=ChainFeedProvider(chains),
+            expiries=ExpiryCalendar(authority=master, rule=None),
+            devolvement=DevolvementGuard(
+                calendar=calendar,
+                force_exit_sessions_before_expiry=1,
+                block_new_entries_within_dte=2,
+            ),
+            state=store,
+            mode="backtest",
+            broker="backtest",
+        )
+        result = engine.run()
+
+        snapshot = store.chain_snapshot()
+        assert snapshot is not None
+        assert snapshot["underlying"] == "GOLDM"
+        assert snapshot["option_expiry"] == option_expiry.isoformat()
+        assert snapshot["rows"], "a real chain must carry real strikes"
+
+        row = snapshot["rows"][0]
+        assert set(row) == {
+            "strike",
+            "right",
+            "bid",
+            "ask",
+            "ltp",
+            "volume",
+            "iv",
+            "delta",
+            "tradeable",
+            "flag",
+            "held",
+        }
+        # Why a row is untradeable, not just that it is: a strike rejected for a
+        # blown-out spread (Q17) is a different fact from one nobody quoted.
+        assert row["flag"] in {f.value for f in QuoteFlag}
+
+        # `days_until_forced_exit` was already written for exactly this - "the
+        # deadline is never a surprise" (algo/risk/devolvement.py) - and had
+        # never actually reached anything a person could look at until now.
+        assert isinstance(snapshot["dte"], int)
+        assert snapshot["dte"] > 0, "the 19 Aug fixture session is well before the 28 Aug expiry"
+        assert isinstance(snapshot["forced_exit_in_sessions"], int)
+
+        if result.fills:
+            # Once the strangle is open, the two legs it actually holds must be
+            # the ones flagged - not just any two tradeable strikes.
+            assert any(r["held"] for r in snapshot["rows"])
+            held_count = sum(1 for r in snapshot["rows"] if r["held"])
+            assert held_count <= 2
+
+
+class TestMarginUtilisationIsRecorded:
+    """`RiskEngine`'s own cap decides whether the *next* signal can size at
+    all - surfaced so an operator does not have to infer a rejected entry was
+    a margin cap and not something else."""
+
+    def test_no_cap_configured_writes_nothing(self, store: StateStore) -> None:
+        engine = _run(store, strategy="buy_and_hold")  # margin_cap_pct defaults to None
+        engine.run()
+        assert "margin_used" not in store.health()
+
+    def test_a_configured_cap_is_reported(self, store: StateStore) -> None:
+        engine = _run(store, strategy="buy_and_hold", margin_cap_pct=Decimal("50"))
+        engine.run()
+
+        health = store.health()
+        assert "margin_used" in health
+        assert Decimal(health["margin_cap_pct"]) == Decimal("50")
+        # cap = equity * pct / 100; equity moves bar to bar, so check the
+        # relationship holds rather than pinning an exact rupee figure.
+        curve = store.equity_curve(limit=1)
+        assert Decimal(health["margin_cap"]) == curve[0].equity * Decimal("50") / Decimal("100")
 
 
 class TestWiringIsInvisible:

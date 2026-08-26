@@ -173,6 +173,12 @@ class ExitConfig(BaseModel):
     take_profit_value: Decimal = Decimal("2")
     stop_loss_kind: ComboExitKind = "PCT_OF_MARGIN_AT_ENTRY"
     stop_loss_value: Decimal = Decimal("1")
+    no_stop_loss: bool = Field(
+        default=False,
+        description="Run with NO loss exit at all (D-102). Deliberately a "
+        "separate flag rather than a null stop_loss_value: a safety level must "
+        "not be removable by omitting a line, only by saying so explicitly.",
+    )
     evaluate_on: str = Field(default="bar_close", pattern="^(bar_close|tick)$")
     min_stop_to_cost_ratio: Decimal = Decimal("3")
     on_stop_viability_breach: str = Field(default="warn", pattern="^(warn|refuse)$")
@@ -188,7 +194,42 @@ class StrategyConfig(BaseModel):
     cadence: str = Field(default="per_expiry_cycle", pattern="^(per_expiry_cycle|every_day)$")
     min_dte: int = 5
     max_dte: int = 45
+    strike_multiple: Decimal | None = Field(
+        default=None,
+        description="Only consider strikes that are exact multiples of this "
+        "(D-103). None considers every listed strike.",
+    )
+    roll_at_front_dte: int | None = Field(
+        default=None,
+        description="Only enter once the FRONT cycle is this many days from "
+        "expiry; 0 means its expiry day itself. None enters on any qualifying "
+        "session (D-104).",
+    )
+    cycle_offset: int = Field(
+        default=0,
+        ge=0,
+        description="Which listed expiry to sell: 0 the front one, 1 the next "
+        "after it. Pairs with roll_at_front_dte to roll into the next month on "
+        "the current month's expiry day.",
+    )
     exit: ExitConfig = ExitConfig()
+
+    @field_validator("roll_at_front_dte")
+    @classmethod
+    def _not_negative(cls, v: int | None) -> int | None:
+        if v is not None and v < 0:
+            raise ValueError(
+                f"roll_at_front_dte cannot be negative, got {v} - 0 already means "
+                "the front cycle's own expiry day"
+            )
+        return v
+
+    @field_validator("strike_multiple")
+    @classmethod
+    def _positive_multiple(cls, v: Decimal | None) -> Decimal | None:
+        if v is not None and v <= 0:
+            raise ValueError(f"strike_multiple must be positive, got {v}")
+        return v
 
 
 class PersistenceConfig(BaseModel):

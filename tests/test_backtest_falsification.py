@@ -358,14 +358,19 @@ class TestEngineInvariants:
 
 
 class TestHonestyOfTheReport:
-    def test_placeholder_charge_rates_are_flagged(self, calendar: MarketCalendar) -> None:
-        """A net P&L figure must never be mistaken for a calibrated one (D-011)."""
+    def test_unverified_charge_rates_are_flagged(self, calendar: MarketCalendar) -> None:
+        """A net P&L figure must never be mistaken for a calibrated one (D-011).
+
+        The rates themselves are sourced (D-011's follow-up: Kotak Neo's own rate
+        card, an MCX fee circular) rather than invented, but sourced is still not
+        the same as reproduced from a real contract note - which is the specific,
+        higher bar `verified` is gated on. The warning says so."""
         bars = _flat_bars(calendar)
         result = _run(
             BuyAndHold(GOLDM), bars, calendar, spread_ticks=2, charges=McxChargeModel.default()
         )
         assert not result.costs_verified
-        assert any("PLACEHOLDER" in w for w in result.warnings)
+        assert any("NOT CONTRACT-NOTE VERIFIED" in w for w in result.warnings)
 
     def test_a_modelled_spread_is_flagged(self, calendar: MarketCalendar) -> None:
         bars = _flat_bars(calendar)

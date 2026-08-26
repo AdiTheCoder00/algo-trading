@@ -137,7 +137,10 @@ def create_app(
 
         warnings: list[str] = []
         if detail.get("costs_verified") == "false":
-            warnings.append("charge rates are placeholders - net P&L is not calibrated")
+            warnings.append(
+                "charge rates are sourced, not contract-note verified - "
+                "net P&L is not calibrated to the paisa"
+            )
         if detail.get("spread_measured") == "false":
             warnings.append("spread is modelled, not measured")
         if detail.get("margin_calibrated") == "false":
@@ -189,11 +192,73 @@ def create_app(
             for row in state.positions()
         ]
 
+    @app.get("/chain")
+    def chain(state: StateStore = Store, _: None = Guarded) -> dict[str, Any] | None:
+        """The option chain as of the most recent bar - every strike, its delta
+        and IV, and which legs (if any) the strategy is actually holding.
+        `None` when the run has no chain wired in (the M3 falsification and
+        anything trading the underlying directly) or has not reached a bar yet."""
+        return state.chain_snapshot()
+
     @app.get("/trades")
     def trades(
         limit: int = 100, state: StateStore = Store, _: None = Guarded
     ) -> list[dict[str, Any]]:
         return state.trades(limit=limit)
+
+    @app.get("/trade-stats")
+    def trade_stats_endpoint(state: StateStore = Store, _: None = Guarded) -> dict[str, Any]:
+        """Win rate, profit factor, expectancy, the R-multiple distribution -
+        brief §10's summary half, computed by the same tested `trade_stats()`
+        the CLI's tearsheet already uses (algo/reporting/metrics.py), not a
+        second implementation of the same arithmetic in this file.
+
+        `trade_stats()` only ever reads `.net_pnl` and `.r_multiple` off each
+        trade, both of which already survive the flattening `to_log_row()` does
+        for storage - so a minimal stand-in carrying just those two fields is
+        enough, without reconstructing the full `Trade` (legs, per-leg charges)
+        that was never persisted in that shape to begin with.
+        """
+        from dataclasses import dataclass
+        from decimal import Decimal
+
+        from algo.reporting.metrics import trade_stats
+
+        @dataclass
+        class _Row:
+            net_pnl: Decimal
+            r_multiple: Decimal | None
+
+        # A strangle trades on the order of ~12 cycles a year; there is no
+        # realistic account where this needs a smaller window than "all of them".
+        rows = state.trades(limit=100_000)
+        parsed = [
+            _Row(
+                net_pnl=Decimal(row["net_pnl"]),
+                r_multiple=Decimal(row["r_multiple"]) if row.get("r_multiple") else None,
+            )
+            for row in rows
+        ]
+        stats = trade_stats(parsed)  # type: ignore[arg-type]
+        return {
+            "trades": stats.trades,
+            "wins": stats.wins,
+            "losses": stats.losses,
+            "win_rate": str(stats.win_rate) if stats.win_rate is not None else None,
+            "profit_factor": str(stats.profit_factor) if stats.profit_factor is not None else None,
+            "gross_profit": str(stats.gross_profit),
+            "gross_loss": str(stats.gross_loss),
+            "largest_win": str(stats.largest_win) if stats.largest_win is not None else None,
+            "largest_loss": str(stats.largest_loss) if stats.largest_loss is not None else None,
+            "longest_losing_streak": stats.longest_losing_streak,
+            "trades_with_r": stats.trades_with_r,
+            "expectancy_r": str(stats.expectancy_r) if stats.expectancy_r is not None else None,
+            "average_win_r": str(stats.average_win_r) if stats.average_win_r is not None else None,
+            "average_loss_r": (
+                str(stats.average_loss_r) if stats.average_loss_r is not None else None
+            ),
+            "histogram": [{"label": label, "count": count} for label, count in stats.histogram()],
+        }
 
     @app.get("/signals")
     def signals(

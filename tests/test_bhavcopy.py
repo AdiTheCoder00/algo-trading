@@ -82,7 +82,9 @@ class TestTheMappingFailsLoudly:
             parse_rows(path)
 
         message = str(caught.value)
-        assert "does not match the expected bhavcopy layout" in message
+        # Wording changed when auto-detection landed (D-105): the parser now
+        # tries several layouts, so it can no longer speak of "the expected" one.
+        assert "does not match any known bhavcopy layout" in message
         assert "TradeDate" in message, "it must show what the file actually has"
         assert "Instrument Name" in message, "and what it expected"
         assert "unverified assumption" in message

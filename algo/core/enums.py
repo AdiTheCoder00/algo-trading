@@ -121,3 +121,11 @@ class QuoteFlag(StrEnum):
     ZERO_VOLUME = "ZERO_VOLUME"
     NON_POSITIVE = "NON_POSITIVE"
     CIRCUIT_LOCKED = "CIRCUIT_LOCKED"
+    TOO_WIDE = "TOO_WIDE"
+    """Quoted on both sides, but so far apart the book is not a real one. See
+    Q17: a real GOLDM scrape carried rows at bid 1 / ask 1833, which pass every
+    other check here and invert to a plausible-looking delta."""
+    NO_OPEN_INTEREST = "NO_OPEN_INTEREST"
+    """Reported open interest of exactly zero — nobody holds this contract.
+    Distinct from open interest the feed did not report at all, which is not
+    evidence of anything and does not trip this."""

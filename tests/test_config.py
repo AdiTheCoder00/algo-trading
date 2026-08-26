@@ -64,8 +64,12 @@ class TestReferenceConfig:
         config = load_config(REFERENCE_CONFIG, env={})
         assert isinstance(config.risk.starting_equity, Decimal)
         assert config.risk.starting_equity == Decimal("1000000.00")
+        assert isinstance(config.strategy.exit.take_profit_value, Decimal)
+        assert config.strategy.exit.take_profit_value == Decimal("4")
+        assert isinstance(config.strategy.exit.stop_loss_value, Decimal)
         assert config.strategy.exit.stop_loss_value == Decimal("1")
-        assert config.strategy.exit.take_profit_value == Decimal("2")
+        assert isinstance(config.strategy.strike_multiple, Decimal)
+        assert config.strategy.strike_multiple == Decimal("1000")
 
     def test_the_answers_given_are_what_is_configured(self) -> None:
         config = load_config(REFERENCE_CONFIG, env={})
@@ -74,6 +78,19 @@ class TestReferenceConfig:
         assert config.strategy.cadence == "per_expiry_cycle"
         assert config.strategy.exit.stop_loss_kind == "PCT_OF_MARGIN_AT_ENTRY"
         assert str(config.strategy.entry_bars_ist[0]) == "09:30:00"
+
+    def test_the_reference_config_runs_without_a_stop(self) -> None:
+        """D-102. Pinned explicitly: `stop_loss_value` is still 1 in the file, so
+        nothing but this flag distinguishes a run with a stop from one without,
+        and a silent revert would otherwise look like a passing test."""
+        config = load_config(REFERENCE_CONFIG, env={})
+        assert config.strategy.exit.no_stop_loss is True
+
+    def test_the_reference_config_rolls_into_the_next_cycle(self) -> None:
+        """D-104: enter on the front cycle's expiry day, sell the one after."""
+        config = load_config(REFERENCE_CONFIG, env={})
+        assert config.strategy.roll_at_front_dte == 0
+        assert config.strategy.cycle_offset == 1
 
     def test_config_is_frozen(self) -> None:
         config = load_config(REFERENCE_CONFIG, env={})

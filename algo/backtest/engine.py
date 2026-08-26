@@ -39,7 +39,7 @@ from typing import Any
 from algo.backtest.prices import BarPriceSource, PriceSource, require_mark
 from algo.core.bar import Bar, BarWindow, Timeframe
 from algo.core.enums import Exchange, RejectReason, Side, SignalAction
-from algo.core.errors import AlgoError, DomainError
+from algo.core.errors import AlgoError, CalendarError, DomainError
 from algo.core.fill import Fill
 from algo.core.ids import stable_hash
 from algo.core.instrument import InstrumentId, OptionId
@@ -302,7 +302,7 @@ class BacktestEngine:
             self._portfolio.record(bar.ts, marks)
             if self._kill_switch is not None:
                 self._kill_switch.observe_equity(self._portfolio.equity(marks), bar.ts)
-            self._record_bar_state(bar, marks)
+            self._record_bar_state(bar, marks, session_day)
 
             # ---- 4. the strategy sees bars [0..i] and nothing else
             signals = self._ask_strategy(bar, index, session_day)
@@ -378,8 +378,12 @@ class BacktestEngine:
         approximate stop. The run reports that rather than hiding it.
         """
         take_profit = getattr(self._strategy, "_take_profit", None)
+        # Not part of the guard: a stop of None is now a legitimate configuration
+        # (D-102), not a strategy that has no exit policy. `_take_profit` alone
+        # decides whether this strategy manages combo exits at all - the two are
+        # always set together.
         stop_loss = getattr(self._strategy, "_stop_loss", None)
-        if self._margin is None or take_profit is None or stop_loss is None:
+        if self._margin is None or take_profit is None:
             return
 
         notional = Decimal("0")
@@ -420,6 +424,10 @@ class BacktestEngine:
         only honest form of refusal left is to stop.
         """
         if self._levels is None or self._stop_viability_threshold is None:
+            return
+        if self._levels.stop_loss is None:
+            # No stop to compare against the cost of trading. The absence is
+            # reported once for the whole run by `_warn_no_stop`, not per entry.
             return
         cost = Decimal("0")
         for fill in entry_fills:
@@ -523,7 +531,11 @@ class BacktestEngine:
                 reason = fired
                 detail = (
                     f"combo P&L {combo} against take profit {self._levels.take_profit} "
-                    f"and stop {self._levels.stop_loss}"
+                    + (
+                        f"and stop {self._levels.stop_loss}"
+                        if self._levels.stop_loss is not None
+                        else "with no stop configured"
+                    )
                 )
 
         if reason is None:
@@ -759,7 +771,8 @@ class BacktestEngine:
         warnings: list[str] = []
         if not self._sim.costs_verified:
             warnings.append(
-                "CHARGE RATES ARE PLACEHOLDERS - net P&L is not calibrated (D-011, Q6)"
+                "CHARGE RATES ARE SOURCED, NOT CONTRACT-NOTE VERIFIED - "
+                "net P&L is not calibrated to the paisa (D-011, Q6)"
             )
         if not self._sim.spread_measured:
             warnings.append(
@@ -770,6 +783,17 @@ class BacktestEngine:
             warnings.append(
                 "MARGIN IS APPROXIMATED - and the stop is a percentage of margin, so "
                 "the stop level is approximate too (Q18)"
+            )
+        # Deliberately not conditioned on `is_calibrated` or on any data-quality
+        # flag: this one is about the configuration itself, and it is the only
+        # warning here describing a loss that has no bound rather than a number
+        # that is imprecise.
+        if getattr(self._strategy, "_stop_loss", "unset") is None:
+            warnings.append(
+                "NO STOP LOSS IS CONFIGURED - a short strangle's call side has no "
+                "bounded loss, and the kill switch halts new entries without closing "
+                "an open position (flatten_on_trip). The only exits left are take "
+                "profit, the forced pre-expiry exit, and the end of the run (D-102)"
             )
 
         return BacktestResult(
@@ -855,7 +879,7 @@ class BacktestEngine:
                     self._flatten_requested = True
             self._state.mark_kill_switch_acted(request.id, at=at)
 
-    def _record_bar_state(self, bar: Bar, marks: dict[str, Decimal]) -> None:
+    def _record_bar_state(self, bar: Bar, marks: dict[str, Decimal], session_day: date) -> None:
         """One equity point and one positions snapshot per bar."""
         if self._state is None:
             return
@@ -890,6 +914,86 @@ class BacktestEngine:
                 "tripped" if self._kill_switch.is_tripped else "armed",
                 at=bar.ts,
             )
+        self._record_margin_utilisation(bar, marks, session_day)
+        self._record_chain_snapshot(bar)
+
+    def _record_margin_utilisation(
+        self, bar: Bar, marks: dict[str, Decimal], session_day: date
+    ) -> None:
+        """How much of the configured margin cap is actually in use - the
+        number that decides whether the *next* signal can size at all
+        (RiskEngine's own cap check), surfaced so an operator does not have to
+        infer it from whether entries are quietly being rejected."""
+        if self._state is None or self._risk.margin_cap_pct is None:
+            return
+        used = self._book_margin(session_day, marks)
+        equity = self._portfolio.equity(marks)
+        cap = equity * self._risk.margin_cap_pct / Decimal("100")
+        self._state.set_health("margin_used", str(used), at=bar.ts)
+        self._state.set_health("margin_cap", str(cap), at=bar.ts)
+        self._state.set_health("margin_cap_pct", str(self._risk.margin_cap_pct), at=bar.ts)
+
+    def _record_chain_snapshot(self, bar: Bar) -> None:
+        """The chain as of this bar, for the dashboard's chain panel - every
+        strike, its delta and IV, and which two legs (if any) the strategy is
+        actually holding. Only possible when the run has both a chain provider
+        and an expiry calendar wired in (M4 onward); the M3 falsification and
+        anything trading the underlying directly has neither, and skips this
+        silently rather than raising over a feature that does not apply."""
+        if self._state is None or self._chain_provider is None or self._expiries is None:
+            return
+        underlying = self._instrument.underlying
+        try:
+            cycle = self._expiries.nearest_expiry_on_or_after(underlying, ist_date(bar.ts))
+        except CalendarError:
+            return
+        snapshot = self._chain_provider.chain_at(underlying, cycle.option_expiry, bar.ts)
+        if snapshot is None:
+            return
+
+        held = {
+            position.instrument.key
+            for position in self._portfolio.open_positions()
+            if isinstance(position.instrument, OptionId)
+        }
+        session_day = ist_date(bar.ts)
+        self._state.record_chain_snapshot(
+            {
+                "ts": iso(snapshot.ts),
+                "underlying": snapshot.underlying,
+                "option_expiry": snapshot.option_expiry.isoformat(),
+                "futures_price": str(snapshot.futures_price),
+                "dte": cycle.days_to_option_expiry(session_day),
+                # None when there is no devolvement guard wired in at all - a
+                # run that never fought this rule should not claim to be
+                # tracking a deadline it does not enforce.
+                "forced_exit_in_sessions": (
+                    self._devolvement.days_until_forced_exit(cycle, session_day)
+                    if self._devolvement is not None
+                    else None
+                ),
+                "rows": [
+                    {
+                        "strike": str(row.strike),
+                        "right": row.right.value,
+                        "bid": str(row.quote.bid) if row.quote.bid is not None else None,
+                        "ask": str(row.quote.ask) if row.quote.ask is not None else None,
+                        "ltp": str(row.quote.ltp) if row.quote.ltp is not None else None,
+                        "volume": row.quote.volume,
+                        "iv": row.iv,
+                        "delta": row.delta,
+                        "tradeable": row.is_tradeable,
+                        # Why, not just whether: a strike rejected for a
+                        # blown-out spread (Q17) is a different fact from one
+                        # nobody quoted at all, and the panel should not blur
+                        # them into one grey row.
+                        "flag": row.quote.status().value,
+                        "held": row.option.key in held,
+                    }
+                    for row in snapshot.rows
+                ],
+            }
+        )
 
     def _record_trade(self, trade: Trade) -> None:
         if self._state is None:

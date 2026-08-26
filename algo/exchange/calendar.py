@@ -65,7 +65,14 @@ class BarBoundary(BaseModel):
 class MarketCalendar:
     """Trading days and session boundaries for one venue."""
 
-    __slots__ = ("_allow_unverified", "_holidays", "_name", "_session", "_verified_through")
+    __slots__ = (
+        "_allow_unverified",
+        "_holidays",
+        "_name",
+        "_session",
+        "_special_sessions",
+        "_verified_through",
+    )
 
     def __init__(
         self,
@@ -75,12 +82,14 @@ class MarketCalendar:
         holidays: frozenset[date],
         verified_through: date | None,
         allow_unverified: bool = False,
+        special_sessions: frozenset[date] = frozenset(),
     ) -> None:
         self._name = name
         self._session = session
         self._holidays = holidays
         self._verified_through = verified_through
         self._allow_unverified = allow_unverified
+        self._special_sessions = special_sessions
 
     @property
     def name(self) -> str:
@@ -102,10 +111,24 @@ class MarketCalendar:
             )
 
     def is_trading_day(self, on: date) -> bool:
+        """Whether the venue was open.
+
+        A weekend is not conclusive. MCX runs **special weekend sessions** - the
+        Union Budget falls on 1 February and the exchanges open for it even when
+        that is a Saturday or Sunday, as it was in 2020, 2025 and 2026. Real
+        bhavcopy for Sunday 2026-02-01 carries 285,223 lots of GOLDM option
+        volume across 149 traded strikes (D-107), so treating the weekend rule as
+        absolute would discard a genuine session's worth of real trades.
+
+        A holiday still wins over a special session: a date listed in both is a
+        session that was scheduled and then cancelled.
+        """
         self._check_verified(on)
-        if on.weekday() >= _SATURDAY:
+        if on in self._holidays:
             return False
-        return on not in self._holidays
+        if on in self._special_sessions:
+            return True
+        return on.weekday() < _SATURDAY
 
     def require_trading_day(self, on: date) -> date:
         if not self.is_trading_day(on):
@@ -176,10 +199,18 @@ class MarketCalendar:
         return is_us_dst(on)
 
 
+#: Weekend dates MCX was demonstrably open on, evidenced by traded volume in the
+#: bhavcopy itself (D-107). India's Union Budget is presented on 1 February and
+#: the exchanges hold a live session for it regardless of the weekday.
+#: Not a rule - a list of observed facts. Extend it only from real data.
+MCX_SPECIAL_SESSIONS = frozenset({date(2026, 2, 1)})
+
+
 def synthetic_calendar(
     *,
     holidays: frozenset[date] = frozenset(),
     session: SessionTimes = MCX_NON_AGRI,
+    special_sessions: frozenset[date] = MCX_SPECIAL_SESSIONS,
 ) -> MarketCalendar:
     """A calendar for tests and synthetic fixtures. Never for a real run.
 
@@ -192,4 +223,5 @@ def synthetic_calendar(
         holidays=holidays,
         verified_through=None,
         allow_unverified=True,
+        special_sessions=special_sessions,
     )

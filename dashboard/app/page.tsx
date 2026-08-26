@@ -14,15 +14,20 @@
  * committed file rather than to something someone typed into a browser once.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { EquityChart } from "@/components/EquityChart";
 import { KillSwitch } from "@/components/KillSwitch";
 import { KillSwitchHistory } from "@/components/KillSwitchHistory";
+import { MarginUtilisation } from "@/components/MarginUtilisation";
+import { OptionChain } from "@/components/OptionChain";
 import { TradeLog } from "@/components/TradeLog";
+import { TradeStats } from "@/components/TradeStats";
+import { useAnimatedNumber } from "@/lib/useAnimatedNumber";
 import {
   api,
   inr,
   shortTime,
+  type ChainSnapshot,
   type EquityPoint,
   type Health,
   type KillSwitchRequest,
@@ -30,6 +35,7 @@ import {
   type Position,
   type Signal,
   type Trade,
+  type TradeStats as TradeStatsData,
 } from "@/lib/api";
 
 const REFRESH_MS = 15_000;
@@ -41,18 +47,33 @@ export default function Page() {
   const [signals, setSignals] = useState<Signal[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
+  const [tradeStats, setTradeStats] = useState<TradeStatsData | null>(null);
+  const [chain, setChain] = useState<ChainSnapshot | null>(null);
   const [haltHistory, setHaltHistory] = useState<KillSwitchRequest[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [now, setNow] = useState<Date | null>(null);
+  const [newTradeIds, setNewTradeIds] = useState<Set<string>>(new Set());
+  const [newSignalIds, setNewSignalIds] = useState<Set<string>>(new Set());
+
+  // What was on the page after the *previous* successful load - compared
+  // against each new fetch to tell "arrived just now" from "was already
+  // here", so the arrival flash (globals.css: .row-new) only ever plays once
+  // per entry, not on every 15s poll for rows nothing changed about.
+  const seenTradeIds = useRef<Set<string> | null>(null);
+  const seenSignalIds = useRef<Set<string> | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [h, e, p, s, n, t, k] = await Promise.all([
+      const [h, e, p, s, n, t, ts, c, k] = await Promise.all([
         api.health(),
         api.equity(),
         api.positions(),
         api.signals(),
         api.notes(),
         api.trades(),
+        api.tradeStats(),
+        api.chain(),
         api.killSwitchHistory(),
       ]);
       setHealth(h);
@@ -61,8 +82,27 @@ export default function Page() {
       setSignals(s);
       setNotes(n);
       setTrades(t);
+      setTradeStats(ts);
+      setChain(c);
       setHaltHistory(k);
       setError(null);
+      setLastUpdated(new Date());
+
+      // The first load establishes the baseline silently - nothing in the
+      // existing history should flash as "new" just because the page opened.
+      const tradeIds = new Set(t.map((trade) => trade.trade_id));
+      setNewTradeIds(
+        seenTradeIds.current ? new Set([...tradeIds].filter((id) => !seenTradeIds.current!.has(id))) : new Set(),
+      );
+      seenTradeIds.current = tradeIds;
+
+      const signalIds = new Set(s.map((signal) => signal.signal_id));
+      setNewSignalIds(
+        seenSignalIds.current
+          ? new Set([...signalIds].filter((id) => !seenSignalIds.current!.has(id)))
+          : new Set(),
+      );
+      seenSignalIds.current = signalIds;
     } catch (caught) {
       // Rendered, not thrown. A monitoring page that goes blank when the thing it
       // monitors goes down is exactly backwards.
@@ -76,10 +116,47 @@ export default function Page() {
     return () => clearInterval(timer);
   }, [load]);
 
+  // A second, independent tick just for "updated Xs ago" - staleness is the
+  // one thing a 15-second auto-refresh cannot make visible on its own, since
+  // the page looks identical whether the last fetch was 2s or 200s ago.
+  useEffect(() => {
+    setNow(new Date());
+    const timer = setInterval(() => setNow(new Date()), 1_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const stalenessSeconds =
+    lastUpdated && now ? Math.max(0, Math.round((now.getTime() - lastUpdated.getTime()) / 1000)) : null;
+  const staleness =
+    stalenessSeconds === null
+      ? null
+      : stalenessSeconds < 2
+        ? "just now"
+        : stalenessSeconds < 60
+          ? `${stalenessSeconds}s ago`
+          : `${Math.round(stalenessSeconds / 60)}m ago`;
+  // Refreshes every REFRESH_MS; three missed cycles in a row is a genuine
+  // signal (a fetch failing silently, or the tab throttled in the background),
+  // not just normal jitter between ticks.
+  const isStale = stalenessSeconds !== null && stalenessSeconds > (REFRESH_MS / 1000) * 3;
+
   const latest = equity.at(-1);
   const opening = equity.at(0);
   const change =
     latest && opening ? Number(latest.equity) - Number(opening.equity) : 0;
+
+  // Tweened toward the real value on each refresh, but only ever *displayed*
+  // once it has settled back onto the exact Decimal string - during the brief
+  // transition itself, a float intermediate is a visual effect, not a
+  // reported figure, and the distinction the rest of this file draws between
+  // the two still holds once the motion stops.
+  const animatedEquity = useAnimatedNumber(latest ? Number(latest.equity) : null);
+  const equityText =
+    latest && animatedEquity !== null
+      ? Math.abs(animatedEquity - Number(latest.equity)) < 0.005
+        ? inr(latest.equity)
+        : inr(animatedEquity.toFixed(2))
+      : "—";
 
   return (
     <main className="wrap">
@@ -100,6 +177,9 @@ export default function Page() {
           <span className={`chip ${health?.broker === "connected" ? "good" : "bad"}`}>
             broker {health?.broker ?? "…"}
           </span>
+          {staleness && (
+            <span className={`chip stale ${isStale ? "warn" : ""}`}>updated {staleness}</span>
+          )}
         </div>
       </header>
 
@@ -125,7 +205,7 @@ export default function Page() {
       <dl className="stats">
         <div className="stat">
           <dt>Equity</dt>
-          <dd>{latest ? inr(latest.equity) : "—"}</dd>
+          <dd>{equityText}</dd>
         </div>
         <div className="stat">
           <dt>Change</dt>
@@ -152,6 +232,19 @@ export default function Page() {
           </dd>
         </div>
       </dl>
+
+      <section className="panel">
+        <div className="panel-bar">
+          <span>margin utilisation</span>
+        </div>
+        <div className="panel-in">
+          <MarginUtilisation
+            used={health?.detail.margin_used}
+            cap={health?.detail.margin_cap}
+            capPct={health?.detail.margin_cap_pct}
+          />
+        </div>
+      </section>
 
       <KillSwitch killSwitchState={health?.kill_switch ?? ""} onRequested={() => void load()} />
 
@@ -214,11 +307,33 @@ export default function Page() {
 
       <section className="panel">
         <div className="panel-bar">
+          <span>option chain</span>
+          <span className="mono">
+            {chain ? `${new Set(chain.rows.map((r) => r.strike)).size} strikes` : "—"}
+          </span>
+        </div>
+        <div className="panel-in">
+          <OptionChain snapshot={chain} />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-bar">
+          <span>trade statistics</span>
+          <span className="mono">{tradeStats?.trades ?? 0} completed</span>
+        </div>
+        <div className="panel-in">
+          <TradeStats stats={tradeStats} />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-bar">
           <span>trade log</span>
           <span className="mono">{trades.length}</span>
         </div>
         <div className="panel-in">
-          <TradeLog trades={trades} />
+          <TradeLog trades={trades} newIds={newTradeIds} />
         </div>
       </section>
 
@@ -233,7 +348,11 @@ export default function Page() {
               <p className="empty">No signals recorded yet.</p>
             ) : (
               signals.map((signal) => (
-                <div key={signal.signal_id} style={{ marginBottom: 14 }}>
+                <div
+                  key={signal.signal_id}
+                  className={newSignalIds.has(signal.signal_id) ? "row-new" : ""}
+                  style={{ marginBottom: 14, padding: "4px 6px", borderRadius: 3 }}
+                >
                   <div className="mono" style={{ fontSize: 12, color: "var(--brass)" }}>
                     {shortTime(signal.ts)} · {signal.action}
                   </div>

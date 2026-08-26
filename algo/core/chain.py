@@ -114,18 +114,31 @@ class OptionChainSnapshot(BaseModel):
         return min(available, key=lambda k: (abs(k - self.futures_price), k))
 
     def nearest_delta(
-        self, target: float, right: Right, *, tolerance: float
+        self,
+        target: float,
+        right: Right,
+        *,
+        tolerance: float,
+        strike_multiple: Decimal | None = None,
     ) -> ChainRow | None:
         """The tradeable row whose |delta| is closest to `target`, within `tolerance`.
 
         Only tradeable rows are considered — selecting a strike nobody is quoting
         produces a backtest fill that live trading could never have achieved.
         Ties break on the lower strike so selection is reproducible.
+
+        `strike_multiple` restricts selection to strikes that are exact multiples
+        of it — GOLDM lists every 500, but the round thousands carry most of the
+        book (D-103). It is a *filter*, never a rounding: a strike is either on
+        the grid or not considered, because snapping to the nearest round strike
+        would report a delta the position does not have.
         """
         best: ChainRow | None = None
         best_gap = float("inf")
         for row in self.rows:
             if row.right is not right or not row.is_tradeable or row.delta is None:
+                continue
+            if strike_multiple is not None and row.strike % strike_multiple != 0:
                 continue
             gap = abs(abs(row.delta) - target)
             if gap > tolerance:

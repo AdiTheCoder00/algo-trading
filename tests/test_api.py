@@ -108,7 +108,7 @@ class TestReadOnly:
         store.set_health("margin_calibrated", "false", at=NOW)
 
         warnings = client.get("/health", headers=_auth()).json()["warnings"]
-        assert any("placeholder" in w for w in warnings)
+        assert any("not contract-note verified" in w for w in warnings)
         assert any("modelled" in w for w in warnings)
         assert any("stop level is approximate" in w for w in warnings)
 
@@ -206,6 +206,116 @@ class TestReadOnly:
         store.record_note(NOW, "no entry at 9d: call at 0.25±0.05 not available")
         rows = client.get("/notes", headers=_auth()).json()
         assert "not available" in rows[0]["message"]
+
+
+class TestChain:
+    def test_no_chain_is_null_not_an_error(self, client: TestClient) -> None:
+        response = client.get("/chain", headers=_auth())
+        assert response.status_code == 200
+        assert response.json() is None
+
+    def test_a_recorded_chain_comes_back_whole(
+        self, client: TestClient, store: StateStore
+    ) -> None:
+        store.record_chain_snapshot(
+            {
+                "ts": NOW.isoformat(),
+                "underlying": "GOLDM",
+                "option_expiry": "2026-08-28",
+                "futures_price": "156640",
+                "rows": [
+                    {
+                        "strike": "160500",
+                        "right": "CE",
+                        "bid": "700.00",
+                        "ask": "710.00",
+                        "ltp": "705.00",
+                        "volume": 40,
+                        "iv": 0.216,
+                        "delta": 0.25,
+                        "tradeable": True,
+                        "held": True,
+                    }
+                ],
+            }
+        )
+        body = client.get("/chain", headers=_auth()).json()
+        assert body["underlying"] == "GOLDM"
+        assert body["rows"][0]["strike"] == "160500"
+        assert body["rows"][0]["held"] is True
+
+
+class TestTradeStats:
+    """Brief §10's summary half. The arithmetic is not re-tested here -
+    `tests/test_metrics.py` (or wherever `trade_stats()` itself is tested)
+    already owns that - this only proves the endpoint hands it real rows and
+    serialises what comes back without losing precision."""
+
+    def _record(
+        self,
+        store: StateStore,
+        *,
+        trade_id: str,
+        net_pnl: str,
+        r_multiple: str | None,
+    ) -> None:
+        store.record_trade(
+            trade_id,
+            NOW,
+            NOW,
+            {
+                "trade_id": trade_id,
+                "strategy_id": "goldm_delta_strangle_v1",
+                "signal_id": trade_id,
+                "opened_at": NOW.isoformat(),
+                "closed_at": NOW.isoformat(),
+                "legs": "MCX:GOLDM:20260828:160500:CE:SELL:1",
+                "gross_pnl": net_pnl,
+                "charges_total": "0",
+                "net_pnl": net_pnl,
+                "r_multiple": r_multiple or "",
+                "exit_reason": "STOP_LOSS" if net_pnl.startswith("-") else "TAKE_PROFIT",
+                "reason": "short strangle",
+            },
+        )
+
+    def test_win_rate_and_profit_factor_from_real_rows(
+        self, client: TestClient, store: StateStore
+    ) -> None:
+        self._record(store, trade_id="t1", net_pnl="500.00", r_multiple="0.50")
+        self._record(store, trade_id="t2", net_pnl="500.00", r_multiple="0.50")
+        self._record(store, trade_id="t3", net_pnl="-1000.00", r_multiple="-1.00")
+
+        body = client.get("/trade-stats", headers=_auth()).json()
+        assert body["trades"] == 3
+        assert body["wins"] == 2
+        assert body["losses"] == 1
+        assert Decimal(body["win_rate"]) == pytest.approx(Decimal("66.666666"), abs=Decimal("0.01"))
+        assert Decimal(body["profit_factor"]) == Decimal("1")  # 1000 gross profit / 1000 gross loss
+        assert body["longest_losing_streak"] == 1
+        assert body["histogram"], "R-multiples were recorded; the histogram must not be empty"
+
+    def test_money_and_ratios_are_strings_not_floats(
+        self, client: TestClient, store: StateStore
+    ) -> None:
+        self._record(store, trade_id="t1", net_pnl="123.45", r_multiple="1.10")
+        body = client.get("/trade-stats", headers=_auth()).json()
+        assert isinstance(body["gross_profit"], str)
+        assert isinstance(body["expectancy_r"], str)
+
+    def test_no_trades_reports_none_not_zero(
+        self, client: TestClient, store: StateStore
+    ) -> None:
+        """A profit factor of 0.0 reads as 'loses everything'; None reads as
+        'nothing to compute this from' - the distinction `trade_stats()` itself
+        makes, and this endpoint must not flatten on the way to JSON."""
+        del store
+        body = client.get("/trade-stats", headers=_auth()).json()
+        assert body["trades"] == 0
+        assert body["win_rate"] is None
+        assert body["profit_factor"] is None
+        assert body["expectancy_r"] is None
+        assert body["histogram"] == []
 
 
 class TestStateStoreCrossesRealThreads:

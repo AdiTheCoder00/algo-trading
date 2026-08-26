@@ -30,10 +30,14 @@ from algo.exchange.calendar import synthetic_calendar
 from algo.exchange.specs import ContractSpecStore
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from algo.config.schema import AppConfig
+    from algo.core.chain import OptionChainSnapshot
     from algo.core.clock import SystemClock
     from algo.data.smartapi_feed import SmartConnectTransport
     from algo.exchange.master import InstrumentMaster
+    from algo.strategy.delta_strangle import DeltaStrangle
 
 app = typer.Typer(add_completion=False, help="MCX GOLDM short-strangle engine")
 
@@ -94,12 +98,23 @@ def show_config(
     typer.echo(f"instruments   {', '.join(i.underlying for i in config.instruments)}")
     typer.echo(f"bar           {config.market.bar.timeframe_minutes}m")
     typer.echo(f"sizing        {config.risk.sizing.mode} = {config.risk.sizing.fixed_lots} lot(s)")
-    typer.echo(
-        f"exits         TP {config.strategy.exit.take_profit_value}% / "
-        f"SL {config.strategy.exit.stop_loss_value}% of "
-        f"{config.strategy.exit.stop_loss_kind.removeprefix('PCT_OF_').lower()}"
+    basis = config.strategy.exit.take_profit_kind.removeprefix("PCT_OF_").lower()
+    stop = (
+        "NO STOP LOSS"
+        if config.strategy.exit.no_stop_loss
+        else f"SL {config.strategy.exit.stop_loss_value}%"
     )
-    typer.echo(f"entry         {config.strategy.entry_bars_ist[0]} IST, {config.strategy.cadence}")
+    typer.echo(
+        f"exits         TP {config.strategy.exit.take_profit_value}% / {stop} of {basis}"
+    )
+    entry = f"{config.strategy.entry_bars_ist[0]} IST, {config.strategy.cadence}"
+    if config.strategy.roll_at_front_dte is not None:
+        entry += f", at front DTE <= {config.strategy.roll_at_front_dte}"
+    if config.strategy.cycle_offset:
+        entry += f", selling cycle +{config.strategy.cycle_offset}"
+    typer.echo(f"entry         {entry}")
+    if config.strategy.strike_multiple is not None:
+        typer.echo(f"strikes       multiples of {config.strategy.strike_multiple} only")
     typer.echo(f"equity        {config.risk.starting_equity}")
 
 
@@ -810,6 +825,156 @@ def inspect_bhavcopy(
     typer.echo("  stays an assumption until the recorder has live quotes.")
 
 
+@app.command("chain")
+def inspect_chain(
+    path: Path = typer.Argument(..., help="A scraped live MCX option-chain .xlsx"),
+    risk_free_rate: float = typer.Option(0.065, "--risk-free-rate"),
+    futures_expiry: str | None = typer.Option(
+        None,
+        "--futures-expiry",
+        help="The futures contract these options settle into, as YYYY-MM-DD. "
+        "Defaults to the option expiry (see the loader's docstring, Q1c).",
+    ),
+    state: Path | None = typer.Option(
+        None,
+        "--state",
+        help="Record this chain to a dashboard state file, so the chain panel "
+        "shows a real book instead of the last backtest's modelled one",
+    ),
+) -> None:
+    """Read a scraped live option chain, solve its greeks, and report what is tradeable.
+
+    This is the only source in the project carrying a **real bid and ask**.
+    Bhavcopy has no book at all, so tradeability there rests on `assume_spread`'s
+    invention; this is measured. That makes it the honest answer to "which
+    strikes could the strategy actually have sold", and the wrong tool for
+    anything historical - it is one instant, not a series.
+
+    Rows that will not solve stay unpriced and untradeable rather than borrowing
+    a neighbour's volatility (D-005).
+    """
+    from datetime import time as _time
+
+    from algo.core.enums import Right
+    from algo.core.errors import DataError
+    from algo.core.timeutil import ist_to_utc
+    from algo.data.mcx_chain_excel import load_chain
+    from algo.pricing.chain_greeks import atm_iv, enrich
+
+    try:
+        snapshot = load_chain(
+            path,
+            futures_expiry=date.fromisoformat(futures_expiry) if futures_expiry else None,
+        )
+    except DataError as exc:
+        typer.echo("")
+        typer.echo(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    expires_at = ist_to_utc(snapshot.option_expiry, _time(23, 30))
+    chain = enrich(snapshot, expires_at=expires_at, r=risk_free_rate)
+
+    strikes = sorted({r.strike for r in chain.rows})
+    tradeable = [r for r in chain.rows if r.is_tradeable]
+    unpriced = [r for r in chain.rows if r.delta is None]
+    reference_vol = atm_iv(chain)
+
+    typer.echo(f"{chain.underlying} {chain.option_expiry}  as of {chain.ts:%Y-%m-%d %H:%M} UTC")
+    typer.echo(f"  future    {chain.futures_price}")
+    typer.echo(f"  strikes   {len(strikes)}  ({strikes[0]} to {strikes[-1]})")
+    typer.echo(f"  tradeable {len(tradeable)} of {len(chain.rows)} rows")
+    typer.echo(f"  unpriced  {len(unpriced)} (quoted too thin to solve, or not quoted)")
+    if reference_vol is not None:
+        typer.echo(f"  ATM vol   {reference_vol * 100:.2f}% at {chain.atm_strike()}")
+
+    typer.echo("")
+    typer.echo("  strikes the strategy's delta targets would land on:")
+    for target in (0.15, 0.20, 0.25, 0.30):
+        call = chain.nearest_delta(right=Right.CE, target=target, tolerance=0.05)
+        put = chain.nearest_delta(right=Right.PE, target=target, tolerance=0.05)
+        call_text = f"{call.strike} CE @ {call.delta:+.3f}" if call else "none in tolerance"
+        put_text = f"{put.strike} PE @ {put.delta:+.3f}" if put else "none in tolerance"
+        typer.echo(f"    delta {target:.2f}   {call_text:>26}   {put_text:>26}")
+
+    if state is not None:
+        from algo.persistence.state import StateStore
+
+        store = StateStore(state)
+        try:
+            store.record_chain_snapshot(_chain_payload(chain, expires_at=expires_at))
+        finally:
+            store.close()
+        typer.echo("")
+        typer.echo(f"  recorded to {state}")
+
+
+def _chain_payload(chain: OptionChainSnapshot, *, expires_at: datetime) -> dict[str, object]:
+    """The dashboard's chain-panel payload, in the same shape the engine writes.
+
+    Kept beside the command rather than shared with `BacktestEngine`: the engine
+    knows a session count and a devolvement deadline because it is running a
+    strategy through a calendar, and this is a single snapshot with neither. The
+    honest values here are a real day count and `None`, not a borrowed one.
+    """
+    from algo.core.timeutil import iso
+
+    days_left = (expires_at.date() - chain.ts.date()).days
+    return {
+        "ts": iso(chain.ts),
+        "underlying": chain.underlying,
+        "option_expiry": chain.option_expiry.isoformat(),
+        "futures_price": str(chain.futures_price),
+        "dte": days_left,
+        "forced_exit_in_sessions": None,
+        "rows": [
+            {
+                "strike": str(row.strike),
+                "right": row.right.value,
+                "bid": str(row.quote.bid) if row.quote.bid is not None else None,
+                "ask": str(row.quote.ask) if row.quote.ask is not None else None,
+                "ltp": str(row.quote.ltp) if row.quote.ltp is not None else None,
+                "volume": row.quote.volume,
+                "iv": row.iv,
+                "delta": row.delta,
+                "tradeable": row.is_tradeable,
+                "flag": row.quote.status().value,
+                "held": False,
+            }
+            for row in chain.rows
+        ],
+    }
+
+
+def _strangle_from_config(cfg: AppConfig, symbol: str) -> DeltaStrangle:
+    """Build the strategy from config.
+
+    One function rather than the same argument list at each call site: the two
+    real-data backtest commands were already identical here, and a strategy
+    setting that reached only one of them would make the two commands quietly
+    different strategies.
+    """
+    from algo.core.signal import ComboExit
+    from algo.strategy.delta_strangle import DeltaStrangle
+
+    exit_cfg = cfg.strategy.exit
+    return DeltaStrangle(
+        underlying=symbol,
+        target_delta=cfg.strategy.target_delta,
+        delta_tolerance=cfg.strategy.delta_tolerance,
+        entry_times_ist=cfg.strategy.entry_bars_ist,
+        min_dte=cfg.strategy.min_dte,
+        max_dte=cfg.strategy.max_dte,
+        take_profit=ComboExit(
+            kind=exit_cfg.take_profit_kind, value=exit_cfg.take_profit_value
+        ),
+        stop_loss=ComboExit(kind=exit_cfg.stop_loss_kind, value=exit_cfg.stop_loss_value),
+        no_stop=exit_cfg.no_stop_loss,
+        strike_multiple=cfg.strategy.strike_multiple,
+        roll_at_front_dte=cfg.strategy.roll_at_front_dte,
+        cycle_offset=cfg.strategy.cycle_offset,
+    )
+
+
 @app.command("backtest-bhavcopy")
 def backtest_bhavcopy(
     path: Path = typer.Argument(..., help="A bhavcopy CSV, or a directory of them."),
@@ -835,6 +1000,12 @@ def backtest_bhavcopy(
     risk_free_rate: float = typer.Option(0.065, "--risk-free-rate"),
     tearsheet: Path | None = typer.Option(None, help="Write an HTML tearsheet here"),
     trade_log: Path | None = typer.Option(None, help="Write the trade log CSV here"),
+    state: Path | None = typer.Option(
+        None,
+        "--state",
+        help="Stream equity, positions, signals, notes, trades and the option "
+        "chain to this dashboard state file as the run progresses",
+    ),
 ) -> None:
     """Run the real GOLDM short-strangle strategy over recorded MCX bhavcopy history.
 
@@ -858,13 +1029,13 @@ def backtest_bhavcopy(
     from algo.backtest.engine import BacktestEngine
     from algo.backtest.prices import ChainFeedProvider, ChainPriceSource, CompositePriceSource
     from algo.core.errors import DataError
-    from algo.core.signal import ComboExit
     from algo.costs.charges import McxChargeModel
     from algo.costs.margin import SpanApproxMargin
     from algo.costs.slippage import TickSlippage
     from algo.costs.spread import FixedTickSpread
     from algo.data.bhavcopy import load_directory, parse_rows
     from algo.execution.fills import FillSimulator
+    from algo.persistence.state import StateStore
     from algo.portfolio.book import Portfolio
     from algo.reporting import metrics as metrics_mod
     from algo.risk.devolvement import DevolvementGuard
@@ -906,20 +1077,7 @@ def backtest_bhavcopy(
         from algo.config.loader import load_config as resolve
 
         cfg = resolve(config)
-        strategy = DeltaStrangle(
-            underlying=symbol,
-            target_delta=cfg.strategy.target_delta,
-            delta_tolerance=cfg.strategy.delta_tolerance,
-            entry_times_ist=cfg.strategy.entry_bars_ist,
-            min_dte=cfg.strategy.min_dte,
-            max_dte=cfg.strategy.max_dte,
-            take_profit=ComboExit(
-                kind=cfg.strategy.exit.take_profit_kind, value=cfg.strategy.exit.take_profit_value
-            ),
-            stop_loss=ComboExit(
-                kind=cfg.strategy.exit.stop_loss_kind, value=cfg.strategy.exit.stop_loss_value
-            ),
-        )
+        strategy = _strangle_from_config(cfg, symbol)
         starting_equity = cfg.risk.starting_equity
         lots = cfg.risk.sizing.fixed_lots
         max_lots = cfg.risk.caps.max_lots_per_underlying
@@ -950,43 +1108,57 @@ def backtest_bhavcopy(
         stop_viability = None
         on_breach = "warn"
 
-    engine = BacktestEngine(
-        bars=dataset.bars,
-        calendar=calendar,
-        specs=ContractSpecStore.default(),
-        strategy=strategy,
-        risk=RiskEngine(
-            sizer=FixedLotSizer(lots),
-            spec_for=None,
-            max_concurrent_positions=2,  # a strangle is two positions
-            max_lots_per_underlying=max_lots,
-            margin_cap_pct=margin_cap_pct,
-        ),
-        simulator=FillSimulator(
-            spread=FixedTickSpread(spread_ticks),
-            slippage=TickSlippage(market_ticks=0, stop_ticks=2),
-            charges=McxChargeModel.default(),
-        ),
-        portfolio=Portfolio(starting_equity),
-        instrument=dataset.instrument,
-        timeframe=Timeframe(minutes=30),
-        is_option=True,
-        price_source=CompositePriceSource(ChainPriceSource(dataset.chain_snapshots)),
-        chain_provider=ChainFeedProvider(dataset.chain_snapshots),
-        expiries=dataset.expiries,
-        devolvement=DevolvementGuard(
+    store: StateStore | None = None
+    if state is not None:
+        store = StateStore(state)
+        kill_switch = kill_switch or KillSwitch(
+            daily_loss_limit_pct=Decimal("2"),
+            max_consecutive_losses=3,
+            max_drawdown_pct=Decimal("10"),
+        )
+
+    try:
+        engine = BacktestEngine(
+            bars=dataset.bars,
             calendar=calendar,
-            force_exit_sessions_before_expiry=force_exit,
-            block_new_entries_within_dte=block_within,
-        ),
-        kill_switch=kill_switch,
-        margin=SpanApproxMargin(),
-        mode="backtest",
-        broker="backtest",
-        stop_viability_threshold=stop_viability,
-        on_stop_viability_breach=on_breach,
-    )
-    result = engine.run()
+            specs=ContractSpecStore.default(),
+            strategy=strategy,
+            risk=RiskEngine(
+                sizer=FixedLotSizer(lots),
+                spec_for=None,
+                max_concurrent_positions=2,  # a strangle is two positions
+                max_lots_per_underlying=max_lots,
+                margin_cap_pct=margin_cap_pct,
+            ),
+            simulator=FillSimulator(
+                spread=FixedTickSpread(spread_ticks),
+                slippage=TickSlippage(market_ticks=0, stop_ticks=2),
+                charges=McxChargeModel.default(),
+            ),
+            portfolio=Portfolio(starting_equity),
+            instrument=dataset.instrument,
+            timeframe=Timeframe(minutes=30),
+            is_option=True,
+            price_source=CompositePriceSource(ChainPriceSource(dataset.chain_snapshots)),
+            chain_provider=ChainFeedProvider(dataset.chain_snapshots),
+            expiries=dataset.expiries,
+            devolvement=DevolvementGuard(
+                calendar=calendar,
+                force_exit_sessions_before_expiry=force_exit,
+                block_new_entries_within_dte=block_within,
+            ),
+            kill_switch=kill_switch,
+            margin=SpanApproxMargin(),
+            state=store,
+            mode="backtest",
+            broker="backtest",
+            stop_viability_threshold=stop_viability,
+            on_stop_viability_breach=on_breach,
+        )
+        result = engine.run()
+    finally:
+        if store is not None:
+            store.close()
 
     typer.echo("")
     typer.echo(f"cycles         {len(result.trades)} round trip(s)")
@@ -1058,6 +1230,12 @@ def backtest_smartapi(
     ),
     tearsheet: Path | None = typer.Option(None, help="Write an HTML tearsheet here"),
     trade_log: Path | None = typer.Option(None, help="Write the trade log CSV here"),
+    state: Path | None = typer.Option(
+        None,
+        "--state",
+        help="Stream equity, positions, signals, notes, trades and the option "
+        "chain to this dashboard state file as the run progresses",
+    ),
 ) -> None:
     """Run the real GOLDM short-strangle strategy over real SmartAPI history.
 
@@ -1082,7 +1260,6 @@ def backtest_smartapi(
     from algo.backtest.smartapi_runner import build_dataset
     from algo.core.clock import SystemClock
     from algo.core.errors import DataError
-    from algo.core.signal import ComboExit
     from algo.core.timeutil import ist_to_utc
     from algo.costs.charges import McxChargeModel
     from algo.costs.margin import SpanApproxMargin
@@ -1097,6 +1274,7 @@ def backtest_smartapi(
     from algo.exchange.master import HttpMasterSource, InstrumentMaster, fetch_master
     from algo.execution.fills import FillSimulator
     from algo.execution.kotak import default_totp
+    from algo.persistence.state import StateStore
     from algo.portfolio.book import Portfolio
     from algo.reporting import metrics as metrics_mod
     from algo.risk.devolvement import DevolvementGuard
@@ -1172,20 +1350,7 @@ def backtest_smartapi(
         from algo.config.loader import load_config as resolve
 
         cfg = resolve(config)
-        strategy = DeltaStrangle(
-            underlying=symbol,
-            target_delta=cfg.strategy.target_delta,
-            delta_tolerance=cfg.strategy.delta_tolerance,
-            entry_times_ist=cfg.strategy.entry_bars_ist,
-            min_dte=cfg.strategy.min_dte,
-            max_dte=cfg.strategy.max_dte,
-            take_profit=ComboExit(
-                kind=cfg.strategy.exit.take_profit_kind, value=cfg.strategy.exit.take_profit_value
-            ),
-            stop_loss=ComboExit(
-                kind=cfg.strategy.exit.stop_loss_kind, value=cfg.strategy.exit.stop_loss_value
-            ),
-        )
+        strategy = _strangle_from_config(cfg, symbol)
         starting_equity = cfg.risk.starting_equity
         lots = cfg.risk.sizing.fixed_lots
         max_lots = cfg.risk.caps.max_lots_per_underlying
@@ -1216,43 +1381,57 @@ def backtest_smartapi(
         stop_viability = None
         on_breach = "warn"
 
-    engine = BacktestEngine(
-        bars=dataset.bars,
-        calendar=calendar,
-        specs=ContractSpecStore.default(),
-        strategy=strategy,
-        risk=RiskEngine(
-            sizer=FixedLotSizer(lots),
-            spec_for=None,
-            max_concurrent_positions=2,  # a strangle is two positions
-            max_lots_per_underlying=max_lots,
-            margin_cap_pct=margin_cap_pct,
-        ),
-        simulator=FillSimulator(
-            spread=FixedTickSpread(2),
-            slippage=TickSlippage(market_ticks=0, stop_ticks=2),
-            charges=McxChargeModel.default(),
-        ),
-        portfolio=Portfolio(starting_equity),
-        instrument=dataset.instrument,
-        timeframe=Timeframe(minutes=30),
-        is_option=True,
-        price_source=CompositePriceSource(ChainPriceSource(dataset.chain_snapshots)),
-        chain_provider=ChainFeedProvider(dataset.chain_snapshots),
-        expiries=dataset.expiries,
-        devolvement=DevolvementGuard(
+    store: StateStore | None = None
+    if state is not None:
+        store = StateStore(state)
+        kill_switch = kill_switch or KillSwitch(
+            daily_loss_limit_pct=Decimal("2"),
+            max_consecutive_losses=3,
+            max_drawdown_pct=Decimal("10"),
+        )
+
+    try:
+        engine = BacktestEngine(
+            bars=dataset.bars,
             calendar=calendar,
-            force_exit_sessions_before_expiry=force_exit,
-            block_new_entries_within_dte=block_within,
-        ),
-        kill_switch=kill_switch,
-        margin=SpanApproxMargin(),
-        mode="backtest",
-        broker="backtest",
-        stop_viability_threshold=stop_viability,
-        on_stop_viability_breach=on_breach,
-    )
-    result = engine.run()
+            specs=ContractSpecStore.default(),
+            strategy=strategy,
+            risk=RiskEngine(
+                sizer=FixedLotSizer(lots),
+                spec_for=None,
+                max_concurrent_positions=2,  # a strangle is two positions
+                max_lots_per_underlying=max_lots,
+                margin_cap_pct=margin_cap_pct,
+            ),
+            simulator=FillSimulator(
+                spread=FixedTickSpread(2),
+                slippage=TickSlippage(market_ticks=0, stop_ticks=2),
+                charges=McxChargeModel.default(),
+            ),
+            portfolio=Portfolio(starting_equity),
+            instrument=dataset.instrument,
+            timeframe=Timeframe(minutes=30),
+            is_option=True,
+            price_source=CompositePriceSource(ChainPriceSource(dataset.chain_snapshots)),
+            chain_provider=ChainFeedProvider(dataset.chain_snapshots),
+            expiries=dataset.expiries,
+            devolvement=DevolvementGuard(
+                calendar=calendar,
+                force_exit_sessions_before_expiry=force_exit,
+                block_new_entries_within_dte=block_within,
+            ),
+            kill_switch=kill_switch,
+            margin=SpanApproxMargin(),
+            state=store,
+            mode="backtest",
+            broker="backtest",
+            stop_viability_threshold=stop_viability,
+            on_stop_viability_breach=on_breach,
+        )
+        result = engine.run()
+    finally:
+        if store is not None:
+            store.close()
 
     typer.echo("")
     typer.echo(f"cycles         {len(result.trades)} round trip(s)")

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from contextlib import suppress
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
@@ -215,6 +215,21 @@ class BarContext:
         if self._expiries is None:
             raise DataError("no expiry calendar is wired into this context")
         return self._expiries.nearest_expiry_on_or_after(underlying, ist_date(self.now))
+
+    def expiry_after(self, underlying: str, cycle: ExpirySet) -> ExpirySet:
+        """The first listed cycle expiring after `cycle`.
+
+        Resolved from the calendar by date rather than by advancing a month:
+        gold does not list every calendar month, so "the next contract" and "the
+        same day next month" are different facts and only the first one can be
+        traded. Raises `CalendarError` when nothing later is listed yet, which is
+        a real state near the end of the master's horizon rather than a bug.
+        """
+        if self._expiries is None:
+            raise DataError("no expiry calendar is wired into this context")
+        return self._expiries.nearest_expiry_on_or_after(
+            underlying, cycle.option_expiry + timedelta(days=1)
+        )
 
     def days_to_expiry(self, underlying: str) -> int:
         return self.nearest_expiry(underlying).days_to_option_expiry(ist_date(self.now))

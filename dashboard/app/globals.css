@@ -11,7 +11,7 @@
   --line-soft: #232933;
   --text: #e3e7ed;
   --muted: #8e97a6;
-  --faint: #6b7484;
+  --faint: #818996;
   --brass: #cfa255;
   --ice: #7fb6d9;
   --ice-wash: #12212b;
@@ -31,7 +31,7 @@
     --line-soft: #e4e8ed;
     --text: #161a21;
     --muted: #5b6474;
-    --faint: #8b94a3;
+    --faint: #6a707c;
     --brass: #8a6420;
     --ice: #26688f;
     --ice-wash: #e2edf4;
@@ -205,9 +205,103 @@ td.down {
   color: var(--clay);
 }
 
+.stats-tight {
+  margin-top: 0;
+}
+
+.stat-sub {
+  font-size: 12px;
+  color: var(--faint);
+  font-weight: 400;
+}
+
+/* ------------------------------------------------------- R-multiple histogram */
+.rhist {
+  margin-top: 18px;
+}
+
+.rhist-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 90px;
+  padding: 8px 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.rhist-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.rhist-bar {
+  width: 100%;
+  min-height: 0;
+  border-radius: 2px 2px 0 0;
+  transition: opacity 0.15s ease;
+}
+
+.rhist-bar.up {
+  background: var(--sage);
+}
+
+.rhist-bar.down {
+  background: var(--clay);
+}
+
+.rhist-col:hover .rhist-bar {
+  opacity: 0.75;
+}
+
+.rhist-label {
+  font-family: ui-monospace, monospace;
+  font-size: 9px;
+  color: var(--faint);
+  white-space: nowrap;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  max-height: 60px;
+}
+
 /* ------------------------------------------------------------------ tables */
+/* The trade log and halt history are wide enough to scroll horizontally on a
+   narrow screen (confirmed: 167px and 63px of hidden content respectively at
+   375px) - a table that scrolls with no hint reads as a table that lost its
+   last column. The classic four-layer scroll-shadow: two background-attachment:
+   local gradients ride the content and paint over the shadow once there is
+   nothing left to reveal in that direction, so a table that already fits (like
+   "open positions" on this same page) shows no fade at all - this only ever
+   appears where content is genuinely off-screen. */
 .scroll {
   overflow-x: auto;
+  /* Without this, a cell with more content than its share of the container
+     (the trade log's Reason column, once Legs' tags claim their own width)
+     wraps into a one-character-wide sliver instead of the table simply
+     growing past 100% and letting overflow-x take over - confirmed visually,
+     not assumed: "coin flip: flat, seeded draw chose SELL" rendered as a
+     vertical stack of two- and three-letter fragments at 500px wide before
+     this rule existed. nowrap forces every column to keep its natural width,
+     which is the width the scroll-shadow fade above was actually built for. */
+  background-color: var(--panel);
+  background-image:
+    linear-gradient(to right, var(--panel) 50%, transparent),
+    linear-gradient(to left, var(--panel) 50%, transparent),
+    linear-gradient(to right, rgba(0, 0, 0, 0.35), transparent),
+    linear-gradient(to left, rgba(0, 0, 0, 0.35), transparent);
+  background-position: left, right, left, right;
+  background-repeat: no-repeat;
+  background-size: 24px 100%, 24px 100%, 10px 100%, 10px 100%;
+  background-attachment: local, local, scroll, scroll;
+}
+
+.scroll td,
+.scroll th {
+  white-space: nowrap;
 }
 
 table {
@@ -244,10 +338,25 @@ tr:last-child td {
   border-bottom: none;
 }
 
+tbody tr {
+  transition: background 0.1s ease;
+}
+
+tbody tr:hover td {
+  background: var(--panel-2);
+}
+
 .reason {
   color: var(--muted);
   font-size: 12.5px;
   max-width: 62ch;
+}
+
+/* Inside a scrolling table the 62ch wrap-width is what caused the collapse
+   above - .scroll td's nowrap needs the column free to reach its natural
+   width, not capped again by this. */
+.scroll .reason {
+  max-width: none;
 }
 
 .tags {
@@ -349,6 +458,11 @@ input[type="text"] {
   background: var(--panel-2);
   color: var(--text);
   font: inherit;
+  transition: border-color 0.15s ease;
+}
+
+input[type="text"]:hover {
+  border-color: var(--faint);
 }
 
 input[type="text"]:focus-visible,
@@ -359,15 +473,65 @@ button:focus-visible {
 
 .check {
   display: flex;
-  gap: 7px;
+  gap: 9px;
   align-items: center;
   color: var(--muted);
   font-size: 13px;
-  padding-bottom: 8px;
+  cursor: pointer;
+}
+
+/* A native checkbox defaults to ~13px, well under a usable touch target and
+   easy to overlook - which matters here specifically, because this one
+   control (flatten) is the most consequential thing on the page (D-012):
+   a mid-move market close of a short strangle, not just a halt. It is styled
+   to look like it carries that weight, in the same clay tone as the button
+   it arms, rather than left as the smallest control in the form. */
+.check input[type="checkbox"] {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--panel-2);
+  cursor: pointer;
+  flex-shrink: 0;
+  display: grid;
+  place-content: center;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.check input[type="checkbox"]:hover {
+  border-color: var(--clay);
+}
+
+.check input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--ice);
+  outline-offset: 2px;
+}
+
+.check input[type="checkbox"]::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  transform: scale(0);
+  transition: transform 0.12s ease;
+  box-shadow: inset 1em 1em var(--clay);
+  clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 45% 62%);
+}
+
+.check input[type="checkbox"]:checked {
+  border-color: var(--clay);
+  background: var(--clay-wash);
+}
+
+.check input[type="checkbox"]:checked::before {
+  transform: scale(1);
 }
 
 button.halt-button {
-  padding: 9px 18px;
+  padding: 11px 18px;
+  min-height: 44px;
   border-radius: var(--r);
   border: 1px solid var(--clay);
   background: var(--clay-wash);
@@ -375,6 +539,7 @@ button.halt-button {
   font: inherit;
   font-weight: 600;
   cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 button.halt-button:hover:not(:disabled) {
@@ -401,8 +566,193 @@ footer {
   color: var(--faint);
 }
 
+/* --------------------------------------------------------------- option chain */
+.chain-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
+.chain-meta span {
+  white-space: nowrap;
+}
+
+.chain-deadline-soon {
+  color: var(--clay);
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------- margin utilisation */
+.margin-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.margin-bar-track {
+  flex: 1;
+  height: 10px;
+  border-radius: 5px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.margin-bar-fill {
+  width: 100%;
+  height: 100%;
+  border-radius: 5px 0 0 5px;
+  transform-origin: left;
+  /* transform, not width - a width transition triggers layout on every
+     frame; scaleX is compositor-only. */
+  transition: transform 0.4s ease;
+  will-change: transform;
+}
+
+.margin-bar-fill.margin-ok {
+  background: var(--sage);
+}
+
+.margin-bar-fill.margin-warn {
+  background: var(--brass);
+}
+
+.margin-bar-fill.margin-danger {
+  background: var(--clay);
+}
+
+.margin-bar-pct {
+  font-size: 13px;
+  font-weight: 600;
+  min-width: 48px;
+  text-align: right;
+}
+
+table.chain th.chain-side {
+  text-align: center;
+  color: var(--ice);
+  border-bottom: 1px solid var(--line);
+}
+
+td.chain-strike {
+  color: var(--brass);
+  font-weight: 600;
+  background: var(--panel-2);
+}
+
+tr.chain-atm td.chain-strike {
+  color: var(--text);
+  background: var(--line-soft);
+}
+
+td.chain-quiet {
+  color: var(--faint);
+  opacity: 0.6;
+}
+
+td.chain-held {
+  color: var(--ice);
+  font-weight: 600;
+  background: var(--ice-wash);
+}
+
+.chain-legend {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--faint);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chain-held-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--ice);
+}
+
+/* ---------------------------------------------------------------------- motion
+   Deliberately CSS-only, no motion library - the same reasoning EquityChart.tsx
+   already states for skipping a chart package: the smaller the dependency
+   surface next to a page that runs alongside a trading engine, the better, and
+   nothing here needs more than a transition and a handful of keyframes can do.
+   No overshoot or bounce anywhere - a monitoring page for money is not the
+   place for playful easing. */
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.wrap > * {
+  animation: panel-in 0.35s ease both;
+}
+
+.wrap > *:nth-child(1) {
+  animation-delay: 0ms;
+}
+.wrap > *:nth-child(2) {
+  animation-delay: 30ms;
+}
+.wrap > *:nth-child(3) {
+  animation-delay: 60ms;
+}
+.wrap > *:nth-child(4) {
+  animation-delay: 90ms;
+}
+.wrap > *:nth-child(5) {
+  animation-delay: 120ms;
+}
+.wrap > *:nth-child(6) {
+  animation-delay: 150ms;
+}
+.wrap > *:nth-child(7) {
+  animation-delay: 180ms;
+}
+.wrap > *:nth-child(8) {
+  animation-delay: 210ms;
+}
+.wrap > *:nth-child(9) {
+  animation-delay: 240ms;
+}
+.wrap > *:nth-child(10) {
+  animation-delay: 270ms;
+}
+.wrap > *:nth-child(n + 11) {
+  animation-delay: 300ms;
+}
+
+/* A newly-arrived trade or signal row, flashed once so it is noticed without
+   depending on the reader having watched the row appear. Applied only to rows
+   that are genuinely new since the last poll (page.tsx tracks seen ids) - not
+   replayed on every 15s refresh for rows that were already there. */
+@keyframes row-arrive {
+  from {
+    background: var(--ice-wash);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+.row-new {
+  animation: row-arrive 1.6s ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     transition: none !important;
+    animation: none !important;
   }
 }

@@ -966,6 +966,279 @@ dispatches through its own portal, not the real threadpool. The regression test
 `ThreadPoolExecutor` instead, confirmed to fail against the unpatched code
 before trusting it.
 
+### D-098 - Charge rates are now sourced; `verified` still stays false
+Replaced the uncited placeholder numbers in `algo/exchange/data/charges_mcx.yaml`
+with figures checked against real, dated sources: Kotak Neo's own published
+Trade Free plan page for brokerage (Rs 10/order, commodity & currency, flat -
+was an uncited "20"), MCX's own 2024-10-01 fee circular for the options
+exchange transaction charge (Rs 41.80/lakh premium turnover = 0.0418% - this
+one was already numerically right, just uncited), and a broker's
+exchange-and-government charges breakdown cross-checking CTT, stamp duty, SEBI
+turnover fee and GST (all already correct). The one real numeric correction:
+futures exchange transaction charge, 0.0026% to 0.0021%.
+**Why `verified` does not flip:** D-011 sets a specific, deliberately strict
+bar - rates reproduced from a real Angel One contract note to the paisa. A
+broker's public rate card or an exchange circular is real sourcing and a
+genuine improvement, but neither is that: a contract note reflects the actual
+plan, GST state and any account-level adjustment on the specific account,
+which a rate card cannot. The warning text changed to match this precisely -
+"CHARGE RATES ARE SOURCED, NOT CONTRACT-NOTE VERIFIED" rather than the old
+"ARE PLACEHOLDERS", because they no longer are placeholders in the sense that
+word implies (invented), but "sourced" is not "verified" and the message
+should not blur the two. Also touched: `algo/costs/margin.py`'s
+`SpanApproxMargin` docstring now records a real sanity check for the futures
+percentage (a reported GOLDM margin of Rs 60,000-90,000 on an Rs 11.5 lakh
+lot brackets the existing 6%) - the short-option percentage has no equivalent
+source (SPAN for a short option is scenario-driven, not a stable percentage
+any source gives), and is left as an acknowledged guess rather than nudged
+without evidence.
+
+### D-099 - The scraped live chain is a first-class source, beside bhavcopy not instead of it
+`algo/data/mcx_chain_excel.py` reads the exchange's own option-chain page as
+scraped to Excel. It is the only source in the project carrying a **real bid
+and ask**: bhavcopy is end-of-day with no book at all (so every tradeability
+call against it rests on `assume_spread`'s invention), and SmartAPI cannot
+serve a contract that has already expired. What it cannot do is history - it
+is one instant, not a series. The two sources answer different questions and
+the project keeps both: the scrape for "what is actually quotable now", the
+bhavcopy archive for "has this shape ever worked".
+
+The reader maps columns by **position**, not by name, because the sheet mirrors
+a rendered ladder - calls left, puts right - so the header text repeats itself
+("LTP" appears twice, once per side) and only position disambiguates it. That
+makes a silent layout shift the obvious failure mode, so `_verify_header`
+refuses a file whose header row does not match exactly and prints wanted-vs-found,
+the same contract `bhavcopy.parse_rows` already offers. Blank bid/ask cells stay
+`None` and are never coerced to zero: "nobody is quoting this" and "the quote is
+zero" are different facts and the tradeability gate depends on the difference.
+
+Greeks are deliberately *not* solved in the loader - it returns unpriced rows and
+the caller runs `pricing.chain_greeks.enrich`, so this module never has to pick a
+risk-free rate. Correctness evidence is put-call parity: on a real 160000 row the
+solved call and put deltas differ by 1.000, which only comes out right if price,
+strike and right were all wired together correctly.
+
+### D-100 - The chain panel windows to +/-15 strikes, but never hides a held leg
+A real GOLDM ladder lists ~140 strikes at a 500 gap; the ones 30,000 points out
+are noise on every question the panel exists to answer, and the strategy sells
+inside roughly 0.15 delta which is well within the window. The count of what was
+clipped is printed alongside, so a windowed ladder never reads as a short one.
+The one exception is a **held** strike that has drifted outside the window -
+that is precisely the position worth looking at, so it is always shown.
+
+### D-101 - A book wider than 10% of its own mid is not a book (answers Q17)
+`Quote.status()` gained two checks: `TOO_WIDE` when the spread exceeds
+`DEFAULT_MAX_SPREAD_PCT` (10) percent of mid, and `NO_OPEN_INTEREST` when open
+interest is a *reported* zero. Every previous check asked whether a quote
+existed; none asked how wide it was, so a real scraped row at bid 76.5 /
+ask 884.5 passed as tradeable, and the IV solver inverted its 480.5 mid into a
+delta of +0.150 - landing on the strategy's own selling target ahead of both
+real neighbours (which sat at 0.063 and 0.045, on volumes of 27k and 32k against
+its zero). Live, that trade collects 76.5 while the backtest records ~480.
+
+**The threshold is measured, not chosen by feel.** On a real GOLDM scrape the
+genuine near-the-money book runs 0.3-1.5% of mid and the fabricated rows run
+50%+ (worst observed: bid 1 / ask 1833), so the 5-15% band separates them
+cleanly. Signed off by the operator. Applying it moved the 0.15-delta call from
+167500 at zero volume to 164000 at 47,843.
+
+Three details that are deliberate:
+
+* **Relative to mid, not absolute.** Five points is tight on a 2000-rupee option
+  and nonsense on a 20-rupee one; an absolute bound would need re-tuning per
+  strike.
+* **Reject, never widen.** An untradeable row is the truthful outcome. Widening
+  the quote to fit would be exactly the substitution D-005 forbids.
+* **Open interest of `None` is not zero.** The feed not reporting it is not
+  evidence that nobody holds the contract - and treating absence as zero would
+  have made every synthetic fixture untradeable.
+
+The default is applied in `status()` itself rather than left opt-in like
+`stale_after_s`, because staleness needs a policy number the model cannot know,
+whereas a book wider than its own mid is not a book under any policy. Callers
+wanting the raw classification pass `max_spread_pct=None`.
+
+The whole suite passed both before and after the gate went in, which meant
+nothing covered it; `tests/test_quote_tradeability.py` was added and confirmed
+to fail (4 tests) against the ungated code before being trusted. The reason a
+row was rejected now travels to the dashboard as `flag`, so the chain panel can
+say *why* a strike is dimmed instead of blurring "nobody quoted it" together
+with "quoted, but fictitiously".
+
+### D-102 - The stop loss is disabled, and the target moved to 4% (operator's call)
+`no_stop_loss: true` and `take_profit_value: "4"` in `config/goldm.yaml`. Requested
+directly by the operator. What it means mechanically, stated here because the
+code can no longer state it at the exit level:
+
+* A short strangle's **call side has no bounded loss**. The put side is bounded
+  only by gold going to zero.
+* The kill switch does **not** rescue this. It halts *new entries*; with
+  `flatten_on_trip: false` it leaves an open position alone. So a run can trip
+  the 2% daily limit and still be carrying the losing strangle.
+* The remaining exits are take profit, the devolvement forced pre-expiry exit,
+  and the end of the run. The devolvement guard is therefore now the **only**
+  hard backstop on an open position, which raises its importance considerably.
+
+Three things keep the change from being silent:
+
+* `ExitLevels.stop_loss` is `None`, never `Decimal("0")` - a zero would exit the
+  moment the position was down a rupee, the opposite of what was asked for.
+* Disabling it takes the explicit `no_stop_loss` flag. Passing `stop_loss=None`,
+  or omitting the setting, still gets the 1% default. A safety level removable by
+  omission is removable by accident.
+* The engine raises a standing run warning, alongside the uncalibrated-model
+  ones, and `algo config` prints `NO STOP LOSS`. `stop_loss_value: "1"` is
+  deliberately left in the file so flipping the flag back restores the old
+  behaviour exactly.
+
+The D-024 stop-viability check is skipped rather than reworked - there is no stop
+to compare against the round-trip cost.
+
+### D-103 - Only strikes that are multiples of 1000 are considered
+`strike_multiple: "1000"`. GOLDM lists every 500, but the round thousands carry
+the book. Measured on a real scraped chain rather than assumed:
+
+| | multiples of 1000 | the 500s between |
+|---|---|---|
+| tradeable rows | 78 of 142 (55%) | 55 of 140 (39%) |
+| median volume | 4,434 | 1,167 |
+| median volume, 0.15-0.30 delta band | 165,340 | 49,853 |
+
+Applying it moved the 0.15-delta call from 167500 at **zero volume** to 164000 at
+**47,843**.
+
+It is a **filter, not a rounding**. A strike is either on the grid or is not
+considered; nothing snaps 160500 to 160000. Snapping would report a delta the
+position does not have - the same substitution D-005 forbids - and if no strike
+on the grid falls within the delta tolerance, the strategy emits nothing and says
+why, exactly as it already did for unquoted strikes.
+
+### D-104 - Enter on the front cycle's expiry day, selling the next cycle
+`roll_at_front_dte: 0` with `cycle_offset: 1`. The monthly roll: on the day the
+current month's options expire, sell the next listed cycle (~28-30 DTE).
+
+Two implementation choices worth recording:
+
+**The gate is a DTE threshold, not a date equality.** `<= 0` on the front cycle
+is its expiry day; but if that date is a holiday there is no session on it, and an
+equality test would skip the roll for that month entirely. The threshold form
+lets the last session before it satisfy the gate. It can therefore be true on
+several consecutive sessions - the cadence check, keyed on the cycle actually
+sold, is what limits it to one entry, not the gate.
+
+**The next cycle is resolved by date, not by adding a month.** Gold does not list
+every calendar month, so "the next contract" and "the same day next month" are
+different facts and only the first can be traded. `BarContext.expiry_after` asks
+the calendar for the first cycle expiring after the front one. When nothing later
+is listed - a real state near the end of the master's horizon - the strategy
+records a note and does not trade, rather than raising.
+
+The devolvement entry block does not interfere: `_pre_trade_block` resolves the
+cycle from the **signal's own legs**, so it judges the ~30-DTE cycle being sold,
+not the front one expiring that day.
+
+### D-105 - The bhavcopy column mapping is verified, for one layout, and the file is HTML
+Real MCX "commodity wise" exports arrived on 2026-08-27 (GOLDM, Jan-Jul 2026,
+82,020 option rows over 140 sessions). Three findings:
+
+**The blind mapping was almost right.** `MCX_DEFAULT_COLUMNS` guessed 12 headers
+and got 10 exactly right. Only two were wrong, both carrying a unit suffix in the
+real file: `Volume` is `Volume(Lots)`, `Open Interest` is `Open Interest(Lots)`.
+`MCX_COMMODITY_WISE_COLUMNS` records the checked layout; the blind one stays as a
+fallback and stays labelled unverified, because the plain CSV bhavcopy has still
+never been seen.
+
+**The file is HTML with an `.xls` extension.** Not Excel, not CSV - a bare
+`<table>`. A CSV reader yields one meaningless column and raises nothing. So
+`parse_rows` now sniffs content rather than trusting the name, and
+`load_directory` globs both extensions: keying the default off `.csv` alone found
+zero files in a directory entirely full of usable data, which is precisely the
+silent-nothing failure this codebase is meant not to have.
+
+**Untraded rows carry only a settlement close.** About 80% of the ladder has an
+empty open/high/low and a close. That is not missing data - it is "the only price
+this contract had all day was its settlement" - so the empty fields fall back to
+the close. `volume` stays 0, so `traded` and `assume_spread` still treat the row
+as untradeable and nothing becomes falsely fillable.
+
+### D-106 - The supplied bhavcopy cannot back-test this strategy, for two reasons
+Recorded because both are properties of the *data*, not of the engine, and both
+have to be fixed by downloading differently rather than by changing code.
+
+**No futures rows.** All 82,020 rows are `OPTFUT`. `build_snapshots` needs a
+futures close for the forward, and without a forward every delta in the chain
+would be invented - so it skips the session. The run reports
+`every day with option rows was missing a matching futures row (140 skipped)`
+and produces nothing, which is the correct outcome: `DeltaStrangle` selects
+strikes *by delta*, so an invented forward would silently choose different
+strikes and the entire result would be fiction.
+
+Put-call parity was checked as a fallback and is viable but not adopted by
+default: on 15 Jul 2026, 35 strikes had both legs traded and the implied forward
+clustered inside ~0.3% (141,461-142,332). That is a derivation with real error
+bars, and delta is sensitive to it. The exchange's own futures close is one more
+download away and is not worth substituting.
+
+**Only the front expiry is present.** No session in any of the seven files lists
+more than one expiry. D-104's roll needs the *next* cycle quoted on the front
+cycle's expiry day, and those rows do not exist in this export.
+
+This is a limitation of the download, not of the instrument: the Angel One master
+lists three GOLDM option expiries concurrently (2026-08-28, 2026-09-25,
+2026-10-29). The roll is therefore tradeable live and merely unbacktestable
+against this particular file set.
+
+### D-107 - MCX trades some weekends, and the calendar now knows it
+The first real backtest crashed on `2026-02-01 is not an MCX trading day`. The
+calendar was wrong, not the data: **Sunday 1 February 2026 carries 285,223 lots
+of GOLDM option volume across 149 traded strikes**. India's Union Budget is
+presented on 1 February and the exchanges hold a live session for it whatever the
+weekday - as in 2020 and 2025, both Saturdays.
+
+`MarketCalendar` gained `special_sessions`, a set of dates that override the
+weekend rule. It is a list of observed facts evidenced by traded volume, not a
+rule to be extrapolated; a holiday still beats a special session, since a date in
+both is a session scheduled and then cancelled. Exactly one of the 149 session
+dates in the supplied data needed it.
+
+### D-108 - The bhavcopy backtest cannot measure this strategy: the exit lag exceeds the target
+Six real cycles ran (Jan-Jun 2026, 238 bars, 6 round trips, +22,957 net). **The
+P&L is not a usable estimate of edge**, and the run's own output shows why: all
+six trades exited `TAKE_PROFIT`, including two that lost money. A take-profit
+exit with a negative P&L is a contradiction, and chasing it found the reason.
+
+Exit orders join `pending` and fill at the **start of the next bar**
+(`engine.py`). The bhavcopy runner builds **two bars per session** - a 09:30 entry
+priced from the day's open and a close bar - so an exit decided at the close fills
+at the next session's open. Measured on the 128 real futures sessions:
+
+| | |
+|---|---|
+| take-profit target (4% of ~113,335 margin) | **₹4,533** |
+| median close→next-open gap, 0.42% of 141,669 | **₹5,950 per lot** |
+
+The lag through which every exit fills is **larger than the target it is trying
+to capture**. Median intraday range is 1.72% and reaches 13.64%, so the noise
+dominates the signal completely. This is not a bug to fix in the engine - the
+fill is honest given two ticks a day - it is bhavcopy being the wrong instrument
+for measuring a 4%-of-margin target.
+
+Three things were checked first and cleared, so the conclusion rests on the lag
+and not on a data fault:
+
+* **The forward is right.** Put-call parity across 59 paired strikes on
+  2026-02-02 implies a median forward of 141,865 against a bhavcopy futures close
+  of 141,669 - 0.14% apart.
+* **The prices are internally consistent.** Parity holds across the ladder.
+* **The high implied vols are in the data, not the model.** The 2026-02-02
+  futures row ranges 131,607-147,800, an 11.4% intraday move, which is what a
+  ~60% IV is pricing.
+
+What this run *can* support is the shape question - the strategy traded six real
+cycles, 4 winners and 2 losers, without the engine refusing or the devolvement
+guard firing. What it cannot support is any statement about expected return.
+Answering that needs intraday data, which only the recorder can supply.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting

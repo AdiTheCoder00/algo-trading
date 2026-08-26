@@ -263,18 +263,25 @@ lever that meaningfully raises n, so this is worth deciding on purpose.
 ## B. Costs
 
 ### Q6 `[BLOCKING M3]` A real contract note, please
-I will not hardcode CTT, MCX transaction charges, SEBI fee, stamp duty or GST from memory or
-from broker blog posts. What I found while checking your instrument is indicative only:
-CTT around 0.05% on the **sell side of option premium, paid by the writer** — which is us, on
-every entry — plus MCX transaction charges quoted around ₹260 per crore for non-agri, stamp
-duty on the buy side, SEBI fee, and 18% GST on brokerage and exchange charges.
+Updated 2026-08-26 (D-098): `charges_mcx.yaml` no longer runs on an unsourced guess. Checked
+against real, dated sources — Kotak Neo's own published rate card for brokerage (flat Rs 10
+per order, commodity & currency, on the Trade Free plan), MCX's own 2024-10-01 fee circular
+for the options exchange transaction charge (Rs 41.80/lakh premium turnover), and a broker's
+regulatory-charges breakdown for CTT, stamp duty, SEBI fee and GST. One real correction came
+out of it: the futures exchange transaction charge was off (0.0026% vs a sourced 0.0021%);
+everything else the original secondary-source guess had already landed on the right number,
+just without a citation attached.
 
-Those numbers are from secondary sources and I do not trust them to the paisa.
+That is real progress, and it is not the same thing this question originally asked for. A
+rate card is a published, general figure; a contract note is what actually happened on one
+trade on one account, with that account's plan and any account-level adjustment folded in.
+`verified` stays false for exactly that reason, and the dashboard's warning now says so
+precisely — "sourced, not contract-note verified" — instead of the old "placeholder", which
+overstated how little was known and understated what still is.
 
-**Paste one real Angel One contract note for an MCX options trade.** It is ground truth, it
-pins every component *and* the rounding, and I will write a unit test that reproduces your
-note exactly. Until then M3 will not report net P&L as authoritative. Also confirm your
-brokerage plan (flat per order, percentage, or a zero-brokerage tier).
+**Still open, for the same original reason: paste one real Angel One or Kotak Neo contract
+note for an MCX options trade.** It is the only thing that pins every component *and* its
+rounding to the paisa, and the only thing that can flip `verified` to true per D-011.
 
 ---
 
@@ -301,6 +308,51 @@ months it is 09:00–23:30, exactly 29 bars.
 
 **Default:** emit the stub flagged `is_partial`; strategy may not act on it, risk layer may.
 Say the word if you would rather use 15-minute bars, where the stub disappears entirely.
+
+### Q17 `[ANSWERED]` `Quote.status()` has no spread-width gate — and real data exploits it
+
+> **Answered: "use yours."** Implemented as `DEFAULT_MAX_SPREAD_PCT = 10` (percent
+> of mid) plus a reject on a *reported* open interest of exactly zero — see
+> D-101. Open interest of `None` (feed never said) is explicitly not treated as
+> zero. The original question is kept below because the evidence in it is the
+> justification for the threshold.
+
+Found while wiring the scraped live chain (D-099), on your own 26 Aug scrape.
+`Quote.status()` refuses an empty book, a non-positive price, a crossed book and
+a stale one — but says nothing about **how wide** the book is. A quote of
+bid 76.5 / ask 884.5 is uncrossed, positive and fresh, so it passes as `OK`.
+
+That is not hypothetical. In that one scrape, **24 of 204 "tradeable" rows have a
+spread wider than 50% of the bid**, the worst being bid 1 / ask 1833. Every one
+of them has zero volume. The IV solver then inverts the *mid* of that garbage
+book, converges on a plausible-looking number, and produces a delta that sits
+squarely in the strategy's selling zone:
+
+```
+167500 CE   bid 76.5   ask 884.5   vol 0   ->  mid 480.5  ->  iv 51.1%  ->  delta +0.150
+167000 CE   bid 106    ask 107.5   vol 27202                 iv 32.3%      delta +0.063
+168000 CE   bid 76     ask 77.5    vol 32546                 iv 33.9%      delta +0.045
+```
+
+`algo chain` confirms the consequence: at a 0.15 delta target the strategy picks
+**167500 CE** — the fabricated row, not either real neighbour. Live, it would
+sell believing it collected ~480 and actually collect 76.5.
+
+**My default: gate on relative spread, and reject rather than widen.** A row
+whose spread exceeds some percentage of its mid becomes `QuoteFlag.TOO_WIDE` —
+untradeable, unpriced, and *visible* in the chain panel as a gap, the same
+treatment an unquoted strike already gets. I have deliberately **not**
+implemented this yet, because the threshold is a strategy risk decision, not a
+code detail, and picking it silently is exactly the kind of invisible assumption
+D-005 exists to prevent.
+
+**What I need from you:** the threshold. On this scrape, the real near-the-money
+book runs 0.3–1.5% of mid, and the fabricated rows run 50%+ — so anything in the
+5–15% range separates them cleanly. I would pick **10% of mid**, plus a
+requirement of non-zero open interest. Say a number, or say "use yours".
+
+Until this is answered, treat any backtest or live signal whose chosen strike had
+zero volume as suspect.
 
 ---
 

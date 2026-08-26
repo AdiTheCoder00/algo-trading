@@ -39,8 +39,17 @@ class SpanApproxMargin:
     """Margin as a percentage of notional. A placeholder, and labelled as one.
 
     Short options attract a higher rate than futures, reflecting that a naked
-    short carries open-ended risk while a future does not. Both percentages are
-    guesses until checked against real broker margin quotes.
+    short carries open-ended risk while a future does not.
+
+    `futures_pct` has a real, if loose, sanity check behind it: at a gold price
+    of ~Rs 1,15,000/10g, a GOLDM lot (~Rs 11.5 lakh notional) has been reported
+    needing roughly Rs 60,000-90,000 in SPAN+exposure margin - 5.2% to 7.8% of
+    notional, which brackets 6%. `short_option_pct` has no equivalent check: SPAN
+    for a short option is scenario-driven (volatility, time to expiry, moneyness)
+    and no source gives a stable single percentage the way a futures margin
+    roughly can. Both stay guesses in the sense that matters here - neither
+    is calibrated against this account's own broker-reported margin, which is
+    what `is_calibrated` is actually gating.
     """
 
     __slots__ = ("_futures_pct", "_short_option_pct")

@@ -67,7 +67,7 @@ make exactly nothing before costs and lose exactly the costs:
 
 ```
   FALSIFICATION: gross P&L on a flat market = 0.00 (must be exactly 0)
-  ! CHARGE RATES ARE PLACEHOLDERS - net P&L is not calibrated (D-011, Q6)
+  ! CHARGE RATES ARE SOURCED, NOT CONTRACT-NOTE VERIFIED - net P&L is not calibrated to the paisa (D-011, Q6)
   ! SPREAD IS MODELLED, NOT MEASURED - the recorder replaces this at M1.5
 ```
 

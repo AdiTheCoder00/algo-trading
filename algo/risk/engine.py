@@ -130,6 +130,13 @@ class RiskEngine:
         self._max_lots_per_underlying = max_lots_per_underlying
         self._margin_cap_pct = margin_cap_pct
 
+    @property
+    def margin_cap_pct(self) -> Decimal | None:
+        """`None` when no cap is configured. Read by the engine to report
+        margin utilisation to the dashboard - a second accessor rather than a
+        second place this percentage is threaded through by hand."""
+        return self._margin_cap_pct
+
     def evaluate(
         self, signal: Signal, snapshot: RiskSnapshot, *, spec: InstrumentSpec
     ) -> RiskDecision:
