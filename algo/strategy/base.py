@@ -14,6 +14,7 @@ matching an order placed under the old settings.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 
 from algo.core.fill import Fill
 from algo.core.ids import stable_hash
@@ -78,3 +79,28 @@ class Strategy(ABC):
     def on_session_end(self, ctx: BarContext) -> list[Signal]:
         """Called after the last bar of a session. Where square-off intent belongs."""
         return []
+
+    # ------------------------------------------------------------ persistence
+    def state(self) -> dict[str, str]:
+        """Strategy state that must survive a process restart.
+
+        Almost nothing belongs here. Position state comes from the context on
+        every bar (D-041) precisely so it *cannot* drift, and anything derivable
+        from the context must keep being derived. What belongs here is state that
+        is genuinely the strategy's own and is not reconstructible from the book
+        - `DeltaStrangle`'s record of which expiry cycles it has already traded
+        being the motivating case, since a flat account looks identical whether
+        this cycle was traded and closed or never entered at all.
+
+        Strings, like `params`, so the stored form does not depend on a float
+        repr. Empty by default: a strategy with no such state persists nothing.
+        """
+        return {}
+
+    def restore(self, state: Mapping[str, str]) -> None:  # noqa: B027 - optional hook
+        """Reload what `state` saved. Must tolerate keys it does not recognise.
+
+        The caller is responsible for checking that the state was saved under the
+        same `params_hash` - restoring a cadence recorded under different
+        parameters would let a config edit silently skip or repeat a cycle.
+        """

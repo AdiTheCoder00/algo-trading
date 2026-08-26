@@ -309,6 +309,40 @@ months it is 09:00–23:30, exactly 29 bars.
 **Default:** emit the stub flagged `is_partial`; strategy may not act on it, risk layer may.
 Say the word if you would rather use 15-minute bars, where the stub disappears entirely.
 
+### Q19 `[OPEN]` Kotak's `limits` endpoint reports a bridge outage — transient or entitlement?
+`limits` (which backs `KotakBroker.funds()`) returns `stCode: 300015`,
+`"bridge API error out"`, consistently across retries, at 02:33 IST with MCX
+closed. Every other endpoint answered normally in the same session: `positions`,
+the order book and the trade report all returned a well-formed empty envelope
+(`stCode: 5203`, `"No Data"`, `desc: "data not found"`).
+
+The two failures do not even share a shape. `positions` sends `stat: "Not_Ok"`
+with a `desc`; `limits` repeats the error text into `stat`, sends `stCode` as a
+**string**, and carries no `desc` at all - which reads like a gateway failing
+before the trading backend answered, rather than the backend answering "no".
+
+Two candidates, indistinguishable from a closed market:
+
+1. **The funds/limits service is part of the trading backend and is simply off
+   outside session hours.** Plausible: it is the one endpoint that needs live
+   margin state rather than a stored book.
+2. **A separate entitlement.** Kotak issues market data under its own app key
+   (`market_data_key` exists for exactly this reason); limits may be similar.
+
+**What was done anyway:** classified as `RetryableBrokerError` rather than
+`FatalBrokerError` (D-114). The classification follows from what the error *is* -
+a component being unavailable is not a rejection on the merits - not from
+confirmed transience. Fatal would kill a live session over an outage that may
+clear on its own; retryable only costs a backoff before the router surfaces it.
+
+**To close this:** run `algo live` during market hours and call `funds()`. If it
+succeeds, candidate 1 is confirmed and nothing more is needed. If it still fails,
+it is an entitlement question for Kotak support.
+
+Nothing is blocked meanwhile: `funds()` has no call sites in the engine.
+
+---
+
 ### Q17 `[ANSWERED]` `Quote.status()` has no spread-width gate — and real data exploits it
 
 > **Answered: "use yours."** Implemented as `DEFAULT_MAX_SPREAD_PCT = 10` (percent

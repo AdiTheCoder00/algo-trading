@@ -48,6 +48,16 @@ class BarPriceSource:
         self._key = instrument.key
         self._by_ts = {bar.ts: bar for bar in bars}
 
+    def add(self, bar: Bar) -> None:
+        """Take a bar that arrived after construction.
+
+        A backtest knows every bar up front; a live loop does not. Without this
+        the index built here would be a snapshot taken before the session
+        started, and the first mark on a newly closed bar would raise - which is
+        exactly how this was found (`BacktestEngine.append_bar`).
+        """
+        self._by_ts[bar.ts] = bar
+
     def mark(self, key: str, ts: datetime) -> Decimal | None:
         if key != self._key:
             return None

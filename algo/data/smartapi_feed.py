@@ -32,6 +32,7 @@ from algo.core.enums import Exchange
 from algo.core.errors import DataError, RetryableBrokerError
 from algo.core.instrument import InstrumentId
 from algo.core.timeutil import IST
+from algo.core.tls import trust_the_os_certificate_store
 from algo.data.live import SessionWindow
 from algo.exchange.master import InstrumentMaster
 
@@ -122,23 +123,10 @@ def _silence_smartapi_logger() -> None:
 
 
 def _trust_the_os_certificate_store() -> None:
-    """Some environments intercept outbound HTTPS locally (antivirus web
-    shields doing TLS scanning are the common case, confirmed here: the real
-    certificate Angel One's server presents gets swapped in transit for one
-    issued by "Norton Antivirus for SSL/TLS scanning"). The OS trusts that
-    root; Python's bundled `certifi` list does not, so a plain `requests` call
-    fails with `CERTIFICATE_VERIFY_FAILED` even though the connection is fine.
-
-    `truststore.inject_into_ssl()` points Python's SSL contexts at the OS
-    certificate store instead of `certifi`'s bundled one. This does not weaken
-    verification - it changes which already-vetted set of roots is consulted,
-    the same set curl and every other OS-native tool already uses - so a
-    genuinely bad certificate still fails. Disabling verification instead
-    would have accepted this one blindly along with anything else.
-    """
-    import truststore
-
-    truststore.inject_into_ssl()
+    """Kept as a name here because this is where the problem was found and
+    documented; the implementation moved to `algo.core.tls` once Kotak turned
+    out to need it too (D-113)."""
+    trust_the_os_certificate_store()
 
 
 class SmartConnectTransport:

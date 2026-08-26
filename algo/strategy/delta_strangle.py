@@ -33,12 +33,13 @@ restart to behave correctly. Recorded as an open item for Milestone 6.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, time
 from decimal import Decimal
 
 from algo.core.chain import ChainRow, OptionChainSnapshot
 from algo.core.enums import Atomicity, Right, Side, SignalAction
-from algo.core.errors import CalendarError
+from algo.core.errors import CalendarError, DomainError
 from algo.core.fill import Fill
 from algo.core.ids import signal_id
 from algo.core.instrument import OptionId
@@ -132,6 +133,35 @@ class DeltaStrangle(Strategy):
             ),
             "cycle_offset": str(self._cycle_offset),
         }
+
+    # ------------------------------------------------------------ persistence
+    def state(self) -> dict[str, str]:
+        """The cadence set, which a restart cannot otherwise recover.
+
+        Everything else this strategy knows comes from the context each bar. This
+        does not: a flat account looks exactly the same whether this cycle was
+        traded and closed or never entered, so a restart without this would
+        re-enter a cycle it had already traded - turning "one strangle per cycle"
+        into two. That is the whole cadence rule defeated by a process restart.
+        """
+        return {
+            "traded_cycles": ",".join(d.isoformat() for d in sorted(self._traded_cycles))
+        }
+
+    def restore(self, state: Mapping[str, str]) -> None:
+        raw = state.get("traded_cycles", "").strip()
+        if not raw:
+            return
+        try:
+            self._traded_cycles = {date.fromisoformat(part) for part in raw.split(",")}
+        except ValueError as exc:
+            # Never silently start with an empty cadence set - that is exactly
+            # the state that permits a duplicate entry.
+            raise DomainError(
+                f"cannot restore traded_cycles from {raw!r}: {exc}. Refusing to "
+                "continue with an empty cadence set, which would allow this cycle "
+                "to be entered a second time"
+            ) from exc
 
     # ------------------------------------------------------------------ logic
     def on_bar(self, ctx: BarContext) -> list[Signal]:

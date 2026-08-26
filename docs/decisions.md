@@ -1239,6 +1239,239 @@ cycles, 4 winners and 2 losers, without the engine refusing or the devolvement
 guard firing. What it cannot support is any statement about expected return.
 Answering that needs intraday data, which only the recorder can supply.
 
+### D-109 - The live loop shares the backtest's decision path, not a copy of it
+`algo live` connected, reconciled and stopped. The missing piece was never the
+broker - `Router` (at-most-once, reconcile-before-send), `KotakBroker`,
+`PaperBroker`, `OrderJournal` and `Reconciler` all existed and were tested - it
+was the loop between a bar arriving and an order being sent.
+
+**The seam is `BacktestEngine.decide`.** The per-bar body of `run` split cleanly
+in two: *settle* (turn queued orders into fills) and *decide* (kill switch, risk
+exits, mark, ask the strategy, size). Only settling is genuinely different
+between a backtest and a live session - a backtest settles against the next bar's
+prices, a live loop learns its fills from the broker asynchronously. Deciding is
+identical, so it is now one method that both call, and `LiveLoop` cannot choose
+what to trade, how much, or when to exit.
+
+This follows the principle `paper.py` already stated for fills - "not a similar
+one, the same `FillSimulator` object" - and it matters more for sizing and exits
+than for fills.
+
+The extraction was proven behaviour-preserving rather than assumed: the golden
+trade-log digest is unchanged, and the six-cycle bhavcopy run still returns
+22,957.40 to the paisa.
+
+**Two seams were added for live, both narrow.** `append_bar` (a live session
+learns its bars one at a time) and `apply_fill` (book a fill the engine did not
+invent). `_execute` now calls `apply_fill` for its own fills, so simulated and
+real fills reach the portfolio and the strategy by one path.
+
+**A real bug fell out of it.** `BarPriceSource` indexed its bars into a dict at
+construction, so a bar appended later was invisible to it and the first mark
+against that bar raised. A backtest never sees this because it knows every bar up
+front. Fixed with `BarPriceSource.add`, called from `append_bar`; sources that
+carry their own data (a chain feed) have no `add` and need nothing.
+
+**The four safety properties `LiveLoop` is tested for**, each because it costs
+real money when wrong: it settles before it decides (asked "given what you
+actually hold", never "given what you asked for last time" - `is_flat` is
+`DeltaStrangle`'s first gate); it acts on each closed bar exactly once, keyed on
+the bar timestamp, because a duplicated entry signal is a doubled position; it
+treats a refused order as a result rather than an exception, since
+`BLOCKED_UNRECONCILED` is the reconcile-before-send rule working; and it stops -
+`max_passes` is required and has no default, because a trading loop's stopping
+condition is not a detail to leave to a caller who forgot.
+
+Still to come before this can place a real order: wiring `LiveLoop` into the
+`algo live` command against the paper broker, persisting `DeltaStrangle`'s
+`_traded_cycles` across a restart (flagged in its own docstring since M4), and a
+chain feed for the options path.
+
+### D-110 - The traded-cycle cadence is persisted, guarded by the parameter hash
+`DeltaStrangle`'s docstring has said since M4 that the traded-cycle set "is
+genuine strategy state and must be persisted for a live restart to behave
+correctly". It now is, through `Strategy.state()` / `Strategy.restore()` and a
+`strategy_state` table.
+
+The hazard is narrow and expensive: **a flat account looks identical whether this
+cycle was traded and closed or never entered at all.** A restarted process with
+an empty cadence set sells a second strangle into a cycle it has already traded,
+which defeats the whole "one per cycle" rule.
+
+Four decisions inside it:
+
+* **Almost nothing belongs in `state()`.** Position state comes from the context
+  every bar (D-041) precisely so it cannot drift, and anything derivable must
+  keep being derived. Only what is genuinely the strategy's own and not
+  reconstructible from the book goes here.
+* **The parameter hash is a guard, not a label.** `strategy_state` returns None
+  for state saved under a different `params_hash`, and the caller cannot
+  distinguish that from "nothing saved" - both mean "you have no usable prior
+  state". Signal ids already depend on the parameter set for the same reason.
+* **A garbled payload raises rather than starting empty**, because starting empty
+  is exactly the state that permits the duplicate entry.
+* **Saved on every fill, not at end of run.** A live process that dies has no end
+  of run, and a fill is the only thing that changes this state.
+
+Restoring is opt-in (`restore_strategy_state`), never automatic: a backtest
+starts from nothing by definition, and silently inheriting a previous run's
+cadence would make results depend on whatever was in the state file.
+
+### D-111 - `algo live --passes` runs the paper loop, and refuses anything else
+The loop is wired end to end: `SmartApiBarFeed` -> `IterableBarFeed` ->
+`LiveLoop` -> `BacktestEngine.decide` -> `OrderRouter.place_all` -> `PaperBroker`,
+with `BrokerFillFeed` closing the circuit back into the portfolio.
+
+**Paper only, and the refusal happens before any credential is read or any
+session opened.** The first version had that guard inside `_run_paper_loop`,
+which meant refusing *after* connecting to a real broker - the right answer in
+the wrong place. It now sits at the top of `live()`, behind the pre-existing
+`resolve_mode` gate rather than replacing it, so a live config is stopped twice.
+Verified: `TRADING_MODE=live` plus the real-money flag exits 1 with a message and
+touches nothing.
+
+Two details in the feeds worth keeping:
+
+* **`BrokerFillFeed` records zero charges, deliberately.** An execution report
+  carries a price and a quantity, not a contract note. Writing a modelled charge
+  into the field a real one belongs in would make the two indistinguishable
+  later; `Fill.is_modelled` is False for these, and the charges stay empty until
+  something authoritative fills them (Q6).
+* **A fill for an unknown instrument raises.** Booking it against a guess
+  corrupts the portfolio; skipping it leaves a real position invisible. Neither
+  is acceptable, so it stops.
+
+`PaperBroker` is quoted from `BacktestEngine.mark_for`, so paper fills and
+backtest fills are marked from the same data and a disagreement between them can
+never be two price lookups that diverged.
+
+Not yet done: the options path needs a live chain feed (`KotakChainFeed` exists
+and is not yet connected to the loop), so `--passes` currently drives the futures
+instrument only.
+
+### D-112 - The live chain is enriched and staleness-bounded, one poll per bar
+`KotakChainFeed` returns every row with `iv=None, delta=None` - a market-data
+poll carries prices, not greeks. `DeltaStrangle` selects strikes **by delta**, so
+handing it a raw live chain would match no strike and the strategy would
+**silently never trade**. `LiveChainProvider` is the piece between them.
+
+**It answers both questions from one poll.** The engine asks a chain provider
+"what does the ladder look like" and a price source "what is this leg worth". In
+a backtest those are two objects built from the same snapshot list; live they
+must come from the same poll or a strike can be chosen at one instant and marked
+at another. So one object implements both protocols, and `refresh` is driven by
+the loop **once per bar** rather than per question - a single `decide` asks
+several times over (the strategy, the dashboard snapshot, then each mark).
+
+**Staleness is refused, not tolerated.** `ChainPriceSource` keys marks by exact
+timestamp, which cannot work when snapshots arrive whenever a poll returns. This
+answers from the most recent snapshot and returns None once it is older than
+`max_staleness_s` (default 120s), which makes `require_mark` raise and the loop
+stop. That is deliberate: `prices.py` already argues a missing mark priced at
+zero "would show a short option as fully profitable on exactly the bar the feed
+dropped out - the most dangerous possible direction for that error". A stale
+price is the same error with a smaller number on it. The ladder goes stale too,
+not just the marks, or the strategy would select strikes from prices nobody is
+showing any more.
+
+**It will not answer for the wrong cycle.** A `chain_at` for an expiry other than
+the one polled returns None rather than the polled ladder - "no chain for that",
+never "here is one".
+
+Two supporting changes: `KotakChainFeed.poll` is now public (`snapshots` owns its
+own cadence and sleeps, which suits a recorder; a trading loop already has a
+cadence - its bars - and must not be handed a second one), and
+`_expiries_from_master` builds an `ExpiryCalendar` from what the broker actually
+lists, pairing each option cycle with the first futures contract expiring on or
+after it - the identical pairing `nearest_futures_expiry` applies to bhavcopy, so
+live and backtest cannot disagree about a cycle's underlying.
+
+A chain failure ends the pass with a stated reason rather than a quiet no-trade,
+because "the feed broke" and "the strategy declined" must not look the same.
+
+Proven end to end: `LiveLoop` -> `decide` -> `DeltaStrangle` now emits a real
+two-legged short strangle (one CE, one PE, both SELL) through the production path
+with only the market-data transport stubbed.
+
+### D-113 - Three real bugs, found the first time the adapter met the live Kotak API
+The paper loop was pointed at the real broker on 2026-08-27. Every one of these
+had been passing its tests, because the fakes modelled envelopes Kotak does not
+actually send.
+
+**1. `_ack_ok` could not read the login envelope, so `connect()` never worked.**
+It checked for a flat `stat`/`stCode`. The login endpoints send neither: they
+nest everything under `data` with `status: "success"`. A perfectly good login was
+read as a rejection, which means the Kotak adapter had **never** established a
+session against the real API - only against fixtures using the flat shape. Both
+shapes are now recognised; the nested branch is deliberately narrow
+(`data.status` must be exactly "success"), because this function is what stands
+between a broken session and the router believing it may trade. The fakes were
+corrected to the real shapes rather than the check being loosened - the fakes
+being wrong is *why* this survived.
+
+**2. TLS trust was injected by SmartAPI only, so Kotak worked by accident.**
+`_trust_the_os_certificate_store` lived in `smartapi_feed`, and `algo live`
+happened to construct that transport first, patching SSL process-wide before the
+Kotak SDK opened a socket. Reordering two lines would have broken the broker
+connection for a reason nobody would look for in that file. Moved to
+`algo/core/tls.py`; both transports now call it in their own constructors.
+Confirmed by a standalone Kotak login failing with `CERTIFICATE_VERIFY_FAILED`
+until it was added.
+
+**3. An empty book was treated as a fatal error.** Kotak reports "nothing to
+report" as an *error* envelope - `stat: Not_Ok`, `stCode: 5203`,
+`errMsg: "No Data"` - for the trade report, order report and positions alike.
+The first live run died on `Kotak trade report call failed: No Data`, which only
+meant the account had not traded that day: the state **every** session starts in,
+and precisely what reconciliation needs an answer to rather than an exception.
+`_is_empty_book` now recognises it, and is deliberately narrow - the code and the
+message must both match and there must be no `data` - because widening it to any
+`Not_Ok` would turn a failed positions call into a silent empty list, i.e.
+believing the account is flat when it is not.
+
+**One safety check added while in there.** The first login stage returns
+`kType: "View"`; only MPIN validation upgrades it to `"Trade"`. `connect()` now
+refuses a session that is not trade-scoped, rather than discovering it when the
+first order is rejected - which would be mid-strategy with a leg possibly already
+open. Verified against the live account: stage one returns View, stage two
+returns Trade.
+
+**What the live run proved**, at 02:33 IST with MCX closed: both sessions
+connect, both masters load (3 listed GOLDM option expiries), reconciliation runs
+clean and reports `safe to trade: True`, and the loop degrades correctly with
+"no closed bars yet today; nothing to decide on".
+
+**What it could not prove**, because the market was shut: the chain poll against
+live quotes, strike selection from live deltas, routing to the paper broker, and
+fill settlement. Those need a session between 09:00 and 23:30 IST.
+
+**Still open:** `limits` (which backs `funds()`) returns `stCode: 300015`,
+`"bridge API error out"`. Not diagnosed - it may be a closed-market artefact or a
+separate entitlement. It did not block reconciliation, and is recorded rather
+than guessed at.
+
+### D-114 - A Kotak backend outage is retryable, not fatal
+`limits` returns `stCode: 300015`, `"bridge API error out"` (Q19). The adapter
+would have called that `FatalBrokerError`, because anything failing `_ack_ok`
+was fatal by default.
+
+That is the wrong side to err on. This module's stated rule is "transient network
+failures are retryable, everything a broker **rejects** is fatal", and a bridge
+outage is not a rejection on the merits - it is a component being unavailable,
+which is far closer to a network failure. Fatal would kill a live session over an
+outage that may clear on its own; retryable costs a backoff before the router
+surfaces it anyway. The asymmetry decides it.
+
+The check is narrow - the status code only - and applies at both places a
+response is validated (`_ok_data` for book reads, `funds` for the limits call).
+Note the live payload sends `stCode` as a **string** where the empty-book
+envelope sends it as a number, so the parse handles both; a test pins that,
+because it is the kind of difference that silently disables a guard.
+
+The classification follows from what the error *is*, not from confirmed
+transience - Q19 records the re-test needed during market hours to distinguish a
+closed-market artefact from an entitlement problem.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting

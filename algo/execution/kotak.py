@@ -51,6 +51,7 @@ from algo.core.errors import DataError, FatalBrokerError, RetryableBrokerError
 from algo.core.instrument import FutureId, InstrumentId, OptionId
 from algo.core.order import BrokerOrderRef, Order
 from algo.core.timeutil import IST, ensure_utc, iso
+from algo.core.tls import trust_the_os_certificate_store
 from algo.exchange.master import InstrumentMaster, MasterRow
 from algo.execution.broker import (
     BrokerFillSnapshot,
@@ -199,6 +200,9 @@ class NeoTransport:
 
     def __init__(self, consumer_key: str) -> None:
         import inspect
+
+        # Not inherited from whichever transport happened to be built first.
+        trust_the_os_certificate_store()
 
         # The SDK ships py.typed without stubs and mypy's analysis of it does
         # not see its lazy exports, so the import below is ignored explicitly.
@@ -377,6 +381,14 @@ class KotakBroker:
             raise FatalBrokerError(f"Kotak rejected the TOTP login: {_describe(login)}")
         if not _ack_ok(validate):
             raise FatalBrokerError(f"Kotak rejected the MPIN: {_describe(validate)}")
+        if not _session_can_trade(validate):
+            # Refused here rather than discovered at the first order, which would
+            # be mid-strategy with a leg possibly already open.
+            raise FatalBrokerError(
+                "Kotak accepted the MPIN but the session is not trading-scoped "
+                "(kType is not 'Trade'). Refusing to run a trading session that "
+                "cannot place an order."
+            )
         self._connected = True
         self._last_heartbeat = self._clock.now()
         log.info(
@@ -748,6 +760,10 @@ class KotakBroker:
     def funds(self) -> Funds:
         self._require_connection("read funds")
         data = self._call("read funds", self._transport.limits)
+        if isinstance(data, dict) and _is_bridge_outage(data):
+            raise RetryableBrokerError(
+                f"Kotak funds read hit a backend outage: {_describe(data)}"
+            )
         if not isinstance(data, dict) or not _ack_ok(data):
             raise FatalBrokerError(f"Kotak rejected the funds read: {_describe(data)}")
         cash = _decimal(data.get("Net")) or Decimal("0")
@@ -891,6 +907,19 @@ def _ok_data(response: dict[str, Any], what: str) -> list[dict[str, Any]]:
         raise RetryableBrokerError(
             f"Kotak {what} call returned an unreadable payload: {response!r}"
         )
+    if _is_bridge_outage(response):
+        raise RetryableBrokerError(
+            f"Kotak {what} call hit a backend outage: {_describe(response)}"
+        )
+    if _is_empty_book(response):
+        # Not a failure. Kotak reports an empty book as an *error* envelope -
+        # `stat: Not_Ok`, `stCode: 5203`, `errMsg: "No Data"` - for the trade
+        # report, the order report and positions alike. An account that has not
+        # traded today is the ordinary case, and the first live run died on it
+        # (D-113). Reconciliation specifically needs "you hold nothing" to be an
+        # answer rather than an exception, since that is the state every session
+        # starts in.
+        return []
     if not _ack_ok(response):
         raise FatalBrokerError(f"Kotak {what} call failed: {_describe(response)}")
     data = response.get("data")
@@ -903,13 +932,102 @@ def _ok_data(response: dict[str, Any], what: str) -> list[dict[str, Any]]:
     return []
 
 
+#: Kotak's code for "the book you asked for is empty".
+_NO_DATA_CODE = 5203
+
+#: Kotak's code when the trading bridge behind the REST API is unavailable.
+#: Observed on `limits` at 02:33 IST with MCX closed, consistently across
+#: retries, while `positions` and the order book answered normally (D-114).
+_BRIDGE_OUTAGE_CODE = 300015
+
+
+def _is_bridge_outage(response: dict[str, Any]) -> bool:
+    """Whether Kotak is reporting its own backend as unavailable.
+
+    Classified **retryable**, not fatal. This module's rule is "transient network
+    failures are retryable, everything a broker rejects is fatal", and a bridge
+    outage is not a rejection on the merits - it is a component being down, which
+    is much closer to a network failure. Getting this wrong in the fatal
+    direction would kill a live session over an outage that may clear on its own;
+    getting it wrong in the retryable direction only costs a backoff before the
+    router surfaces it anyway.
+
+    The transience is inferred from what the error *is*, not confirmed - see
+    D-114, which records that this needs a re-test during market hours.
+    """
+    try:
+        code = int(str(response.get("stCode", "0")))
+    except ValueError:
+        return False
+    return code == _BRIDGE_OUTAGE_CODE
+
+
+def _is_empty_book(response: dict[str, Any]) -> bool:
+    """Whether this error envelope actually means "nothing to report".
+
+    Deliberately narrow: the code **and** the message must both match, and the
+    payload must carry no `data`. Widening this to any `Not_Ok` would turn every
+    genuine failure into a silent empty list - which for a positions call means
+    believing the account is flat when it is not, the single most dangerous
+    thing this adapter could get wrong.
+    """
+    if response.get("data") is not None:
+        return False
+    try:
+        code = int(str(response.get("stCode", "0")))
+    except ValueError:
+        return False
+    return code == _NO_DATA_CODE and str(response.get("errMsg", "")).strip().lower() == "no data"
+
+
 def _ack_ok(response: Any) -> bool:
-    """True when a response carries a success envelope (stat Ok / stCode 200)."""
+    """True when a response carries a success envelope.
+
+    Kotak uses **two** shapes and this has to know both (D-113). Order and
+    lookup endpoints answer with a flat `stat`/`stCode`; the login endpoints
+    answer with everything nested under `data`, marked `status: "success"`, and
+    carry no `stat` or `stCode` at all.
+
+    Only checking the flat form meant `connect()` read a perfectly good login as
+    a rejection - so the adapter could never establish a session against the real
+    broker, and was only ever exercised against fixtures that used the flat
+    shape. Found the first time it was pointed at the live API.
+
+    The nested branch is deliberately narrow: `data.status` must be exactly
+    "success". Anything else - absent, "failure", a different word - is not a
+    success, because this function is what stands between a broken session and
+    the router believing it may trade.
+    """
     if not isinstance(response, dict):
         return False
     if str(response.get("stat", "")).lower() == "ok":
         return True
+    data = response.get("data")
+    if isinstance(data, dict) and str(data.get("status", "")).lower() == "success":
+        return True
     return int(str(response.get("stCode", "0"))) == 200
+
+
+#: What Kotak calls a session that may place orders. The first login stage
+#: returns "View"; only MPIN validation upgrades it.
+_TRADE_SCOPE = "trade"
+
+
+def _session_can_trade(response: Any) -> bool:
+    """Whether a validated session actually carries trading rights.
+
+    A successful MPIN validation is not by itself proof of one: the first stage
+    also answers `status: "success"` while carrying `kType: "View"`. Checking the
+    scope here means a view-only session is refused at connect, rather than at
+    the moment the first order is rejected - which would be mid-strategy, with a
+    position possibly half-open.
+    """
+    if not isinstance(response, dict):
+        return False
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return False
+    return str(data.get("kType", "")).lower() == _TRADE_SCOPE
 
 
 def _describe(response: Any) -> str:

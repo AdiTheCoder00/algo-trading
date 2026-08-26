@@ -23,6 +23,8 @@ from dotenv import load_dotenv
 from algo.config.loader import config_hash, load_config
 from algo.config.modes import LIVE_FLAG, resolve_mode
 from algo.core.bar import Timeframe
+from algo.core.enums import Mode
+from algo.core.errors import DomainError
 from algo.data.resample import expected_bar_count, resample
 from algo.data.synthetic import one_minute_session
 from algo.data.validate import validate_bars
@@ -35,7 +37,9 @@ if TYPE_CHECKING:
     from algo.config.schema import AppConfig
     from algo.core.chain import OptionChainSnapshot
     from algo.core.clock import SystemClock
+    from algo.core.enums import Exchange
     from algo.data.smartapi_feed import SmartConnectTransport
+    from algo.exchange.expiries import ExpiryCalendar
     from algo.exchange.master import InstrumentMaster
     from algo.strategy.delta_strangle import DeltaStrangle
 
@@ -313,6 +317,22 @@ def live(
     real_money_flag: bool = typer.Option(
         False, LIVE_FLAG, help="Acknowledge this is a real account"
     ),
+    passes: int = typer.Option(
+        0,
+        "--passes",
+        help="Run the PAPER trading loop for this many passes (0 = wiring drill "
+        "only, place nothing). Bounded on purpose: a trading loop with no "
+        "stopping condition keeps trading after you have gone home.",
+    ),
+    poll_interval_s: float = typer.Option(
+        30.0, "--poll", help="Seconds between passes when --passes is set"
+    ),
+    state: Path | None = typer.Option(
+        None,
+        "--state",
+        help="Dashboard state file. Also where the strategy's traded-cycle "
+        "cadence is persisted and restored from across a restart",
+    ),
 ) -> None:
     """Connect to Kotak Neo (live broker) + Angel SmartAPI (candles), and report.
 
@@ -346,7 +366,17 @@ def live(
     from algo.persistence.journal import OrderJournal
 
     config = load_config(path)
-    resolve_mode(config.mode, real_money_flag=real_money_flag)
+    mode = resolve_mode(config.mode, real_money_flag=real_money_flag)
+
+    # Checked here, before any credential is read or any session opened: nothing
+    # in this path has yet placed an order against a real account, so refusing
+    # after connecting to one would be refusing in the wrong place (D-109).
+    if passes and mode is not Mode.BACKTEST and mode is not Mode.PAPER:
+        typer.echo(
+            f"  ! --passes runs the PAPER loop only; this config says mode: {mode}. "
+            "Routing the loop to a real account is not wired yet. Refusing."
+        )
+        raise typer.Exit(code=1)
 
     clock = SystemClock()
 
@@ -415,10 +445,253 @@ def live(
     if expiry is not None:
         _quote_chain(market_data_key, live_master, config, expiry, clock)
 
-    _bars_from_candles(smart_transport, master, config, clock)
+    if passes:
+        _run_paper_loop(
+            config=config,
+            master=master,
+            live_master=live_master,
+            market_data_key=market_data_key,
+            transport=smart_transport,
+            clock=clock,
+            passes=passes,
+            poll_interval_s=poll_interval_s,
+            state=state,
+        )
+    else:
+        _bars_from_candles(smart_transport, master, config, clock)
 
     broker.disconnect()
     typer.echo("  session ended.")
+
+
+def _expiries_from_master(
+    master: InstrumentMaster, underlying: str, exchange: Exchange
+) -> ExpiryCalendar:
+    """An expiry calendar built from what the broker actually lists.
+
+    D-023: expiry dates are read from the instrument master, never computed from
+    a weekday rule. Each option cycle is paired with the first futures contract
+    expiring on or after it - the contract it settles into - which is the same
+    pairing `nearest_futures_expiry` applies to bhavcopy, kept identical here so
+    live and backtest cannot disagree about what a cycle's underlying is.
+    """
+    from algo.core.errors import DataError
+    from algo.exchange.expiries import (
+        ExpiryCalendar,
+        ExpirySet,
+        InstrumentMasterExpiries,
+    )
+
+    futures = sorted(
+        r.expiry for r in master.future_rows(underlying, exchange) if r.expiry is not None
+    )
+    table: dict[tuple[str, int, int], ExpirySet] = {}
+    for option_expiry in master.option_expiries(underlying, exchange):
+        later = [e for e in futures if e >= option_expiry]
+        table[(underlying, option_expiry.year, option_expiry.month)] = ExpirySet(
+            option_expiry=option_expiry,
+            futures_expiry=later[0] if later else option_expiry,
+        )
+    if not table:
+        raise DataError(
+            f"the master snapshot lists no {underlying} option expiries; "
+            "a chain cannot be resolved without one"
+        )
+    return ExpiryCalendar(authority=InstrumentMasterExpiries(table), rule=None)
+
+
+def _run_paper_loop(
+    *,
+    config: AppConfig,
+    master: InstrumentMaster,
+    live_master: InstrumentMaster,
+    market_data_key: str,
+    transport: SmartConnectTransport,
+    clock: SystemClock,
+    passes: int,
+    poll_interval_s: float,
+    state: Path | None,
+) -> None:
+    """Run `LiveLoop` against the **paper** broker.
+
+    Paper only, and the refusal below is not a placeholder to be relaxed casually:
+    nothing in this path has yet placed an order against a real account, so the
+    first thing it does must not be one. The paper broker uses the same
+    `FillSimulator` as the backtest and keeps its own separately-persisted books,
+    which is what makes a crash-recovery drill mean anything.
+    """
+    import time as _time
+
+    from algo.backtest.engine import BacktestEngine
+    from algo.backtest.prices import BarPriceSource, CompositePriceSource
+    from algo.core.bar import Timeframe
+    from algo.core.enums import Mode
+    from algo.core.errors import AlgoError
+    from algo.core.instrument import FutureId
+    from algo.core.timeutil import iso as _iso
+    from algo.core.timeutil import ist_date
+    from algo.costs.charges import McxChargeModel
+    from algo.costs.margin import SpanApproxMargin
+    from algo.costs.slippage import TickSlippage
+    from algo.costs.spread import FixedTickSpread
+    from algo.data.kotak_feed import KotakChainFeed, NeoQuotesTransport
+    from algo.data.live import SessionWindow
+    from algo.data.smartapi_feed import SmartApiBarFeed
+    from algo.exchange.calendar import synthetic_calendar
+    from algo.execution.fills import FillSimulator
+    from algo.execution.paper import PaperBroker
+    from algo.execution.router import OrderRouter
+    from algo.live.chain import LiveChainProvider
+    from algo.live.feeds import BrokerFillFeed, IterableBarFeed
+    from algo.live.loop import LiveLoop
+    from algo.persistence.journal import OrderJournal
+    from algo.persistence.state import StateStore
+    from algo.portfolio.book import Portfolio
+    from algo.risk.devolvement import DevolvementGuard
+    from algo.risk.engine import FixedLotSizer, RiskEngine
+    from algo.risk.killswitch import KillSwitch
+
+    # `live` refuses a non-paper mode before opening any session; this is the
+    # belt to that braces, so the function cannot be called wrongly from
+    # somewhere else later.
+    if config.mode is Mode.LIVE:
+        raise DomainError("_run_paper_loop must never be reached in live mode")
+
+    underlying = config.instruments[0].underlying
+    exchange = config.instruments[0].exchange
+    futures = master.future_rows(underlying, exchange)
+    if not futures or futures[-1].expiry is None:
+        typer.echo("  paper loop: no futures contract in the master snapshot")
+        return
+    instrument = FutureId(
+        underlying=underlying, expiry=futures[-1].expiry, exchange=exchange
+    )
+
+    calendar = synthetic_calendar()
+    timeframe = Timeframe(minutes=config.market.bar.timeframe_minutes)
+    bar_source = SmartApiBarFeed(
+        transport=transport,
+        master=master,
+        instrument=instrument,
+        timeframe=timeframe,
+        clock=clock,
+        session=SessionWindow(calendar),
+    )
+    seed = list(bar_source)
+    if not seed:
+        typer.echo("  paper loop: no closed bars yet today; nothing to decide on")
+        return
+
+    # The option chain, polled and greeked. Without it the strategy selects on a
+    # delta that is None on every row and silently never trades (D-112).
+    chain_provider = LiveChainProvider(
+        feed=KotakChainFeed(
+            transport=NeoQuotesTransport(market_data_key),
+            master=live_master,
+            underlying=underlying,
+            clock=clock,
+            session=SessionWindow(calendar),
+            poll_interval_s=0.0,
+        )
+    )
+    expiries = _expiries_from_master(live_master, underlying, exchange)
+    try:
+        cycle = expiries.nearest_expiry_on_or_after(underlying, ist_date(clock.now()))
+    except AlgoError as exc:
+        typer.echo(f"  paper loop: cannot resolve an option expiry ({exc})")
+        return
+    typer.echo(f"  paper loop: trading the {cycle.option_expiry} cycle")
+
+    simulator = FillSimulator(
+        spread=FixedTickSpread(2),
+        slippage=TickSlippage(market_ticks=0, stop_ticks=2),
+        charges=McxChargeModel.default(),
+    )
+    store = StateStore(state) if state is not None else None
+    strategy = _strangle_from_config(config, underlying)
+    engine = BacktestEngine(
+        bars=seed[:1],
+        calendar=calendar,
+        specs=ContractSpecStore.default(),
+        strategy=strategy,
+        risk=RiskEngine(
+            sizer=FixedLotSizer(config.risk.sizing.fixed_lots),
+            spec_for=None,
+            max_concurrent_positions=2,
+            max_lots_per_underlying=config.risk.caps.max_lots_per_underlying,
+            margin_cap_pct=config.risk.caps.max_total_margin_pct,
+        ),
+        simulator=simulator,
+        portfolio=Portfolio(config.risk.starting_equity),
+        instrument=instrument,
+        timeframe=timeframe,
+        is_option=True,
+        # Futures bars price the underlying; the live chain prices every option
+        # leg. Composed rather than chosen, because a strangle run holds both.
+        price_source=CompositePriceSource(
+            chain_provider, BarPriceSource(instrument, seed[:1])
+        ),
+        chain_provider=chain_provider,
+        expiries=expiries,
+        devolvement=DevolvementGuard(
+            calendar=calendar,
+            force_exit_sessions_before_expiry=(
+                config.risk.devolvement.force_exit_sessions_before_expiry
+            ),
+            block_new_entries_within_dte=(
+                config.risk.devolvement.block_new_entries_within_dte
+            ),
+        ),
+        kill_switch=KillSwitch(
+            daily_loss_limit_pct=config.risk.kill_switch.daily_loss_limit_pct,
+            max_consecutive_losses=config.risk.kill_switch.max_consecutive_losses,
+            max_drawdown_pct=config.risk.kill_switch.max_drawdown_pct,
+        ),
+        margin=SpanApproxMargin(),
+        state=store,
+        mode="paper",
+        broker="paper",
+    )
+    if engine.restore_strategy_state():
+        typer.echo("  paper loop: restored the strategy's traded-cycle cadence")
+
+    broker = PaperBroker(
+        clock=clock,
+        specs=ContractSpecStore.default(),
+        simulator=simulator,
+        quote=lambda key: engine.mark_for(key),
+    )
+    broker.connect()
+
+    with OrderJournal(config.persistence.live_db) as journal:
+        router = OrderRouter(broker=broker, journal=journal, clock=clock)
+        router.reconcile()
+        loop = LiveLoop(
+            engine=engine,
+            bars=IterableBarFeed(lambda: list(bar_source)),
+            fills=BrokerFillFeed(
+                broker=broker,
+                clock=clock,
+                instruments={instrument.key: instrument},
+            ),
+            place=router.place_all,
+            clock=clock,
+            state=store,
+            # One poll per bar, before anything asks the chain a question.
+            chain=lambda _bar: chain_provider.refresh(cycle.option_expiry),
+        )
+        typer.echo(f"  paper loop: {passes} pass(es), {poll_interval_s}s apart")
+        results = loop.run(
+            max_passes=passes,
+            on_pass=lambda r: typer.echo(f"    {_iso(r.ts)}  {r.summary()}"),
+            sleep=_time.sleep,
+            poll_interval_s=poll_interval_s,
+        )
+    acted = sum(1 for r in results if r.acted)
+    typer.echo(f"  paper loop: {len(results)} pass(es), {acted} that did something")
+    broker.disconnect()
+    if store is not None:
+        store.close()
 
 
 def _quote_chain(

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import closing, contextmanager
 from datetime import datetime
 from decimal import Decimal
@@ -101,6 +101,15 @@ CREATE TABLE IF NOT EXISTS kill_switch_requests (
 CREATE TABLE IF NOT EXISTS chain_snapshot (
     id       INTEGER PRIMARY KEY CHECK (id = 1),
     payload  TEXT NOT NULL
+);
+
+--- A strategy's own state, so a restart does not silently lose it. One row per
+--- strategy. `params_hash` is a guard, not a label: state saved under a
+--- different parameter set is never handed back (D-110).
+CREATE TABLE IF NOT EXISTS strategy_state (
+    strategy_id  TEXT PRIMARY KEY,
+    params_hash  TEXT NOT NULL,
+    payload      TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS signals_ts ON signals(ts);
@@ -260,6 +269,44 @@ class StateStore:
                 "ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
                 (json.dumps(payload, sort_keys=True, default=str),),
             )
+
+    def record_strategy_state(
+        self, *, strategy_id: str, params_hash: str, state: Mapping[str, str]
+    ) -> None:
+        """Persist a strategy's own state so a restart does not lose it.
+
+        `params_hash` is stored alongside, not for information: `strategy_state`
+        refuses to hand back state saved under different parameters. The signal
+        id already depends on the parameter set for exactly this reason - a
+        replay after a config edit must not match an order placed under the old
+        settings - and cadence state carries the same hazard.
+        """
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO strategy_state (strategy_id, params_hash, payload) "
+                "VALUES (?,?,?) ON CONFLICT(strategy_id) DO UPDATE SET "
+                "params_hash = excluded.params_hash, payload = excluded.payload",
+                (strategy_id, params_hash, json.dumps(dict(state), sort_keys=True)),
+            )
+
+    def strategy_state(self, *, strategy_id: str, params_hash: str) -> dict[str, str] | None:
+        """What `record_strategy_state` saved, or None.
+
+        None when nothing was saved **and** when what was saved belongs to a
+        different parameter set. The caller cannot tell those apart, deliberately:
+        both mean "you have no usable prior state", and a caller that treated a
+        parameter change as recoverable would be reasoning about a cadence
+        recorded by a different strategy.
+        """
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT params_hash, payload FROM strategy_state WHERE strategy_id = ?",
+                (strategy_id,),
+            ).fetchone()
+        if row is None or row[0] != params_hash:
+            return None
+        loaded: dict[str, str] = json.loads(row[1])
+        return loaded
 
     def record_signal(self, row: SignalRow) -> None:
         with self._tx() as conn:

@@ -74,6 +74,22 @@ class Rejection:
 
 
 @dataclass(frozen=True, slots=True)
+class BarDecision:
+    """What the engine decided on one bar, before anything is executed.
+
+    The return type of the seam between deciding and executing (`decide`). It
+    carries intentions, never results: `orders` have not been sent, and on a
+    live loop may never be - the router can still refuse them.
+    """
+
+    orders: tuple[Order, ...]
+    exit_event: ExitEvent | None
+    notes: tuple[str, ...]
+    rejections: tuple[Rejection, ...]
+    marks: dict[str, Decimal]
+
+
+@dataclass(frozen=True, slots=True)
 class Note:
     """A diagnostic from the strategy — usually why it did *not* trade."""
 
@@ -159,6 +175,7 @@ class BacktestEngine:
         "_portfolio",
         "_prices",
         "_risk",
+        "_session_started",
         "_signal_meta",
         "_sim",
         "_specs",
@@ -228,6 +245,160 @@ class BacktestEngine:
         self._trade_builder = TradeBuilder(strategy.strategy_id)
         self._signal_meta: dict[str, tuple[str, dict[str, str]]] = {}
         self._pending_exit_reason = ""
+        self._session_started: set[date] = set()
+
+    # ------------------------------------------------------------------- live
+    def append_bar(self, bar: Bar) -> int:
+        """Add a newly closed bar and return its index.
+
+        The look-ahead firewall is unaffected: `_ask_strategy` still builds the
+        context from `_bars[:index+1]`, and in live there is nothing after the
+        current bar to leak because it has not happened yet.
+        """
+        if self._bars and bar.ts <= self._bars[-1].ts:
+            raise DomainError(
+                f"bar at {bar.ts} is not after the last bar at {self._bars[-1].ts}; "
+                "a live feed must deliver closed bars in order"
+            )
+        self._bars.append(bar)
+        # The price source indexed the bars it was given at construction, so a
+        # bar appended afterwards has to be handed over explicitly or the first
+        # mark against it raises. Sources that carry their own data - a chain
+        # feed, for instance - have no `add` and need nothing here.
+        add = getattr(self._prices, "add", None)
+        if callable(add):
+            add(bar)
+        return len(self._bars) - 1
+
+    def mark_for(self, instrument_key: str) -> Decimal | None:
+        """What one instrument is worth as of the latest bar, or None.
+
+        The paper broker needs a price to fill against and has no price source of
+        its own. Routing it through the engine's means paper fills and backtest
+        fills are marked from the same data, so a disagreement between them is
+        never just two price lookups that diverged.
+        """
+        if not self._bars:
+            return None
+        return self._prices.mark(instrument_key, self._bars[-1].ts)
+
+    def apply_fill(self, fill: Fill, *, session_day: date) -> None:
+        """Book a fill that happened elsewhere - a real broker's, not ours.
+
+        The same two effects `_execute` applies after simulating one, so a paper
+        or live fill reaches the portfolio and the strategy by the identical
+        path. `_execute` is *simulate then apply*; this is the apply half on its
+        own, for fills the engine did not invent.
+        """
+        spec = self._spec_for(fill.instrument, session_day)
+        self._portfolio.apply_fill(fill, multiplier=spec.multiplier)
+        # The strategy learns what actually happened, never what it asked for
+        # (D-041). Cycle-cadence state depends on this being a fill.
+        self._strategy.on_fill(fill)
+        # Persisted here rather than at the end of a run, because a live process
+        # that dies has no end of run. A fill is the only thing that changes this
+        # state, so writing it on each one is both sufficient and cheap.
+        self._save_strategy_state()
+
+    def _save_strategy_state(self) -> None:
+        if self._state is None:
+            return
+        state = self._strategy.state()
+        if not state:
+            return
+        self._state.record_strategy_state(
+            strategy_id=self._strategy.strategy_id,
+            params_hash=self._strategy.params_hash(),
+            state=state,
+        )
+
+    def restore_strategy_state(self) -> bool:
+        """Reload the strategy's own state from the store. True if anything was.
+
+        Not called automatically from `__init__`: a backtest starts from nothing
+        by definition, and silently inheriting a previous run's cadence would
+        make results depend on what happened to be in the state file. A live
+        session opts in - see `algo live`.
+        """
+        if self._state is None:
+            return False
+        saved = self._state.strategy_state(
+            strategy_id=self._strategy.strategy_id,
+            params_hash=self._strategy.params_hash(),
+        )
+        if saved is None:
+            return False
+        self._strategy.restore(saved)
+        return True
+
+    # ---------------------------------------------------------------- decision
+    def decide(self, bar: Bar, index: int, *, is_last: bool = False) -> BarDecision:
+        """Everything the engine decides on one bar, executing nothing.
+
+        Extracted from `run` so that a **live** loop can reach the identical
+        decision path rather than growing a second copy of it. The paper broker
+        already states this principle for fills - "not a similar one, the same
+        `FillSimulator` object" - and it matters more here, because these are the
+        steps that choose what to trade and how much.
+
+        The seam sits exactly where execution begins. `_risk_exits` and `_size`
+        already *return* orders instead of executing them, so what comes back is
+        an intention: the backtest hands it to `FillSimulator` on the next bar, a
+        live loop hands it to `Router.place_all`. Neither can change what was
+        decided.
+
+        What is deliberately **not** in here: settling fills and building trades.
+        A backtest settles against the next bar's prices; a live loop learns its
+        fills from the broker asynchronously. Those are genuinely different and
+        pretending otherwise would be the drift this method exists to prevent.
+
+        `is_last` suppresses order emission on a final bar - nothing can execute
+        after it, and queuing would silently drop the orders instead of saying so.
+        The strategy is still consulted and its notes still recorded, because
+        "what would it have done" is worth keeping.
+        """
+        session_day = ist_date(bar.ts)
+        marks = self._marks(bar)
+        self._portfolio.check_identity(marks)
+
+        if self._kill_switch is not None and session_day not in self._session_started:
+            self._session_started.add(session_day)
+            self._kill_switch.start_session(session_day, self._portfolio.equity(marks))
+
+        # ---- the risk layer acts before the strategy is consulted
+        exit_orders, exit_event = self._risk_exits(bar, session_day, marks)
+        if exit_event is not None:
+            self._pending_exit_reason = exit_event.reason.value
+
+        # ---- mark and record
+        self._portfolio.record(bar.ts, marks)
+        if self._kill_switch is not None:
+            self._kill_switch.observe_equity(self._portfolio.equity(marks), bar.ts)
+        self._record_bar_state(bar, marks, session_day)
+
+        # ---- the strategy sees bars [0..i] and nothing else
+        signals = self._ask_strategy(bar, index, session_day)
+        notes = tuple(self._strategy.drain_notes())
+        if self._state is not None:
+            for message in notes:
+                self._state.record_note(bar.ts, message)
+
+        rejections: list[Rejection] = []
+        if is_last:
+            orders: tuple[Order, ...] = ()
+        elif exit_orders:
+            # A risk-layer exit outranks anything the strategy asked for.
+            orders = tuple(exit_orders)
+        else:
+            orders = tuple(self._size(signals, bar, session_day, rejections))
+
+        return BarDecision(
+            orders=orders,
+            exit_event=exit_event,
+            notes=notes,
+            rejections=tuple(rejections),
+            marks=marks,
+        )
 
     # -------------------------------------------------------------------- run
     def run(self) -> BacktestResult:
@@ -239,7 +410,6 @@ class BacktestEngine:
         trades: list[Trade] = []
         round_trips = 0
         spread_cost = Decimal("0")
-        session_started: set[date] = set()
         self._begin_health()
 
         for index, bar in enumerate(self._bars):
@@ -285,46 +455,15 @@ class BacktestEngine:
                     self._levels.stop_loss if self._levels is not None else None
                 )
 
-            marks = self._marks(bar)
-            self._portfolio.check_identity(marks)
-
-            if self._kill_switch is not None and session_day not in session_started:
-                session_started.add(session_day)
-                self._kill_switch.start_session(session_day, self._portfolio.equity(marks))
-
-            # ---- 2. the risk layer acts before the strategy is consulted
-            exit_orders, exit_event = self._risk_exits(bar, session_day, marks)
-            if exit_event is not None:
-                exits.append(exit_event)
-                self._pending_exit_reason = exit_event.reason.value
-
-            # ---- 3. mark and record
-            self._portfolio.record(bar.ts, marks)
-            if self._kill_switch is not None:
-                self._kill_switch.observe_equity(self._portfolio.equity(marks), bar.ts)
-            self._record_bar_state(bar, marks, session_day)
-
-            # ---- 4. the strategy sees bars [0..i] and nothing else
-            signals = self._ask_strategy(bar, index, session_day)
-            strategy_notes = self._strategy.drain_notes()
+            # ---- 2-5. decide. Shared verbatim with the live loop - see `decide`.
+            decision = self.decide(bar, index, is_last=index == len(self._bars) - 1)
+            if decision.exit_event is not None:
+                exits.append(decision.exit_event)
             notes.extend(
-                Note(ts_iso=iso(bar.ts), message=message)
-                for message in strategy_notes
+                Note(ts_iso=iso(bar.ts), message=message) for message in decision.notes
             )
-            if self._state is not None:
-                for message in strategy_notes:
-                    self._state.record_note(bar.ts, message)
-
-            if index == len(self._bars) - 1:
-                # Nothing can execute after the last bar; queuing would silently
-                # drop the orders instead of saying so.
-                continue
-
-            # ---- 5. a risk-layer exit outranks anything the strategy asked for
-            if exit_orders:
-                pending.extend(exit_orders)
-                continue
-            pending.extend(self._size(signals, bar, session_day, rejections))
+            rejections.extend(decision.rejections)
+            pending.extend(decision.orders)
 
         return self._finish(
             fills, rejections, notes, exits, round_trips, spread_cost, trades
@@ -364,10 +503,7 @@ class BacktestEngine:
             session_day=session_day,
             is_option=isinstance(order.instrument, OptionId),
         )
-        self._portfolio.apply_fill(fill, multiplier=spec.multiplier)
-        # The strategy learns what actually happened, never what it asked for
-        # (D-041). Cycle-cadence state depends on this being a fill.
-        self._strategy.on_fill(fill)
+        self.apply_fill(fill, session_day=session_day)
         return fill
 
     def _open_levels(self, entry_fills: list[Fill], bar: Bar, session_day: date) -> None:

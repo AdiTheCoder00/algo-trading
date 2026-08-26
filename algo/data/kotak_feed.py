@@ -172,25 +172,38 @@ class KotakChainFeed:
     def underlying(self) -> str:
         return self._underlying
 
-    def snapshots(self, option_expiry: date) -> Iterator[OptionChainSnapshot]:
-        """Poll until the session ends, yielding one snapshot per poll.
-
-        The caller decides when to stop reading (a bar close); the iterator
-        simply keeps producing snapshots while the session is live.
-        """
+    def _rows_for(self, option_expiry: date) -> tuple[MasterRow, tuple[MasterRow, ...]]:
         futures = self._master.future_rows(self._underlying, self._exchange)
         if not futures:
             raise DataError(
                 f"no {self._underlying} futures contract in the master snapshot; "
                 "a chain needs the underlying's own token"
             )
-        underlying_row = futures[-1]  # nearest-expiry contract is the reference
         option_rows = self._master.option_rows(self._underlying, self._exchange, option_expiry)
         if not option_rows:
             raise DataError(
                 f"no {self._underlying} options listed for expiry {option_expiry} "
                 "in the master snapshot"
             )
+        return futures[-1], option_rows  # nearest-expiry contract is the reference
+
+    def poll(self, option_expiry: date) -> OptionChainSnapshot:
+        """One snapshot, now.
+
+        `snapshots` owns its own cadence and sleeps between polls, which suits a
+        recorder. A trading loop already has a cadence - its bars - and must not
+        be handed a second one, so it drives this instead.
+        """
+        underlying_row, option_rows = self._rows_for(option_expiry)
+        return self._poll(underlying_row, option_rows)
+
+    def snapshots(self, option_expiry: date) -> Iterator[OptionChainSnapshot]:
+        """Poll until the session ends, yielding one snapshot per poll.
+
+        The caller decides when to stop reading (a bar close); the iterator
+        simply keeps producing snapshots while the session is live.
+        """
+        underlying_row, option_rows = self._rows_for(option_expiry)
 
         while self._session.is_live(self._clock.now()):
             yield self._poll(underlying_row, option_rows)

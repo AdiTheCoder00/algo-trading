@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -153,6 +153,8 @@ class FakeKotakTransport:
     def __init__(self) -> None:
         self.login_ok = True
         self.validate_ok = True
+        self.validate_response: dict[str, Any] | None = None
+        self.positions_response: dict[str, Any] | None = None
         self.login_error: Exception | None = None
         self.place_error: Exception | None = None
         self.place_ack: dict[str, Any] | None = None
@@ -178,13 +180,29 @@ class FakeKotakTransport:
             raise self.login_error
         if not self.login_ok:
             return {"Error Message": "Enter valid TOTP"}
-        return {"stat": "Ok", "stCode": 200, "data": {"token": "vt", "sid": "s", "ucc": ucc}}
+        # The real envelope (D-113): no top-level stat/stCode, everything under
+        # `data`, and the first stage carries only View scope. The fake used to
+        # return a flat `stat: Ok`, which is a shape Kotak never sends for this
+        # endpoint - and is why `_ack_ok` was broken for so long without a test
+        # noticing.
+        return {
+            "data": {
+                "token": "vt",
+                "sid": "s",
+                "ucc": ucc,
+                "status": "success",
+                "kType": "View",
+            }
+        }
 
     def totp_validate(self, mpin: str) -> dict[str, Any]:
         self.validate_calls.append(mpin)
         if not self.validate_ok:
             return {"Error Message": "MPIN invalid"}
-        return {"stat": "Ok", "stCode": 200, "data": {"token": "et", "sid": "es"}}
+        if self.validate_response is not None:
+            return self.validate_response
+        # MPIN validation is what upgrades the session to Trade scope.
+        return {"data": {"token": "et", "sid": "es", "status": "success", "kType": "Trade"}}
 
     def place_order(
         self,
@@ -233,6 +251,8 @@ class FakeKotakTransport:
         return {"stat": "Ok", "stCode": 200, "data": list(self.trades)}
 
     def positions(self) -> dict[str, Any]:
+        if self.positions_response is not None:
+            return self.positions_response
         return {"stat": "Ok", "stCode": 200, "data": list(self.position_rows)}
 
     def limits(self) -> dict[str, Any]:
@@ -842,3 +862,180 @@ class TestRouterIntegration:
         snapshot = restored.order_by_client_id("strat.sig123.0.0")
         assert snapshot is not None
         assert snapshot.state is OrderState.FILLED
+
+
+class TestTheLoginEnvelope:
+    """D-113. Kotak answers the login endpoints with a shape `_ack_ok` did not
+    know, so `connect()` read a successful login as a rejection and the adapter
+    could never establish a real session. Found the first time it was pointed at
+    the live API; these pin the real shapes so it cannot regress.
+    """
+
+    def test_the_real_nested_success_envelope_is_accepted(self) -> None:
+        from algo.execution.kotak import _ack_ok
+
+        # Exactly what the live API returns: no stat, no stCode.
+        assert _ack_ok({"data": {"status": "success", "token": "x", "kType": "Trade"}})
+
+    def test_the_flat_envelope_still_works(self) -> None:
+        """Order and lookup endpoints do use the flat shape - the fix must not
+        have traded one for the other."""
+        from algo.execution.kotak import _ack_ok
+
+        assert _ack_ok({"stat": "Ok"})
+        assert _ack_ok({"stCode": 200})
+
+    def test_a_nested_failure_is_not_accepted(self) -> None:
+        from algo.execution.kotak import _ack_ok
+
+        assert not _ack_ok({"data": {"status": "failure"}})
+        assert not _ack_ok({"data": {"status": ""}})
+        assert not _ack_ok({"data": {"token": "x"}})  # no status at all
+        assert not _ack_ok({"data": "not-a-dict"})
+        assert not _ack_ok({})
+        assert not _ack_ok(None)
+
+    def test_a_view_only_session_is_refused_at_connect(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        """The first login stage succeeds with View scope; only MPIN validation
+        upgrades it. Accepting a View session would surface as a rejected order
+        mid-strategy, with a leg possibly already open."""
+        transport.validate_response = {
+            "data": {"token": "et", "sid": "es", "status": "success", "kType": "View"}
+        }
+        # Constructed directly: `_broker` connects for you, which would raise
+        # before pytest.raises could see it.
+        broker = KotakBroker(
+            transport=transport,
+            master=master,
+            credentials=CREDS,
+            clock=clock,
+            totp=lambda: "123456",
+        )
+
+        with pytest.raises(FatalBrokerError, match="not trading-scoped"):
+            broker.connect()
+
+        assert not broker.health().connected
+
+    def test_a_trade_scoped_session_connects(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        broker = _broker(transport, master, clock)
+
+        broker.connect()
+
+        assert broker.health().connected
+
+
+class TestAnEmptyBookIsNotAFailure:
+    """D-113. Kotak reports an empty book as an *error* envelope. The first live
+    run died on `Kotak trade report call failed: No Data` - which just meant the
+    account had not traded that day, the state every session starts in.
+    """
+
+    #: Exactly what the live API returns for an empty trade/order/position book.
+    EMPTY: ClassVar[dict[str, Any]] = {
+        "stat": "Not_Ok",
+        "stCode": 5203,
+        "errMsg": "No Data",
+        "desc": "",
+    }
+
+    def test_the_empty_envelope_reads_as_no_rows(self) -> None:
+        from algo.execution.kotak import _ok_data
+
+        assert _ok_data(dict(self.EMPTY), "trade report") == []
+
+    def test_a_real_failure_still_raises(self) -> None:
+        """The narrow check must not have turned every Not_Ok into silence."""
+        from algo.execution.kotak import _ok_data
+
+        with pytest.raises(FatalBrokerError):
+            _ok_data({"stat": "Not_Ok", "stCode": 400, "errMsg": "Bad request"}, "orders")
+
+    def test_a_different_no_data_code_still_raises(self) -> None:
+        from algo.execution.kotak import _ok_data
+
+        with pytest.raises(FatalBrokerError):
+            _ok_data({"stat": "Not_Ok", "stCode": 9999, "errMsg": "No Data"}, "orders")
+
+    def test_the_code_alone_is_not_enough(self) -> None:
+        from algo.execution.kotak import _ok_data
+
+        with pytest.raises(FatalBrokerError):
+            _ok_data({"stat": "Not_Ok", "stCode": 5203, "errMsg": "Session expired"}, "orders")
+
+    def test_a_payload_carrying_data_is_never_treated_as_empty(self) -> None:
+        """If rows came back, they must be read - not discarded because the
+        envelope also looked like the empty one. Believing the account is flat
+        when it is not is the worst thing this adapter can do."""
+        from algo.execution.kotak import _ok_data
+
+        payload = dict(self.EMPTY)
+        payload["data"] = [{"nOrdNo": "1"}]
+
+        with pytest.raises(FatalBrokerError):
+            _ok_data(payload, "orders")
+
+    def test_positions_reads_empty_rather_than_raising(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        """The path reconciliation actually takes on a fresh account."""
+        transport.positions_response = dict(self.EMPTY)
+        broker = _broker(transport, master, clock)
+
+        assert broker.positions() == []
+
+
+class TestABridgeOutageIsRetryable:
+    """D-114. Kotak's `limits` endpoint answered `stCode: 300015`,
+    "bridge API error out", consistently, while positions and the order book
+    answered normally. That is a backend component being down, not a rejection
+    on the merits - and this module's rule is that only rejections are fatal.
+    """
+
+    OUTAGE: ClassVar[dict[str, Any]] = {
+        "stat": "bridge API error out",
+        "stCode": "300015",
+        "errMsg": "bridge API error out",
+    }
+
+    def test_a_book_read_raises_retryable_not_fatal(self) -> None:
+        """Fatal would kill a live session over an outage that may clear."""
+        from algo.execution.kotak import _ok_data
+
+        with pytest.raises(RetryableBrokerError, match="backend outage"):
+            _ok_data(dict(self.OUTAGE), "trade report")
+
+    def test_the_funds_read_is_retryable_too(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        transport.limits_payload = dict(self.OUTAGE)
+        broker = _broker(transport, master, clock)
+
+        with pytest.raises(RetryableBrokerError, match="backend outage"):
+            broker.funds()
+
+    def test_the_string_status_code_is_parsed(self) -> None:
+        """The live payload sends stCode as a string, unlike the numeric 5203
+        seen elsewhere - so the check must not depend on the JSON type."""
+        from algo.execution.kotak import _is_bridge_outage
+
+        assert _is_bridge_outage({"stCode": "300015"})
+        assert _is_bridge_outage({"stCode": 300015})
+
+    def test_other_failures_are_untouched(self) -> None:
+        from algo.execution.kotak import _is_bridge_outage
+
+        assert not _is_bridge_outage({"stCode": 5203, "errMsg": "No Data"})
+        assert not _is_bridge_outage({"stCode": 400})
+        assert not _is_bridge_outage({"stCode": "not-a-number"})
+        assert not _is_bridge_outage({})
+
+    def test_an_empty_book_is_still_empty_not_an_outage(self) -> None:
+        """The two live error shapes must not be confused for one another."""
+        from algo.execution.kotak import _ok_data
+
+        assert _ok_data({"stat": "Not_Ok", "stCode": 5203, "errMsg": "No Data"}, "x") == []
