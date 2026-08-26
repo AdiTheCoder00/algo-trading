@@ -327,6 +327,12 @@ def live(
     poll_interval_s: float = typer.Option(
         30.0, "--poll", help="Seconds between passes when --passes is set"
     ),
+    wait_for_bar_min: float = typer.Option(
+        45.0,
+        "--wait-for-bar",
+        help="Minutes to wait for the first closed bar before giving up. A "
+        "session started at the open has none until the first bar closes.",
+    ),
     state: Path | None = typer.Option(
         None,
         "--state",
@@ -455,6 +461,7 @@ def live(
             clock=clock,
             passes=passes,
             poll_interval_s=poll_interval_s,
+            wait_for_bar_min=wait_for_bar_min,
             state=state,
         )
     else:
@@ -510,6 +517,7 @@ def _run_paper_loop(
     clock: SystemClock,
     passes: int,
     poll_interval_s: float,
+    wait_for_bar_min: float,
     state: Path | None,
 ) -> None:
     """Run `LiveLoop` against the **paper** broker.
@@ -524,7 +532,7 @@ def _run_paper_loop(
 
     from algo.backtest.engine import BacktestEngine
     from algo.backtest.prices import BarPriceSource, CompositePriceSource
-    from algo.core.bar import Timeframe
+    from algo.core.bar import Bar, Timeframe
     from algo.core.enums import Mode
     from algo.core.errors import AlgoError
     from algo.core.instrument import FutureId
@@ -577,10 +585,38 @@ def _run_paper_loop(
         clock=clock,
         session=SessionWindow(calendar),
     )
-    seed = list(bar_source)
+    def read_bars() -> list[Bar]:
+        """Closed bars so far, treating "none yet" as empty rather than fatal."""
+        try:
+            return list(bar_source)
+        except Exception as exc:  # noqa: BLE001 - a feed hiccup must not end the session
+            typer.echo(f"    bar feed not ready ({exc})")
+            return []
+
+    # Wait for the first closed bar rather than giving up on it.
+    #
+    # A session started at 09:00 has no closed 30-minute bar until 09:30, so
+    # exiting on an empty first read would abandon the whole day - which is
+    # exactly what the first scheduled run would have done. Bounded, because a
+    # feed that never produces a bar is a real failure and must not be waited on
+    # forever.
+    seed = read_bars()
     if not seed:
-        typer.echo("  paper loop: no closed bars yet today; nothing to decide on")
+        deadline = clock.now() + timedelta(minutes=wait_for_bar_min)
+        typer.echo(
+            f"  paper loop: no closed bar yet; waiting up to {wait_for_bar_min}m "
+            "for the first one"
+        )
+        while not seed and clock.now() < deadline:
+            _time.sleep(poll_interval_s)
+            seed = read_bars()
+    if not seed:
+        typer.echo(
+            f"  paper loop: no closed bar within {wait_for_bar_min}m - the session "
+            "may not have opened, or the candle feed is down. Nothing to decide on."
+        )
         return
+    typer.echo(f"  paper loop: first closed bar at {_iso(seed[-1].ts)}")
 
     # The option chain, polled and greeked. Without it the strategy selects on a
     # delta that is None on every row and silently never trades (D-112).
