@@ -77,6 +77,17 @@ def check_exit(
 ) -> ExitCheck:
     """Decide whether a stop or target was hit within `bar`.
 
+    **Nothing calls this yet, and that is deliberate rather than an oversight.**
+    The engine evaluates exits once per bar, on the close, through
+    `ExitLevels.check`; this is the intrabar half, kept for the tick evaluation
+    Q15 records as the intended live behaviour. `exit.evaluate_on: tick` refuses
+    at config load until it is wired, so no run can believe it has intrabar
+    protection it does not have.
+
+    Until then the consequence is stated plainly: a stop or target touched inside
+    a bar and given back by the close is invisible, so the backtest is optimistic
+    relative to live on fast moves.
+
     `position_side` is the side of the *open position*: BUY for a long, SELL for a
     short. A long is stopped out below and takes profit above; a short is the
     mirror. Getting this backwards is the kind of sign error that produces a

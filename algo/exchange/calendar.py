@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
@@ -221,6 +222,78 @@ def synthetic_calendar(
         name="SYNTHETIC",
         session=session,
         holidays=holidays,
+        verified_through=None,
+        allow_unverified=True,
+        special_sessions=special_sessions,
+    )
+
+
+def load_holidays(path: Path) -> tuple[frozenset[date], date]:
+    """Read a sourced holiday list: one ISO date per line, `#` starts a comment.
+
+    Returns the dates **and** the last one, which becomes `verified_through` -
+    the calendar refuses to answer past that date rather than guessing, so the
+    file's own horizon is what bounds it. A file is a list of facts someone
+    checked; it must not be read as a rule that extends forever.
+    """
+    if not path.exists():
+        raise CalendarError(f"holiday file not found: {path}")
+    dates: set[date] = set()
+    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        text = raw.split("#", 1)[0].strip()
+        if not text:
+            continue
+        try:
+            dates.add(date.fromisoformat(text))
+        except ValueError as exc:
+            raise CalendarError(f"{path}:{line_no}: {text!r} is not an ISO date") from exc
+    if not dates:
+        raise CalendarError(f"{path} lists no holidays; an empty file is not a source")
+    return frozenset(dates), max(dates)
+
+
+def mcx_calendar(
+    *,
+    holidays_file: Path | None,
+    allow_unverified: bool,
+    session: SessionTimes = MCX_NON_AGRI,
+    special_sessions: frozenset[date] = MCX_SPECIAL_SESSIONS,
+) -> MarketCalendar:
+    """The calendar a real run uses. `synthetic_calendar` is for fixtures only.
+
+    Until D-115 every command built `synthetic_calendar()` - including the live
+    loop - which the function itself says is "never for a real run" and which
+    silently passes `allow_unverified=True`. The configured
+    `allow_unverified_calendar` decided nothing at all, so MCX holidays were not
+    modelled anywhere. That matters most for `DevolvementGuard`: its exit
+    deadline is computed by walking back trading days, and with no holidays a
+    deadline can land on a day the market is shut - which, running without a
+    stop loss, is the only hard backstop there is.
+
+    With `allow_unverified=False` and no file this refuses rather than degrading,
+    because degrading is what it used to do.
+    """
+    if holidays_file is not None:
+        holidays, verified_through = load_holidays(holidays_file)
+        return MarketCalendar(
+            name="MCX",
+            session=session,
+            holidays=holidays,
+            verified_through=verified_through,
+            allow_unverified=allow_unverified,
+            special_sessions=special_sessions,
+        )
+    if not allow_unverified:
+        raise CalendarError(
+            "market.allow_unverified_calendar is false but no market.holidays_file "
+            "is configured, so there are no sourced MCX holidays to honour. Supply "
+            "a holiday file, or set allow_unverified_calendar: true to accept a "
+            "weekends-only calendar and everything that follows from it."
+        )
+    return MarketCalendar(
+        name="MCX-UNVERIFIED",
+        session=session,
+        holidays=frozenset(),
         verified_through=None,
         allow_unverified=True,
         special_sessions=special_sessions,

@@ -25,6 +25,7 @@ from algo.config.modes import LIVE_FLAG, resolve_mode
 from algo.core.bar import Timeframe
 from algo.core.enums import Mode
 from algo.core.errors import DomainError
+from algo.core.logging import configure_logging
 from algo.data.resample import expected_bar_count, resample
 from algo.data.synthetic import one_minute_session
 from algo.data.validate import validate_bars
@@ -37,9 +38,8 @@ if TYPE_CHECKING:
     from algo.config.schema import AppConfig
     from algo.core.chain import OptionChainSnapshot
     from algo.core.clock import SystemClock
-    from algo.core.enums import Exchange
     from algo.data.smartapi_feed import SmartConnectTransport
-    from algo.exchange.expiries import ExpiryCalendar
+    from algo.exchange.calendar import MarketCalendar
     from algo.exchange.master import InstrumentMaster
     from algo.strategy.delta_strangle import DeltaStrangle
 
@@ -182,7 +182,12 @@ def backtest(
         if flat
         else one_minute_session(calendar, US_DST_DAY, seed=seed)
     )
-    bars = resample(source, calendar=calendar, timeframe=tf)
+    # `partial_last_bar` decides whether the 23:30-23:55 stub survives resampling
+    # (D-014). Read before the bars are built, because afterwards is too late.
+    keep_partial = True
+    if config is not None:
+        keep_partial = load_config(config).market.bar.partial_last_bar == "keep_flagged"
+    bars = resample(source, calendar=calendar, timeframe=tf, keep_partial=keep_partial)
 
     if config is not None:
         from algo.config.loader import load_config as resolve
@@ -211,6 +216,7 @@ def backtest(
         max_lots = 5
         margin_cap_pct = None
         kill_switch = None
+        flatten_on_trip = False
         margin = None
         stop_viability = None
         on_breach = "warn"
@@ -374,6 +380,11 @@ def live(
     from algo.persistence.journal import OrderJournal
 
     config = load_config(path)
+    configure_logging(
+        level=config.logging.level,
+        json_format=config.logging.json_format,
+        file=config.logging.file,
+    )
     mode = resolve_mode(config.mode, real_money_flag=real_money_flag)
 
     # Checked here, before any credential is read or any session opened: nothing
@@ -473,40 +484,25 @@ def live(
     typer.echo("  session ended.")
 
 
-def _expiries_from_master(
-    master: InstrumentMaster, underlying: str, exchange: Exchange
-) -> ExpiryCalendar:
-    """An expiry calendar built from what the broker actually lists.
+def _calendar_for(config_path: Path | None) -> MarketCalendar:
+    """The calendar a real-data command should use.
 
-    D-023: expiry dates are read from the instrument master, never computed from
-    a weekday rule. Each option cycle is paired with the first futures contract
-    expiring on or after it - the contract it settles into - which is the same
-    pairing `nearest_futures_expiry` applies to bhavcopy, kept identical here so
-    live and backtest cannot disagree about what a cycle's underlying is.
+    `synthetic_calendar` says of itself "never for a real run", yet every command
+    built one until D-115 - so `market.allow_unverified_calendar` decided nothing
+    and MCX holidays went unmodelled. This routes the real-data paths through the
+    configured policy instead. With no config file there is no policy to honour,
+    so the unverified calendar is explicit rather than accidental.
     """
-    from algo.core.errors import DataError
-    from algo.exchange.expiries import (
-        ExpiryCalendar,
-        ExpirySet,
-        InstrumentMasterExpiries,
+    from algo.exchange.calendar import mcx_calendar
+
+    if config_path is None:
+        return mcx_calendar(holidays_file=None, allow_unverified=True)
+    cfg = load_config(config_path)
+    return mcx_calendar(
+        holidays_file=cfg.market.holidays_file,
+        allow_unverified=cfg.market.allow_unverified_calendar,
     )
 
-    futures = sorted(
-        r.expiry for r in master.future_rows(underlying, exchange) if r.expiry is not None
-    )
-    table: dict[tuple[str, int, int], ExpirySet] = {}
-    for option_expiry in master.option_expiries(underlying, exchange):
-        later = [e for e in futures if e >= option_expiry]
-        table[(underlying, option_expiry.year, option_expiry.month)] = ExpirySet(
-            option_expiry=option_expiry,
-            futures_expiry=later[0] if later else option_expiry,
-        )
-    if not table:
-        raise DataError(
-            f"the master snapshot lists no {underlying} option expiries; "
-            "a chain cannot be resolved without one"
-        )
-    return ExpiryCalendar(authority=InstrumentMasterExpiries(table), rule=None)
 
 
 def _run_paper_loop(
@@ -547,7 +543,8 @@ def _run_paper_loop(
     from algo.data.kotak_feed import KotakChainFeed, NeoQuotesTransport
     from algo.data.live import SessionWindow
     from algo.data.smartapi_feed import SmartApiBarFeed
-    from algo.exchange.calendar import synthetic_calendar
+    from algo.exchange.calendar import mcx_calendar
+    from algo.exchange.expiries import expiries_from_master
     from algo.execution.fills import FillSimulator
     from algo.execution.paper import PaperBroker
     from algo.execution.router import OrderRouter
@@ -577,7 +574,10 @@ def _run_paper_loop(
         underlying=underlying, expiry=futures[-1].expiry, exchange=exchange
     )
 
-    calendar = synthetic_calendar()
+    calendar = mcx_calendar(
+        holidays_file=config.market.holidays_file,
+        allow_unverified=config.market.allow_unverified_calendar,
+    )
     timeframe = Timeframe(minutes=config.market.bar.timeframe_minutes)
     bar_source = SmartApiBarFeed(
         transport=transport,
@@ -633,7 +633,7 @@ def _run_paper_loop(
         ),
         max_staleness_s=float(config.data.quality.max_stale_seconds),
     )
-    expiries = _expiries_from_master(live_master, underlying, exchange)
+    expiries = expiries_from_master(live_master, underlying, exchange)
     try:
         cycle = expiries.nearest_expiry_on_or_after(underlying, ist_date(clock.now()))
     except AlgoError as exc:
@@ -1355,7 +1355,7 @@ def backtest_bhavcopy(
     from algo.risk.killswitch import KillSwitch
     from algo.strategy.delta_strangle import DeltaStrangle
 
-    calendar = synthetic_calendar()
+    calendar = _calendar_for(config)
 
     try:
         rows = (
@@ -1411,6 +1411,7 @@ def backtest_bhavcopy(
         lots = 1
         max_lots = 5
         margin_cap_pct = Decimal("50")
+        flatten_on_trip = False
         kill_switch = KillSwitch(
             daily_loss_limit_pct=Decimal("2"),
             max_consecutive_losses=3,
@@ -1597,7 +1598,7 @@ def backtest_smartapi(
     from algo.strategy.delta_strangle import DeltaStrangle
 
     option_expiry = date.fromisoformat(expiry)
-    calendar = synthetic_calendar()
+    calendar = _calendar_for(config)
     clock = SystemClock()
 
     credentials = smart_credentials_from_env()
@@ -1686,6 +1687,7 @@ def backtest_smartapi(
         lots = 1
         max_lots = 5
         margin_cap_pct = Decimal("50")
+        flatten_on_trip = False
         kill_switch = KillSwitch(
             daily_loss_limit_pct=Decimal("2"),
             max_consecutive_losses=3,

@@ -10,9 +10,9 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from algo.core.enums import OrderState, OrderType, ProductType, Side, TimeInForce
+from algo.core.enums import OrderType, ProductType, Side, TimeInForce
 from algo.core.instrument import InstrumentId
 from algo.core.timeutil import ensure_utc
 
@@ -91,19 +91,3 @@ class BrokerOrderRef(BaseModel):
         return ensure_utc(v)
 
 
-class OrderUpdate(BaseModel):
-    """A state transition observed for an order."""
-
-    model_config = _FROZEN
-
-    client_order_id: str
-    state: OrderState
-    filled_qty: Decimal = Decimal("0")
-    average_price: Decimal | None = None
-    message: str = ""
-    at: datetime = Field(...)
-
-    @field_validator("at")
-    @classmethod
-    def _aware(cls, v: datetime) -> datetime:
-        return ensure_utc(v)

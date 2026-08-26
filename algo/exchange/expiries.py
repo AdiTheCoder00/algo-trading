@@ -23,8 +23,10 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
-from algo.core.errors import CalendarError
+from algo.core.enums import Exchange
+from algo.core.errors import CalendarError, DataError
 from algo.exchange.calendar import MarketCalendar
+from algo.exchange.master import InstrumentMaster
 
 _FRIDAY = 4
 
@@ -57,9 +59,18 @@ def last_friday(year: int, month: int) -> date:
 
 
 class ExpiryProvider(Protocol):
-    """Anything that can answer 'when does this contract month expire?'."""
+    """Anything that can answer 'when does this contract month expire?'.
+
+    `ExpiryCalendar` takes one of these rather than the concrete
+    `InstrumentMasterExpiries`, so a table built from a bhavcopy archive, a live
+    master, or a fixture are interchangeable without the calendar knowing which
+    it holds. Declaring `expiry_set` as well as `option_expiry` because the
+    calendar needs both - a protocol missing half the surface it is used through
+    cannot actually stand in for anything (D-115).
+    """
 
     def option_expiry(self, underlying: str, year: int, month: int) -> date: ...
+    def expiry_set(self, underlying: str, year: int, month: int) -> ExpirySet: ...
 
 
 class LastFridayRule:
@@ -122,7 +133,7 @@ class ExpiryCalendar:
     def __init__(
         self,
         *,
-        authority: InstrumentMasterExpiries,
+        authority: ExpiryProvider,
         rule: LastFridayRule | None = None,
         strict: bool = True,
     ) -> None:
@@ -175,3 +186,43 @@ class ExpiryCalendar:
         raise CalendarError(
             f"no {underlying} option expiry on or after {on} within {horizon} contract months"
         )
+
+
+def expiries_from_master(
+    master: InstrumentMaster, underlying: str, exchange: Exchange
+) -> ExpiryCalendar:
+    """An expiry calendar built from what the broker actually lists.
+
+    D-023: expiry dates are read from the instrument master, never computed from
+    a weekday rule. Each option cycle is paired with the first futures contract
+    expiring on or after it - the contract it settles into - which is the same
+    pairing `bhavcopy.nearest_futures_expiry` applies to the archive, kept
+    identical so live and backtest cannot disagree about what a cycle's
+    underlying is.
+
+    Lived in `algo/cli/main.py` until D-115, which is the one module no test
+    imports - so the rule deciding which contract every trade settles into was
+    never exercised. Moved here to be testable.
+    """
+    futures = sorted(
+        row.expiry
+        for row in master.future_rows(underlying, exchange)
+        if row.expiry is not None
+    )
+    table: dict[tuple[str, int, int], ExpirySet] = {}
+    for option_expiry in master.option_expiries(underlying, exchange):
+        later = [e for e in futures if e >= option_expiry]
+        table[(underlying, option_expiry.year, option_expiry.month)] = ExpirySet(
+            option_expiry=option_expiry,
+            # No later futures contract listed: the option is paired with itself
+            # rather than with an earlier contract it cannot settle into. A run
+            # that reaches this has an incomplete master, and the devolvement
+            # guard will still refuse to hold anything into that expiry.
+            futures_expiry=later[0] if later else option_expiry,
+        )
+    if not table:
+        raise DataError(
+            f"the master snapshot lists no {underlying} option expiries; "
+            "a chain cannot be resolved without one"
+        )
+    return ExpiryCalendar(authority=InstrumentMasterExpiries(table), rule=None)

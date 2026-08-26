@@ -66,7 +66,3 @@ def resolve_mode(
 def is_live(mode: Mode) -> bool:
     return mode is Mode.LIVE
 
-
-def can_place_real_orders(mode: Mode) -> bool:
-    """Only `live` reaches a real account. Paper simulates fills on live data."""
-    return mode is Mode.LIVE

@@ -850,8 +850,9 @@ real sizing rule lands, the schema grows with the implementation, not before it.
 
 ### D-090 - Roadmap-only modules stay until their milestone arrives
 `algo/data/feed.py`, `csv_feed.py` and `parquet_feed.py` (M1.5/M7 feeds) and
-`algo/strategy/paper.py` (the paper loop) are not dead code: they are the load
-bearing future of a repository whose tests replay recordings, and
+`algo/execution/paper.py` (the paper broker - the path said `algo/strategy/`
+until D-115; the module was always in `execution/`) are not dead code: they are
+the load bearing future of a repository whose tests replay recordings, and
 `synthetic_chain.py` is the strangle suite's fixture. They stay, and keep their
 importers in the test suite.
 **Why:** deleting them would save a few modules today and re-create them against
@@ -1471,6 +1472,111 @@ because it is the kind of difference that silently disables a guard.
 The classification follows from what the error *is*, not from confirmed
 transience - Q19 records the re-test needed during market hours to distinguish a
 closed-market artefact from an entitlement problem.
+
+### D-115 - Every config field must decide something, or refuse
+A scan found **21 of 79 config fields that nothing ever read**. That is worse
+than a missing setting: the file described a system that did not exist, and two
+of the dead fields read as safety policy.
+
+* **`flatten_on_trip: false`** - never consulted. Only a *dashboard* halt request
+  carrying `flatten` ever closed a position; the switch tripping on its own
+  limits left an open strangle running whatever the file said. Now wired: a
+  self-trip flattens when configured to.
+* **`allow_unverified_calendar: false`** - never consulted, and every command
+  built `synthetic_calendar()`, which says of itself "never for a real run" and
+  passes `allow_unverified=True`. **MCX holidays were not modelled anywhere**,
+  including in `DevolvementGuard`, whose exit deadline is computed by walking
+  back trading days - so a deadline could land on a day the market was shut.
+  Running without a stop loss, that guard is the only hard backstop there is.
+  Now `mcx_calendar` builds from config and refuses to start unverified.
+
+  The config had to become honest about it: there is no sourced MCX holiday list,
+  so `allow_unverified_calendar` is now **true** with `holidays_file: null` and a
+  comment saying why (Q20). A gate that reads "false" while nothing checks is
+  worth less than one that reads "true" and is enforced.
+
+**The treatment, by category.** *Wired*: `max_stale_seconds` (now 120s and read
+by `LiveChainProvider`, which had hardcoded its own 120 while config said 10),
+`partial_last_bar`, `flatten_on_trip`, `allow_unverified_calendar`,
+`holidays_file`, and the whole `logging` section (nothing configured structlog at
+all - it emitted JSON by default, so `json_format: true` described what was
+happening without causing it). *Refused*: `timezone`, `dst_reference_zone`,
+`act_on_partial_bar`, `reject_crossed_quotes`, `reject_empty_book` and
+`evaluate_on: tick` now raise at load, because their behaviour is fixed in code
+and accepting a value that does nothing is the bug. *Deleted*: `out_dir`,
+`bars_path`, `chain_path`, `research_db`, `wal`, `on_violation`.
+
+`tests/test_config_has_no_inert_fields.py` keeps the scan itself as a test, so
+the class cannot come back.
+
+### D-116 - The rest of the audit: dead code, untested logic, a stale path
+**Dead symbols removed**: `can_place_real_orders` (a safety helper nothing
+called), `write_equity_curve`, `OrderUpdate`, `RiskRejection`. `ExpiryProvider`
+was an *incomplete* protocol - it declared `option_expiry` but not `expiry_set`,
+and `ExpiryCalendar` annotated the concrete class instead - so it was completed
+and used rather than deleted.
+
+**`check_exit` stays and now says why.** It holds the intrabar stop/target logic
+including gap handling, is called by nothing, and read as an oversight. It is
+staged work for Q15; the docstring now says so, and `evaluate_on: tick` refuses
+at load, so no run can believe it has intrabar protection it does not have.
+
+**Untested modules.** Four were never imported by any test. Two carried real
+logic: `bhavcopy_runner` (305 lines - it produced the only real-data result the
+project has) and `validate` (158 lines - the data quality gate). Both now have
+tests. Writing the first set corrected my own assumption: the runner emits **two**
+chain snapshots per session, priced from the open and the close respectively,
+which is right and better than the one I expected.
+
+**`_expiries_from_master` moved out of the CLI.** It decides which futures
+contract every option cycle settles into, and it sat in `algo/cli/main.py` - the
+one module (1782 lines) that no test imports. Now `expiries_from_master` in
+`algo/exchange/expiries.py`, with tests.
+
+That untested CLI bit immediately: wiring `flatten_on_trip` introduced an
+`UnboundLocalError` on the no-config path that the whole suite passed straight
+over. Found by running the command, not by the tests.
+
+**D-090 cited `algo/strategy/paper.py`**, which has never existed; the paper
+broker is `algo/execution/paper.py`. Path corrected.
+
+### D-117 - The CLI is tested, and the tests were checked against the real bug
+`algo/cli/main.py` is the largest module in the project and no test imported it.
+That is how wiring `flatten_on_trip` (D-115) shipped an `UnboundLocalError` on
+the no-config path which a 790-test suite passed straight over; it was found by
+running the command, not by the suite.
+
+**The test was verified against the bug it exists for.** Reintroducing the
+missing binding fails three of the new tests while the other 829 pass clean -
+which is the proof that the gap was real rather than a matter of taste.
+
+Two rules shape the file:
+
+* **Every command that takes `--config` is invoked twice**, with and without one.
+  The bug was a name bound inside `if config is not None` and read outside it,
+  and that shape recurs in every such command.
+* **Nothing touches the network.** `live`, `credentials` and `serve` open real
+  sessions, so only the paths that return *before* any credential is read are
+  exercised - which happen to be the safety gates, the part most worth pinning.
+  A test suite that logs into a broker is one nobody can run.
+
+Also covered: the falsification line itself (a silent change there would be the
+most serious regression the project could have), the `config` command surfacing
+`NO STOP LOSS` and the roll, the kill switch round-tripping a halt request
+through a real state file, and `backtest-bhavcopy` end to end on a two-session
+CSV fixture - enough to exercise loader, calendar-from-config,
+strategy-from-config, engine and report without adding a large file to the repo.
+
+Writing it surfaced a safety feature worth pinning that I had forgotten: `--trip
+--flatten` **asks for confirmation**, because flattening market-closes a short
+strangle that may be mid-move. Declining now has a test asserting that nothing is
+recorded - a half-applied halt being worse than none.
+
+The ASCII guard moved from CI-only into the suite as well, scoped to our source
+rather than rendered output: Typer draws its help panels with box characters and
+those are its business.
+
+Untested modules are down from four to none.
 
 ---
 

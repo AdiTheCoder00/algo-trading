@@ -18,7 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from algo.core.enums import Exchange, Mode
 
@@ -45,7 +45,6 @@ class RunConfig(BaseModel):
 
     name: str = "unnamed"
     seed: int = 0
-    out_dir: Path = Path("runs")
 
 
 class BarConfig(BaseModel):
@@ -53,7 +52,23 @@ class BarConfig(BaseModel):
 
     timeframe_minutes: int = 30
     partial_last_bar: str = Field(default="keep_flagged", pattern="^(keep_flagged|drop)$")
-    act_on_partial_bar: bool = False
+    act_on_partial_bar: bool = Field(
+        default=False,
+        description="Fixed at False. D-014 forbids a strategy acting on the "
+        "23:30-23:55 stub; the risk layer still may. Kept as a field because the "
+        "distinction is worth stating, validated because it cannot be changed.",
+    )
+
+    @field_validator("act_on_partial_bar")
+    @classmethod
+    def _must_stay_false(cls, v: bool) -> bool:
+        if v:
+            raise ValueError(
+                "act_on_partial_bar: true is not implemented - D-014 makes the "
+                "partial-bar rule structural in DeltaStrangle, not configurable. "
+                "Remove the setting rather than setting a value that does nothing."
+            )
+        return v
 
 
 class SessionConfig(BaseModel):
@@ -75,6 +90,29 @@ class MarketConfig(BaseModel):
     session: SessionConfig = SessionConfig()
     bar: BarConfig = BarConfig()
 
+    @field_validator("timezone")
+    @classmethod
+    def _only_ist(cls, v: str) -> str:
+        # `algo.core.timeutil` binds IST at import. A different value here would
+        # be read by nobody, which is worse than not offering the knob.
+        if v != "Asia/Kolkata":
+            raise ValueError(
+                f"timezone must be Asia/Kolkata, got {v!r} - the exchange clock is "
+                "compiled into algo.core.timeutil, not read from config."
+            )
+        return v
+
+    @field_validator("dst_reference_zone")
+    @classmethod
+    def _only_new_york(cls, v: str) -> str:
+        if v != "America/New_York":
+            raise ValueError(
+                f"dst_reference_zone must be America/New_York, got {v!r} - the "
+                "session close keys off US DST (D-017) and the zone is compiled "
+                "into algo.core.timeutil."
+            )
+        return v
+
 
 class InstrumentConfig(BaseModel):
     model_config = _FROZEN
@@ -88,16 +126,31 @@ class QualityConfig(BaseModel):
 
     reject_crossed_quotes: bool = True
     reject_empty_book: bool = True
-    max_stale_seconds: float = 10.0
-    on_violation: str = Field(default="skip_bar", pattern="^(skip_bar|fail_run)$")
+    max_stale_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        description="How old the live chain snapshot may be before it stops "
+        "pricing anything (algo/live/chain.py).",
+    )
+
+    @field_validator("reject_crossed_quotes", "reject_empty_book")
+    @classmethod
+    def _cannot_be_disabled(cls, v: bool, info: ValidationInfo) -> bool:
+        # `Quote.status` checks both unconditionally. Accepting `false` here
+        # would read as "filling against a crossed book is available if you want
+        # it", and it is not.
+        if not v:
+            raise ValueError(
+                f"{info.field_name}: false is not supported - Quote.status refuses "
+                "these unconditionally and there is no way to opt out."
+            )
+        return v
 
 
 class DataConfig(BaseModel):
     model_config = _FROZEN
 
     source: str = Field(default="synthetic", pattern="^(synthetic|csv|parquet|live)$")
-    bars_path: Path | None = None
-    chain_path: Path | None = None
     master_snapshot: Path = Field(
         default=Path("state/master_mcx.json"),
         description="Frozen Angel One instrument master (bar data), fetched by "
@@ -179,7 +232,12 @@ class ExitConfig(BaseModel):
         "separate flag rather than a null stop_loss_value: a safety level must "
         "not be removable by omitting a line, only by saying so explicitly.",
     )
-    evaluate_on: str = Field(default="bar_close", pattern="^(bar_close|tick)$")
+    evaluate_on: str = Field(
+        default="bar_close",
+        pattern="^(bar_close|tick)$",
+        description="Only bar_close is implemented. Q15 keeps `tick` as the "
+        "intended live behaviour; the validator refuses it until it exists.",
+    )
     min_stop_to_cost_ratio: Decimal = Decimal("3")
     on_stop_viability_breach: str = Field(default="warn", pattern="^(warn|refuse)$")
 
@@ -214,6 +272,20 @@ class StrategyConfig(BaseModel):
     )
     exit: ExitConfig = ExitConfig()
 
+    @field_validator("exit")
+    @classmethod
+    def _tick_exits_are_not_implemented(cls, v: ExitConfig) -> ExitConfig:
+        # `check_exit` in execution/fills.py holds the intrabar logic and is not
+        # wired to anything (Q15). Accepting `tick` would let a config claim a
+        # protection the engine does not apply.
+        if v.evaluate_on == "tick":
+            raise ValueError(
+                "exit.evaluate_on: tick is not implemented - the engine evaluates "
+                "stops and targets at bar granularity only (Q15). Use bar_close, "
+                "and read the backtest as optimistic on fast moves."
+            )
+        return v
+
     @field_validator("roll_at_front_dte")
     @classmethod
     def _not_negative(cls, v: int | None) -> int | None:
@@ -236,8 +308,6 @@ class PersistenceConfig(BaseModel):
     model_config = _FROZEN
 
     live_db: Path = Path("state/live.db")
-    research_db: Path = Path("state/research.duckdb")
-    wal: bool = True
     live_broker_state: Path = Field(
         default=Path("state/kotak_broker.json"),
         description="The Kotak adapter's ledger — our client ids mapped to the "

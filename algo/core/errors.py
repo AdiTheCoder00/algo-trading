@@ -51,10 +51,6 @@ class SpecError(AlgoError):
     """No contract specification is in force for the requested instrument/date."""
 
 
-class RiskRejection(AlgoError):
-    """The risk engine refused to act on a signal. Always logged with a reason."""
-
-
 class BrokerError(AlgoError):
     """Base for broker-adapter failures."""
 

@@ -309,6 +309,24 @@ months it is 09:00–23:30, exactly 29 bars.
 **Default:** emit the stub flagged `is_partial`; strategy may not act on it, risk layer may.
 Say the word if you would rather use 15-minute bars, where the stub disappears entirely.
 
+### Q20 `[BLOCKING live]` No sourced MCX holiday list exists
+`market.allow_unverified_calendar` is **true** in config, which is honest rather
+than desirable: there is no sourced MCX holiday file, so the calendar knows only
+weekends plus the observed special sessions (D-107).
+
+What that costs: `DevolvementGuard.exit_deadline` walks back trading days to
+decide when a short option must be closed. With holidays unknown, a deadline can
+land on a day the market is shut - and running without a stop loss (D-102), that
+guard is the only hard backstop on an open position.
+
+**To close:** put the MCX holiday list in a file, one ISO date per line, set
+`market.holidays_file`, and flip `allow_unverified_calendar` to false.
+`mcx_calendar` refuses to start unverified once that flag is false, and
+`load_holidays` takes the last date in the file as `verified_through` so the
+calendar refuses to answer past its own horizon rather than guessing.
+
+---
+
 ### Q19 `[OPEN]` Kotak's `limits` endpoint reports a bridge outage — transient or entitlement?
 `limits` (which backs `KotakBroker.funds()`) returns `stCode: 300015`,
 `"bridge API error out"`, consistently across retries, at 02:33 IST with MCX

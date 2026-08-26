@@ -10,13 +10,17 @@ mode: backtest # backtest | paper | live. Live is gated twice — see algo/confi
 run:
   name: goldm_strangle_m1
   seed: 20260819
-  out_dir: runs
 
 market:
   timezone: Asia/Kolkata # the session is expressed here...
   dst_reference_zone: America/New_York # ...but the CLOSE TIME keys off US DST
   calendar: mcx
-  allow_unverified_calendar: false # holidays must be sourced before a real run
+  # TRUE, and that is a real gap, not a preference (Q20). No sourced MCX holiday
+  # list exists yet, so the calendar knows only weekends plus the observed
+  # special sessions. Set `holidays_file` and flip this to false the moment one
+  # is available - `mcx_calendar` refuses to start otherwise, deliberately.
+  allow_unverified_calendar: true
+  holidays_file: null # e.g. config/mcx_holidays_2026.txt - one ISO date per line
   session:
     open_ist: "09:00"
     close_ist_us_dst: "23:30" # 2nd Sun Mar -> 1st Sun Nov: 29 bars exactly
@@ -36,7 +40,6 @@ data:
     reject_crossed_quotes: true
     reject_empty_book: true
     max_stale_seconds: 120.0 # the live chain snapshot's freshness bound (D-115)
-    on_violation: skip_bar
 
 risk:
   starting_equity: "1000000.00"
@@ -87,9 +90,8 @@ strategy:
 
 persistence:
   live_db: state/live.db
-  research_db: state/research.duckdb
-  wal: true
 
 logging:
-  level: INFO
-  json_format: true
+  level: INFO # structlog level; the broker SDKs are chatty at DEBUG
+  json_format: true # false gives a console renderer, far easier to read live
+  file: null # e.g. runs/live.log - a terminal-only record dies with the terminal

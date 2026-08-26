@@ -18,9 +18,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from algo.core.ids import stable_hash
-from algo.core.timeutil import iso
 from algo.core.trade import Trade
-from algo.portfolio.book import EquityPoint
 
 TRADE_COLUMNS = (
     "trade_id",
@@ -70,28 +68,6 @@ def write_trade_log(trades: Sequence[Trade], path: Path) -> Path:
         writer.writerows(trade_rows(trades))
     return path
 
-
-def write_equity_curve(curve: Sequence[EquityPoint], path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle, fieldnames=list(EQUITY_COLUMNS), lineterminator="\n"
-        )
-        writer.writeheader()
-        for point in curve:
-            writer.writerow(
-                {
-                    "ts": iso(point.ts),
-                    "equity": str(point.equity),
-                    "cash": str(point.cash),
-                    "market_value": str(point.market_value),
-                    "realised_pnl": str(point.realised_pnl),
-                    "unrealised_pnl": str(point.unrealised_pnl),
-                    "charges": str(point.charges),
-                    "open_positions": str(point.open_positions),
-                }
-            )
-    return path
 
 
 def trade_log_digest(trades: Sequence[Trade]) -> str:

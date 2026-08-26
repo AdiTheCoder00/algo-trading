@@ -8,19 +8,23 @@ the source of truth here and the rule is only a cross-check.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
+from decimal import Decimal
 
 import pytest
 
-from algo.core.errors import CalendarError
+from algo.core.enums import Exchange
+from algo.core.errors import CalendarError, DataError
 from algo.exchange.calendar import MarketCalendar, synthetic_calendar
 from algo.exchange.expiries import (
     ExpiryCalendar,
     ExpirySet,
     InstrumentMasterExpiries,
     LastFridayRule,
+    expiries_from_master,
     last_friday,
 )
+from algo.exchange.master import InstrumentMaster
 
 
 class TestLastFriday:
@@ -135,3 +139,90 @@ class TestExpirySelection:
         assert cycle.futures_expiry is not None
         assert cycle.tender_period_start is not None
         assert cycle.option_expiry < cycle.tender_period_start < cycle.futures_expiry
+
+
+class TestExpiriesFromMaster:
+    """D-115. This decides which futures contract every option cycle settles
+    into, and it lived in `algo/cli/main.py` - the one module no test imports -
+    until it was moved here.
+    """
+
+    def _master(self, options: list[date], futures: list[date]) -> InstrumentMaster:
+        from algo.exchange.master import MasterRow
+
+        rows = [
+            MasterRow(
+                symboltoken=str(i),
+                tradingsymbol=f"GOLDM{e:%d%b%y}".upper(),
+                exch_seg="MCX",
+                name="GOLDM",
+                instrumenttype=kind,
+                expiry=e,
+                strike=Decimal("160000") if kind == "OPTFUT" else None,
+                lot_size=100,
+                tick_size=Decimal("1"),
+            )
+            for i, (e, kind) in enumerate(
+                [(e, "OPTFUT") for e in options] + [(e, "FUTCOM") for e in futures]
+            )
+        ]
+        return InstrumentMaster(tuple(rows), fetched_at=datetime(2026, 8, 27, tzinfo=UTC))
+
+    def test_a_cycle_pairs_with_the_first_future_expiring_after_it(self) -> None:
+        master = self._master(
+            options=[date(2026, 8, 28)], futures=[date(2026, 9, 4), date(2026, 10, 5)]
+        )
+
+        calendar = expiries_from_master(master, "GOLDM", Exchange.MCX)
+        cycle = calendar.expiry_set("GOLDM", 2026, 8)
+
+        assert cycle.option_expiry == date(2026, 8, 28)
+        assert cycle.futures_expiry == date(2026, 9, 4)
+
+    def test_an_earlier_future_is_never_chosen(self) -> None:
+        """An option cannot settle into a contract that expired before it."""
+        master = self._master(
+            options=[date(2026, 9, 25)], futures=[date(2026, 9, 4), date(2026, 10, 5)]
+        )
+
+        cycle = expiries_from_master(master, "GOLDM", Exchange.MCX).expiry_set(
+            "GOLDM", 2026, 9
+        )
+
+        assert cycle.futures_expiry == date(2026, 10, 5)
+
+    def test_several_cycles_each_get_their_own_contract(self) -> None:
+        master = self._master(
+            options=[date(2026, 8, 28), date(2026, 9, 25), date(2026, 10, 29)],
+            futures=[date(2026, 9, 4), date(2026, 10, 5), date(2026, 11, 4)],
+        )
+        calendar = expiries_from_master(master, "GOLDM", Exchange.MCX)
+
+        pairs = {
+            calendar.expiry_set("GOLDM", 2026, m).option_expiry: calendar.expiry_set(
+                "GOLDM", 2026, m
+            ).futures_expiry
+            for m in (8, 9, 10)
+        }
+
+        assert pairs == {
+            date(2026, 8, 28): date(2026, 9, 4),
+            date(2026, 9, 25): date(2026, 10, 5),
+            date(2026, 10, 29): date(2026, 11, 4),
+        }
+
+    def test_no_later_future_pairs_the_option_with_itself(self) -> None:
+        """An incomplete master must not silently pair with an earlier contract."""
+        master = self._master(options=[date(2026, 10, 29)], futures=[date(2026, 9, 4)])
+
+        cycle = expiries_from_master(master, "GOLDM", Exchange.MCX).expiry_set(
+            "GOLDM", 2026, 10
+        )
+
+        assert cycle.futures_expiry == date(2026, 10, 29)
+
+    def test_a_master_with_no_options_is_refused(self) -> None:
+        master = self._master(options=[], futures=[date(2026, 9, 4)])
+
+        with pytest.raises(DataError, match="lists no GOLDM option expiries"):
+            expiries_from_master(master, "GOLDM", Exchange.MCX)
