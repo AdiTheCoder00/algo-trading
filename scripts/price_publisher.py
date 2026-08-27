@@ -210,6 +210,63 @@ class _SpotSession:
         return leg
 
 
+class _ComexAnchor:
+    """Fill the gaps between spot updates using COMEX movement.
+
+    The free spot feed publishes a new price every 30 seconds, on the :20 and
+    :50. Polling it faster just returns the same number, so the widget looked
+    frozen for half a minute at a time. COMEX front-month ticks several times a
+    minute, but sits tens of dollars above spot and cannot be shown as XAUUSD.
+
+    So spot stays the anchor and COMEX supplies the shape between anchors:
+
+        basis      = comex - spot        (recomputed each time spot moves)
+        estimate   = comex_now - basis
+
+    The only error is basis drift within a 30-second window, which is cents. The
+    published price is still spot-accurate; it simply stops being a staircase.
+
+    COMEX is fetched on its own throttle rather than every loop -- Yahoo would
+    rate-limit a 2-second cadence, and it gains nothing over ~4s.
+    """
+
+    def __init__(self, *, min_interval_s: float = 4.0) -> None:
+        self.min_interval_s = min_interval_s
+        self._price: float | None = None
+        self._fetched_at: float = 0.0
+        self._basis: float | None = None
+        self._anchor_quote_time: str | None = None
+
+    def poll(self, timeout: float, *, now: float) -> float | None:
+        if self._price is not None and (now - self._fetched_at) < self.min_interval_s:
+            return self._price
+        try:
+            self._price = _comex_fallback(timeout)["price"]
+            self._fetched_at = now
+        except (urllib.error.URLError, OSError, KeyError, ValueError, TypeError):
+            pass  # keep the last value; a missed COMEX poll is not fatal
+        return self._price
+
+    def refresh_basis(self, spot: float, quote_time: str | None) -> None:
+        """Re-anchor when the spot feed publishes a genuinely new quote."""
+        if quote_time is not None and quote_time == self._anchor_quote_time:
+            return
+        self._anchor_quote_time = quote_time
+        if self._price is not None:
+            self._basis = self._price - spot
+
+    def estimate(self, spot: float) -> tuple[float, bool]:
+        """Return (price, interpolated). Falls back to raw spot when unusable."""
+        if self._price is None or self._basis is None:
+            return spot, False
+        est = self._price - self._basis
+        # A basis that has drifted absurdly means something is wrong (a contract
+        # roll, a bad print); trust spot rather than publish a fabricated number.
+        if abs(est - spot) > 15.0:
+            return spot, False
+        return round(est, 2), True
+
+
 def fetch_xauusd(
     session: "_SpotSession | None" = None,
     *,
@@ -217,6 +274,7 @@ def fetch_xauusd(
     seed_prev_close: float | None = None,
     seed_high: float | None = None,
     seed_low: float | None = None,
+    anchor: "_ComexAnchor | None" = None,
 ) -> dict[str, Any]:
     """Spot price, with change and range derived from spot's own session."""
     errors: list[str] = []
@@ -232,6 +290,17 @@ def fetch_xauusd(
             return {"price": None, "source": None, "stale": True, "errors": errors}
 
     leg["stale"] = False
+
+    # Smooth the 30-second spot staircase using COMEX movement.
+    if anchor is not None and leg.get("price"):
+        anchor.poll(timeout, now=time.monotonic())
+        anchor.refresh_basis(leg["price"], leg.get("quote_time"))
+        estimated, interpolated = anchor.estimate(leg["price"])
+        if interpolated:
+            leg["spot_price"] = leg["price"]
+            leg["price"] = estimated
+            leg["interpolated"] = True
+
     if session is not None and leg.get("price"):
         session.update(
             leg["price"],
@@ -345,6 +414,7 @@ def build_document(
     seed_prev_close: float | None = None,
     seed_high: float | None = None,
     seed_low: float | None = None,
+    anchor: "_ComexAnchor | None" = None,
 ) -> dict[str, Any]:
     now = datetime.now(UTC)
     xau = fetch_xauusd(
@@ -352,6 +422,7 @@ def build_document(
         seed_prev_close=seed_prev_close,
         seed_high=seed_high,
         seed_low=seed_low,
+        anchor=anchor,
     )
 
     if consumer_key:
@@ -508,6 +579,7 @@ def main() -> int:
             log.warning("no Kotak consumer key; GOLDM will publish as stale")
 
     session = _SpotSession(args.session)
+    anchor = _ComexAnchor()
 
     def poll(refresh: bool = False) -> dict[str, Any]:
         document = build_document(
@@ -519,6 +591,7 @@ def main() -> int:
             seed_prev_close=args.seed_prev_close,
             seed_high=args.seed_day_high,
             seed_low=args.seed_day_low,
+            anchor=anchor,
         )
         write_document(document, args.out)
         log.info(
