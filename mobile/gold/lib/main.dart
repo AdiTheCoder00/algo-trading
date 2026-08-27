@@ -207,10 +207,15 @@ class _PriceScreenState extends State<PriceScreen> with WidgetsBindingObserver {
 
   Future<bool> _fromRelay() async {
     if (await _tryRelay(_relay)) return true;
-    // Only worth a second attempt when the first was a name that may not have
-    // resolved; if the user already configured an address, respect it.
-    if (_relay.trim() != kRelayFallback && _relay.contains('ts.net')) {
-      return _tryRelay(kRelayFallback);
+    // Always worth a second attempt at the known-good address. Gating this on the
+    // configured URL being a ts.net name meant a stale saved URL -- an old LAN
+    // address, say -- could never fall back, which is precisely the case that
+    // needs rescuing.
+    if (_relay.trim() != kRelayFallback && kRelayFallback.isNotEmpty) {
+      if (await _tryRelay(kRelayFallback)) {
+        _status = 'via fallback address';
+        return true;
+      }
     }
     return false;
   }
@@ -222,6 +227,10 @@ class _PriceScreenState extends State<PriceScreen> with WidgetsBindingObserver {
           '?t=${DateTime.now().millisecondsSinceEpoch}'
           '${_token.isEmpty ? '' : '&k=$_token'}');
       final r = await http.get(uri).timeout(const Duration(seconds: 6));
+      if (r.statusCode == 401) {
+        _status = 'relay rejected the token';
+        return false;
+      }
       if (r.statusCode != 200) throw Exception('HTTP ${r.statusCode}');
       final d = jsonDecode(r.body) as Map<String, dynamic>;
 
@@ -293,7 +302,15 @@ class _PriceScreenState extends State<PriceScreen> with WidgetsBindingObserver {
         note: _cachedAt == null ? _xau.note : _ageLabel(_cachedAt!),
         stale: true,
       );
-      _status = _cachedAt == null ? 'no feed' : 'no feed · last seen ${_ageLabel(_cachedAt!)}';
+      // Both legs are down, which almost always means the phone -- not the relay.
+      // Naming the likely cause beats a bare "no feed" the user cannot act on.
+      final why = e.toString().toLowerCase();
+      final hint = why.contains('failed host lookup') || why.contains('nodename')
+          ? 'DNS failing'
+          : why.contains('timed out') || why.contains('timeout')
+              ? 'no route'
+              : 'offline?';
+      _status = 'relay + internet unreachable · $hint';
     }
   }
 
