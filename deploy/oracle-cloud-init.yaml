@@ -1,0 +1,122 @@
+#cloud-config
+# First-boot configuration for the gold price relay on an Oracle Always Free VM.
+#
+# Paste this into Oracle's instance-creation form under
+#   Advanced options -> Management -> Initialization script
+# after replacing the three REPLACE_ME values below.
+#
+# The repository is public, so nothing here needs a git credential. The three
+# secrets are:
+#
+#   TS_AUTHKEY      Tailscale auth key. Generate at
+#                   login.tailscale.com/admin/settings/keys -- make it
+#                   *ephemeral: no*, *reusable: no*, and it may expire after use.
+#   KOTAK_KEY       ALGO_KOTAK_CONSUMER_KEY. This is the read-only market-data
+#                   credential. Quotes authenticate on it alone, so no TOTP seed
+#                   and no MPIN belong on this machine -- those place orders.
+#   RELAY_TOKEN     Same value as state/relay_token.txt on the PC, so the phone
+#                   does not need a second token.
+#
+# These land in the instance metadata, which is readable from inside the
+# instance. That is acceptable for a quote key and a price token; it would not be
+# acceptable for order-placement credentials, which is why none are here.
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - git
+  - python3-venv
+  - python3-dev
+  - build-essential
+  - curl
+  - iptables-persistent
+
+write_files:
+  # Only the market-data credential. Mode 0600.
+  - path: /etc/gold-relay.env
+    permissions: '0600'
+    owner: root:root
+    content: |
+      ALGO_KOTAK_CONSUMER_KEY=REPLACE_ME_KOTAK_CONSUMER_KEY
+
+  - path: /etc/systemd/system/gold-relay.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Gold price relay (XAUUSD + GOLDM)
+      After=network-online.target tailscaled.service
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      EnvironmentFile=/etc/gold-relay.env
+      WorkingDirectory=/opt/algo
+
+      # Bound to all interfaces, but only reachable over Tailscale: the firewall
+      # rules below accept 8787 on tailscale0 and nowhere else, and Oracle's own
+      # security list is left closed. Binding 127.0.0.1 would not work here --
+      # Tailscale delivers to the tailscale0 address, not loopback.
+      ExecStart=/opt/algo/.venv/bin/python /opt/algo/scripts/price_publisher.py \
+          --serve --host 0.0.0.0 --port 8787 --loop 2 \
+          --token REPLACE_ME_RELAY_TOKEN \
+          --out /var/lib/gold-relay/prices.json \
+          --session /var/lib/gold-relay/spot_session.json \
+          --master /var/lib/gold-relay/kotak_master.json
+
+      StateDirectory=gold-relay
+      Restart=always
+      RestartSec=10
+
+      NoNewPrivileges=yes
+      PrivateTmp=yes
+      ProtectSystem=strict
+      ProtectHome=yes
+      ProtectKernelTunables=yes
+      ProtectKernelModules=yes
+      ProtectControlGroups=yes
+      RestrictNamespaces=yes
+      LockPersonality=yes
+
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /opt/bootstrap-relay.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+
+      git clone --depth 1 https://github.com/AdiTheCoder00/algo-trading.git /opt/algo
+      cd /opt/algo
+      python3 -m venv .venv
+      .venv/bin/pip install --upgrade pip wheel
+      # kotakneoapi provides neo_api_client and python-dotenv loads the env file;
+      # neither is declared in pyproject.toml, so both are named explicitly.
+      .venv/bin/pip install -e .
+      .venv/bin/pip install kotakneoapi python-dotenv
+
+      # Tailscale. --ssh lets you reach this box over the tailnet without ever
+      # opening port 22 to the internet.
+      curl -fsSL https://tailscale.com/install.sh | sh
+      tailscale up \
+        --authkey=REPLACE_ME_TAILSCALE_AUTHKEY \
+        --hostname=gold-relay \
+        --ssh
+
+      # Oracle's Ubuntu images ship a default-DROP INPUT chain. Accept the relay
+      # port on the Tailscale interface only; the public interface stays closed,
+      # so there is nothing to find from the internet.
+      iptables -I INPUT -i tailscale0 -p tcp --dport 8787 -j ACCEPT || true
+      netfilter-persistent save || true
+
+      systemctl daemon-reload
+      systemctl enable --now gold-relay
+
+runcmd:
+  - [ bash, /opt/bootstrap-relay.sh ]
+
+final_message: "gold-relay bootstrap finished after $UPTIME seconds"
