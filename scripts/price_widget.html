@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b0d">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Gold</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230b0b0d'/><text y='72' x='50' font-size='62' text-anchor='middle' fill='%23e8b53a' font-family='system-ui' font-weight='700'>Au</text></svg>">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  :root{
+    --bg:#0b0b0d; --card:#141418; --line:#26262c;
+    --fg:#f5f5f7; --dim:#8a8a94;
+    --up:#2fbf71; --down:#f0554b; --gold:#e8b53a;
+  }
+  html,body{height:100%}
+  body{
+    background:var(--bg); color:var(--fg);
+    font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    padding:max(14px,env(safe-area-inset-top)) 14px max(14px,env(safe-area-inset-bottom));
+    display:flex; flex-direction:column; gap:12px;
+    overscroll-behavior:none; -webkit-user-select:none; user-select:none;
+  }
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:20px;
+    padding:20px 22px; flex:1;
+    display:flex; flex-direction:column; justify-content:center; gap:6px;
+    position:relative; overflow:hidden;
+  }
+  .card.stale{opacity:.42}
+  .row{display:flex; align-items:baseline; justify-content:space-between; gap:10px}
+  .sym{
+    font-size:15px; font-weight:700; letter-spacing:.14em;
+    color:var(--dim); text-transform:uppercase;
+  }
+  .sub{font-size:12px; color:var(--dim); letter-spacing:.02em}
+  .price{
+    font-size:clamp(46px,17vw,104px); font-weight:800; line-height:1.02;
+    font-variant-numeric:tabular-nums; letter-spacing:-.03em;
+    transition:color .25s ease;
+  }
+  .chg{font-size:clamp(17px,5.2vw,26px); font-weight:700; font-variant-numeric:tabular-nums}
+  .up{color:var(--up)} .down{color:var(--down)} .flat{color:var(--dim)}
+  .tick{animation:flash .55s ease}
+  @keyframes flash{0%{color:var(--gold)}100%{}}
+  .meta{
+    display:flex; justify-content:space-between; align-items:center;
+    font-size:11.5px; color:var(--dim); letter-spacing:.02em;
+  }
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--up);display:inline-block;margin-right:6px}
+  .dot.bad{background:var(--down)}
+  .badge{
+    position:absolute; top:14px; right:16px; font-size:10px; font-weight:700;
+    letter-spacing:.1em; color:var(--down); border:1px solid var(--down);
+    padding:3px 7px; border-radius:99px; display:none;
+  }
+  .card.stale .badge{display:block}
+  footer{display:flex;justify-content:space-between;font-size:11px;color:var(--dim);padding:0 4px}
+  a{color:var(--dim)}
+</style>
+</head>
+<body>
+
+<div class="card" id="c-xau">
+  <div class="badge">STALE</div>
+  <div class="row"><span class="sym">XAU / USD</span><span class="sub" id="xau-src">—</span></div>
+  <div class="price" id="xau-px">····</div>
+  <div class="row">
+    <span class="chg flat" id="xau-chg">—</span>
+    <span class="sub" id="xau-range">—</span>
+  </div>
+</div>
+
+<div class="card" id="c-gm">
+  <div class="badge">STALE</div>
+  <div class="row"><span class="sym">GOLDM · MCX</span><span class="sub" id="gm-sym">—</span></div>
+  <div class="price" id="gm-px">····</div>
+  <div class="row">
+    <span class="chg flat" id="gm-chg">—</span>
+    <span class="sub" id="gm-oi">—</span>
+  </div>
+</div>
+
+<footer>
+  <span><span class="dot" id="dot"></span><span id="status">connecting</span></span>
+  <span id="clock">—</span>
+</footer>
+
+<script>
+// Poll interval in ms. Kept modest because the page only refreshes while it is
+// actually on screen -- the visibilitychange handler below stops the timer when
+// it is backgrounded, so this is not a battery drain when you are not looking.
+const INTERVAL = 5000;
+
+const $ = id => document.getElementById(id);
+const prev = {xau:null, gm:null};
+
+const nfUSD = new Intl.NumberFormat('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const nfINR = new Intl.NumberFormat('en-IN',{maximumFractionDigits:0});
+
+function paintChange(el, abs, pct, digits){
+  if(pct === null || pct === undefined){ el.textContent='—'; el.className='chg flat'; return; }
+  const sign = pct > 0 ? '+' : '';
+  const a = (abs === null || abs === undefined)
+    ? '' : `${sign}${new Intl.NumberFormat('en-IN',{maximumFractionDigits:digits}).format(abs)}  `;
+  el.textContent = `${a}${sign}${pct.toFixed(2)}%`;
+  el.className = 'chg ' + (pct > 0 ? 'up' : pct < 0 ? 'down' : 'flat');
+}
+
+function flash(el, key, value){
+  if(prev[key] !== null && prev[key] !== value){
+    el.classList.remove('tick'); void el.offsetWidth; el.classList.add('tick');
+  }
+  prev[key] = value;
+}
+
+async function tick(){
+  try{
+    // Carry the ?k= token (if the server was started with one) onto the data
+    // request, since the page itself was loaded with it.
+    const k = new URLSearchParams(location.search).get('k');
+    const url = 'prices.json?t=' + Date.now() + (k ? '&k=' + encodeURIComponent(k) : '');
+    const r = await fetch(url, {cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+
+    // ---- XAUUSD
+    const x = d.xauusd || {};
+    $('c-xau').classList.toggle('stale', !!x.stale || x.price == null);
+    if(x.price != null){
+      $('xau-px').textContent = '$' + nfUSD.format(x.price);
+      flash($('xau-px'),'xau',x.price);
+    }
+    paintChange($('xau-chg'), null, x.per_change, 2);
+    $('xau-src').textContent = (x.source || '').split(' ')[0];
+    // The range comes from COMEX front-month, the price from spot. COMEX carries
+    // a basis of tens of dollars, so spot routinely sits outside this range --
+    // it is prefixed CMX rather than shown bare, which would read as a bug.
+    $('xau-range').textContent = (x.day_low != null && x.day_high != null)
+      ? `CMX ${nfUSD.format(x.day_low)}–${nfUSD.format(x.day_high)}` : '';
+
+    // ---- GOLDM
+    const g = d.goldm || {};
+    $('c-gm').classList.toggle('stale', !!g.stale || g.price == null);
+    if(g.price != null){
+      $('gm-px').textContent = '₹' + nfINR.format(g.price);
+      flash($('gm-px'),'gm',g.price);
+    }
+    paintChange($('gm-chg'), g.change, g.per_change, 0);
+    $('gm-sym').textContent = g.tradingsymbol || '';
+    $('gm-oi').textContent = g.open_interest ? 'OI ' + nfINR.format(g.open_interest) : '';
+
+    const age = d.age_seconds;
+    $('dot').className = 'dot' + (age != null && age > 150 ? ' bad' : '');
+    $('status').textContent = d.generated_at_ist ? 'updated ' + d.generated_at_ist.slice(11) : 'live';
+  }catch(e){
+    $('dot').className = 'dot bad';
+    $('status').textContent = 'no feed — ' + e.message;
+  }
+  $('clock').textContent = new Date().toLocaleTimeString('en-IN',{hour12:false});
+}
+
+let timer = null;
+function start(){ if(!timer){ tick(); timer = setInterval(tick, INTERVAL); } }
+function stop(){ clearInterval(timer); timer = null; }
+document.addEventListener('visibilitychange', () => document.hidden ? stop() : start());
+start();
+</script>
+</body>
+</html>
