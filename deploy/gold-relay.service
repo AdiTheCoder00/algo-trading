@@ -1,0 +1,57 @@
+[Unit]
+Description=Gold price relay (XAUUSD + GOLDM) for the phone widget
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Only the read-only market-data credential lives here. Kotak's quote endpoint
+# authenticates on the consumer key alone, so no TOTP seed or MPIN is needed --
+# and those, being order-placement credentials, must never reach a public VM.
+# Mode 0600, owned by the service user.
+EnvironmentFile=/etc/gold-relay.env
+
+WorkingDirectory=/opt/algo
+
+# Bound to loopback on purpose: put Caddy or Tailscale in front rather than
+# exposing plain HTTP to the internet. Change to 0.0.0.0 only on a private
+# network. Replace the token before first start.
+ExecStart=/opt/algo/.venv/bin/python /opt/algo/scripts/price_publisher.py \
+    --serve \
+    --host 127.0.0.1 \
+    --port 8787 \
+    --loop 2 \
+    --token CHANGE_ME \
+    --out /var/lib/gold-relay/prices.json \
+    --session /var/lib/gold-relay/spot_session.json \
+    --master /var/lib/gold-relay/kotak_master.json
+
+# The spot session file accumulates open/high/low and previous close, so it must
+# survive restarts -- StateDirectory gives /var/lib/gold-relay with the right
+# ownership and keeps it across redeploys.
+StateDirectory=gold-relay
+
+Restart=always
+RestartSec=10
+
+# A price relay needs no privileges at all.
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
