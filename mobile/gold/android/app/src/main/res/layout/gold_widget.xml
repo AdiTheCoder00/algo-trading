@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  RemoteViews supports only a fixed set of widgets, so this is plain nested
+  LinearLayout rather than ConstraintLayout, which keeps it working back to the
+  app's minSdk of 24 instead of requiring API 31.
+
+  The price fields auto-size. A fixed sp value can only ever be right for one
+  widget size, and the user resizes these freely; uniform auto-sizing lets the
+  numerals grow to fill whatever cell they are given and shrink rather than
+  clip on a small one. Auto-sizing needs a bounded height to solve against,
+  which is why each price is 0dp with a layout_weight rather than wrap_content.
+
+  android:textSize stays as the fallback: auto-size attributes are honoured from
+  API 26, and this app supports 24.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/body"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@drawable/widget_bg"
+    android:padding="12dp">
+
+    <!-- XAU/USD -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:baselineAligned="true">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="XAU / USD"
+                android:textColor="#8A8A94"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:maxLines="1"
+                android:letterSpacing="0.12" />
+            <TextView
+                android:id="@+id/xau_chg"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="—"
+                android:textColor="#8A8A94"
+                android:textSize="15sp"
+                android:maxLines="1"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/xau_price"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:gravity="center_vertical|start"
+            android:text="····"
+            android:textColor="#F5F5F7"
+            android:textSize="40sp"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:includeFontPadding="false"
+            android:autoSizeTextType="uniform"
+            android:autoSizeMinTextSize="18sp"
+            android:autoSizeMaxTextSize="64sp"
+            android:autoSizeStepGranularity="1sp" />
+    </LinearLayout>
+
+    <!-- GOLDM -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:layout_marginTop="2dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:baselineAligned="true">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="GOLDM"
+                android:textColor="#8A8A94"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:maxLines="1"
+                android:letterSpacing="0.12" />
+            <TextView
+                android:id="@+id/gm_chg"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="—"
+                android:textColor="#8A8A94"
+                android:textSize="15sp"
+                android:maxLines="1"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/gm_price"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:gravity="center_vertical|start"
+            android:text="····"
+            android:textColor="#F5F5F7"
+            android:textSize="40sp"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:includeFontPadding="false"
+            android:autoSizeTextType="uniform"
+            android:autoSizeMinTextSize="18sp"
+            android:autoSizeMaxTextSize="64sp"
+            android:autoSizeStepGranularity="1sp" />
+    </LinearLayout>
+
+    <!-- Tap target for an immediate refresh. -->
+    <TextView
+        android:id="@+id/footer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="tap to refresh"
+        android:textColor="#8A8A94"
+        android:textSize="10sp"
+        android:paddingTop="4dp"
+        android:maxLines="1" />
+</LinearLayout>

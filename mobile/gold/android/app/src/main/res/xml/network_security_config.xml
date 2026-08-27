@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The relay runs on the LAN over plain HTTP, so cleartext has to be permitted or
+  every GOLDM fetch fails on Android 9+. Android's network-security-config cannot
+  express "private ranges only" (domain-config takes hostnames, not CIDR), and the
+  relay address is user-configurable, so the base config has to allow it.
+
+  The public leg is then pinned back down explicitly: gold-api.com is HTTPS-only,
+  so the one request that leaves the local network can never silently downgrade to
+  cleartext. That is the half worth protecting.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">gold-api.com</domain>
+    </domain-config>
+</network-security-config>

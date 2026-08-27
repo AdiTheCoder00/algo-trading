@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  updatePeriodMillis is 30 minutes because that is Android's floor – shorter
+  values are silently clamped, so asking for 60000 would be a lie in the manifest.
+  The footer tap covers the gap when a number is needed right now.
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="180dp"
+    android:minHeight="110dp"
+    android:targetCellWidth="3"
+    android:targetCellHeight="2"
+    android:updatePeriodMillis="1800000"
+    android:initialLayout="@layout/gold_widget"
+    android:previewLayout="@layout/gold_widget"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen" />
