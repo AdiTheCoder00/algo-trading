@@ -47,3 +47,5 @@ next-env.d.ts
 .idea/
 Thumbs.db
 desktop.ini
+tools/*/state.json
+tools/*/*.csv

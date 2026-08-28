@@ -1,0 +1,9 @@
+# MACD -> Telegram crossover monitor
+ccxt>=4.2.0
+pandas>=2.0.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Windows ships no IANA timezone database; needed only if DISPLAY_TIMEZONE is
+# something other than UTC.
+tzdata>=2024.1; sys_platform == "win32"
