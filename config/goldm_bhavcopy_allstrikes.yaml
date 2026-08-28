@@ -45,7 +45,7 @@ data:
   quality:
     reject_crossed_quotes: true
     reject_empty_book: true
-    max_stale_seconds: 10.0
+    max_stale_seconds: 120.0 # the live chain snapshot freshness bound (D-115)
 
 risk:
   starting_equity: "1000000.00"

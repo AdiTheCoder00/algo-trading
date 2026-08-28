@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 
 from algo.config.loader import config_hash, load_config
 from algo.config.modes import LIVE_FLAG, resolve_mode
+from algo.config.runsettings import RunSettings
 from algo.core.bar import Timeframe
 from algo.core.enums import Mode
 from algo.core.errors import DomainError
@@ -1385,42 +1386,25 @@ def backtest_bhavcopy(
         typer.echo("no usable sessions - nothing to run")
         raise typer.Exit(code=1)
 
+    # One resolution for both paths (D-118). The old shape read fifteen settings
+    # in the `if` and repeated their defaults in the `else`, which is how a name
+    # bound on one branch and not the other reached production.
     if config is not None:
-        from algo.config.loader import load_config as resolve
-
-        cfg = resolve(config)
+        cfg = load_config(config)
+        settings = RunSettings.from_config(cfg)
         strategy = _strangle_from_config(cfg, symbol)
-        starting_equity = cfg.risk.starting_equity
-        lots = cfg.risk.sizing.fixed_lots
-        max_lots = cfg.risk.caps.max_lots_per_underlying
-        margin_cap_pct = cfg.risk.caps.max_total_margin_pct
-        kill_switch = KillSwitch(
-            daily_loss_limit_pct=cfg.risk.kill_switch.daily_loss_limit_pct,
-            max_consecutive_losses=cfg.risk.kill_switch.max_consecutive_losses,
-            max_drawdown_pct=cfg.risk.kill_switch.max_drawdown_pct,
+        typer.echo(
+            f"config         {config} ({settings.lots} lot(s), equity "
+            f"{settings.starting_equity})"
         )
-        flatten_on_trip = cfg.risk.kill_switch.flatten_on_trip
-        force_exit = cfg.risk.devolvement.force_exit_sessions_before_expiry
-        block_within = cfg.risk.devolvement.block_new_entries_within_dte
-        stop_viability = cfg.strategy.exit.min_stop_to_cost_ratio
-        on_breach = cfg.strategy.exit.on_stop_viability_breach
-        typer.echo(f"config         {config} ({lots} lot(s), equity {starting_equity})")
     else:
+        settings = RunSettings.defaults()
         strategy = DeltaStrangle(underlying=symbol)
-        starting_equity = Decimal("1000000.00")
-        lots = 1
-        max_lots = 5
-        margin_cap_pct = Decimal("50")
-        flatten_on_trip = False
-        kill_switch = KillSwitch(
-            daily_loss_limit_pct=Decimal("2"),
-            max_consecutive_losses=3,
-            max_drawdown_pct=Decimal("10"),
-        )
-        force_exit = 1
-        block_within = 2
-        stop_viability = None
-        on_breach = "warn"
+    kill_switch = KillSwitch(
+        daily_loss_limit_pct=settings.daily_loss_limit_pct,
+        max_consecutive_losses=settings.max_consecutive_losses,
+        max_drawdown_pct=settings.max_drawdown_pct,
+    )
 
     store: StateStore | None = None
     if state is not None:
@@ -1438,18 +1422,18 @@ def backtest_bhavcopy(
             specs=ContractSpecStore.default(),
             strategy=strategy,
             risk=RiskEngine(
-                sizer=FixedLotSizer(lots),
+                sizer=FixedLotSizer(settings.lots),
                 spec_for=None,
                 max_concurrent_positions=2,  # a strangle is two positions
-                max_lots_per_underlying=max_lots,
-                margin_cap_pct=margin_cap_pct,
+                max_lots_per_underlying=settings.max_lots_per_underlying,
+                margin_cap_pct=settings.margin_cap_pct,
             ),
             simulator=FillSimulator(
                 spread=FixedTickSpread(spread_ticks),
                 slippage=TickSlippage(market_ticks=0, stop_ticks=2),
                 charges=McxChargeModel.default(),
             ),
-            portfolio=Portfolio(starting_equity),
+            portfolio=Portfolio(settings.starting_equity),
             instrument=dataset.instrument,
             timeframe=Timeframe(minutes=30),
             is_option=True,
@@ -1458,17 +1442,17 @@ def backtest_bhavcopy(
             expiries=dataset.expiries,
             devolvement=DevolvementGuard(
                 calendar=calendar,
-                force_exit_sessions_before_expiry=force_exit,
-                block_new_entries_within_dte=block_within,
+                force_exit_sessions_before_expiry=settings.force_exit_sessions_before_expiry,
+                block_new_entries_within_dte=settings.block_new_entries_within_dte,
             ),
             kill_switch=kill_switch,
-            flatten_on_trip=flatten_on_trip,
+            flatten_on_trip=settings.flatten_on_trip,
             margin=SpanApproxMargin(),
             state=store,
             mode="backtest",
             broker="backtest",
-            stop_viability_threshold=stop_viability,
-            on_stop_viability_breach=on_breach,
+            stop_viability_threshold=settings.stop_viability_threshold,
+            on_stop_viability_breach=settings.on_stop_viability_breach,
         )
         result = engine.run()
     finally:
@@ -1661,42 +1645,25 @@ def backtest_smartapi(
         typer.echo("no usable chain snapshots - nothing to run")
         raise typer.Exit(code=1)
 
+    # One resolution for both paths (D-118). The old shape read fifteen settings
+    # in the `if` and repeated their defaults in the `else`, which is how a name
+    # bound on one branch and not the other reached production.
     if config is not None:
-        from algo.config.loader import load_config as resolve
-
-        cfg = resolve(config)
+        cfg = load_config(config)
+        settings = RunSettings.from_config(cfg)
         strategy = _strangle_from_config(cfg, symbol)
-        starting_equity = cfg.risk.starting_equity
-        lots = cfg.risk.sizing.fixed_lots
-        max_lots = cfg.risk.caps.max_lots_per_underlying
-        margin_cap_pct = cfg.risk.caps.max_total_margin_pct
-        kill_switch = KillSwitch(
-            daily_loss_limit_pct=cfg.risk.kill_switch.daily_loss_limit_pct,
-            max_consecutive_losses=cfg.risk.kill_switch.max_consecutive_losses,
-            max_drawdown_pct=cfg.risk.kill_switch.max_drawdown_pct,
+        typer.echo(
+            f"config         {config} ({settings.lots} lot(s), equity "
+            f"{settings.starting_equity})"
         )
-        flatten_on_trip = cfg.risk.kill_switch.flatten_on_trip
-        force_exit = cfg.risk.devolvement.force_exit_sessions_before_expiry
-        block_within = cfg.risk.devolvement.block_new_entries_within_dte
-        stop_viability = cfg.strategy.exit.min_stop_to_cost_ratio
-        on_breach = cfg.strategy.exit.on_stop_viability_breach
-        typer.echo(f"config         {config} ({lots} lot(s), equity {starting_equity})")
     else:
+        settings = RunSettings.defaults()
         strategy = DeltaStrangle(underlying=symbol)
-        starting_equity = Decimal("1000000.00")
-        lots = 1
-        max_lots = 5
-        margin_cap_pct = Decimal("50")
-        flatten_on_trip = False
-        kill_switch = KillSwitch(
-            daily_loss_limit_pct=Decimal("2"),
-            max_consecutive_losses=3,
-            max_drawdown_pct=Decimal("10"),
-        )
-        force_exit = 1
-        block_within = 2
-        stop_viability = None
-        on_breach = "warn"
+    kill_switch = KillSwitch(
+        daily_loss_limit_pct=settings.daily_loss_limit_pct,
+        max_consecutive_losses=settings.max_consecutive_losses,
+        max_drawdown_pct=settings.max_drawdown_pct,
+    )
 
     store: StateStore | None = None
     if state is not None:
@@ -1714,18 +1681,18 @@ def backtest_smartapi(
             specs=ContractSpecStore.default(),
             strategy=strategy,
             risk=RiskEngine(
-                sizer=FixedLotSizer(lots),
+                sizer=FixedLotSizer(settings.lots),
                 spec_for=None,
                 max_concurrent_positions=2,  # a strangle is two positions
-                max_lots_per_underlying=max_lots,
-                margin_cap_pct=margin_cap_pct,
+                max_lots_per_underlying=settings.max_lots_per_underlying,
+                margin_cap_pct=settings.margin_cap_pct,
             ),
             simulator=FillSimulator(
                 spread=FixedTickSpread(2),
                 slippage=TickSlippage(market_ticks=0, stop_ticks=2),
                 charges=McxChargeModel.default(),
             ),
-            portfolio=Portfolio(starting_equity),
+            portfolio=Portfolio(settings.starting_equity),
             instrument=dataset.instrument,
             timeframe=Timeframe(minutes=30),
             is_option=True,
@@ -1734,17 +1701,17 @@ def backtest_smartapi(
             expiries=dataset.expiries,
             devolvement=DevolvementGuard(
                 calendar=calendar,
-                force_exit_sessions_before_expiry=force_exit,
-                block_new_entries_within_dte=block_within,
+                force_exit_sessions_before_expiry=settings.force_exit_sessions_before_expiry,
+                block_new_entries_within_dte=settings.block_new_entries_within_dte,
             ),
             kill_switch=kill_switch,
-            flatten_on_trip=flatten_on_trip,
+            flatten_on_trip=settings.flatten_on_trip,
             margin=SpanApproxMargin(),
             state=store,
             mode="backtest",
             broker="backtest",
-            stop_viability_threshold=stop_viability,
-            on_stop_viability_breach=on_breach,
+            stop_viability_threshold=settings.stop_viability_threshold,
+            on_stop_viability_breach=settings.on_stop_viability_breach,
         )
         result = engine.run()
     finally:

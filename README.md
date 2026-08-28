@@ -4,14 +4,26 @@ An event-driven trading system for a short strangle on **MCX GOLDM options** —
 ~0.25-delta call and one ~0.25-delta put, one cycle per monthly expiry, traded through
 Angel One.
 
-**Status: Milestones 1-8 complete, except the chain recorder (M1.5) and the Angel One
-adapter (M7).** Domain models, configuration, the MCX calendar, feeds and resampler, the
-look-ahead guarantees, option pricing, the backtest engine and cost model, the strangle
-strategy and full risk layer, walk-forward analysis, the paper adapter with reconciliation
-and crash recovery, and the monitoring dashboard are all built and tested.
+**Status: Milestones 1-8 complete, except the chain recorder (M1.5).** Domain models,
+configuration, the MCX calendar, feeds and resampler, the look-ahead guarantees, option
+pricing, the backtest engine and cost model, the strangle strategy and full risk layer,
+walk-forward analysis, the broker adapters with reconciliation and crash recovery, the
+paper trading loop, and the monitoring dashboard are all built and tested.
 
-**Nothing has been connected to a real broker, and no real market data has been recorded.**
-Every number the system can currently produce comes from generated data.
+**It has been connected to the real broker, and it has run on real market data — and
+neither result should be read as more than it is.**
+
+- The Kotak Neo and Angel SmartAPI sessions connect and reconcile cleanly. Doing that
+  for the first time found three bugs in code that had passing tests (D-113). The
+  paper loop has **not** yet traded a live session; it has only run outside market
+  hours.
+- A real backtest ran over 82,020 MCX bhavcopy rows, six GOLDM cycles, Jan-Jun 2026.
+  **Its P&L is not a usable estimate of edge**: exits fill at the next bar, and with
+  two bars a day the median overnight gap (~₹5,950/lot) is larger than the take-profit
+  target it is chasing (~₹4,533). It tells you the shape works, not what it earns
+  (D-108).
+
+Everything else the system produces still comes from generated data.
 
 Live trading is off by default and cannot be reached by accident. See [Modes](#modes).
 
@@ -100,19 +112,27 @@ and check it before trusting anything built on it:
 ```
 
 That either parses cleanly and reports coverage, or prints the columns your file
-actually has next to the ones the loader expected. **The column mapping is an
-unverified assumption** - MCX serves the file through a browser flow behind bot
-protection, so no sample could be fetched to confirm the headers. Correcting it means
-passing a `BhavcopyColumns`, not editing the parser.
+actually has next to each layout the loader tried. Correcting it means passing a
+`BhavcopyColumns`, not editing the parser.
+
+**Two things worth knowing about the file itself** (D-105). The "commodity wise"
+export arrives with an `.xls` extension and is neither Excel nor CSV — it is an HTML
+`<table>` — so the loader sniffs content rather than trusting the name. And its column
+layout is now **verified against a real file**; the blind guess got 10 of 12 headers
+right, missing only the unit suffixes on `Volume(Lots)` and `Open Interest(Lots)`. The
+older `MCX_DEFAULT_COLUMNS` mapping stays as a fallback and stays labelled unverified,
+because the plain CSV bhavcopy has still never been seen.
 
 Coverage matters as much as the schema:
 
+Real output, from the archive this project actually ran against:
+
 ```
-GOLDM: 78 option rows over 3 sessions
-  span     2026-08-18 .. 2026-08-20
-  cycles   1 expiries
-  traded   60 rows had volume (76.9% of the ladder)
-  breadth  20.0 strikes traded per session on average
+GOLDM: 82,020 option rows over 140 sessions
+  span     2026-01-01 .. 2026-07-29
+  cycles   7 expiries
+  traded   16,685 rows had volume (20.3% of the ladder)
+  breadth  119.2 strikes traded per session on average
 ```
 
 A hundred cycles of history is only worth having if the strikes the strategy wants
@@ -201,7 +221,7 @@ the engine acts on it at its next bar, so the UI says "halt requested", never "h
 .venv/Scripts/python.exe -m pytest
 ```
 
-469 tests. The suite includes the look-ahead canaries required by the brief: cheating
+880 tests. The suite includes the look-ahead canaries required by the brief: cheating
 strategies that try to read the next bar, reach for a dataframe, reach for the feed, or
 bolt an attribute onto the context — each must raise. It also runs the whole pipeline
 twice, once against a dataset whose future bars have been replaced with randomised
@@ -245,6 +265,7 @@ algo/
 ├── portfolio/   position book, cash, the equity identity
 ├── risk/        sizing and the caps
 ├── backtest/    the bar-by-bar event loop, and the bhavcopy-to-engine bridge
+├── live/        the trading loop, its feeds, and the polled option chain
 ├── reporting/   metrics
 ├── strategy/    Strategy contract, BarContext, the strangle, two reference strategies
 ├── persistence/ the write-ahead order journal and the dashboard state store
@@ -256,12 +277,27 @@ dashboard/       Next.js monitoring page (4 runtime dependencies, no chart libra
 ```
 
 The Kotak Neo (live broker) and Angel SmartAPI (historical bars) adapters are built
-and tested — `algo live` connects both sessions, reconciles against the broker, and
-reports; see `docs/open-questions.md` Q10/Q11 for the credentials it needs. What is
-**not** built yet: the **chain recorder (M1.5)** that would persist a live book
-continuously (`backtest-bhavcopy`, above, is the substitute until then), and the live
-trading loop itself — `algo live` proves the connection end to end but does not yet
-construct a strategy or place an order.
+and tested — `algo live` connects both sessions and reconciles against the broker; see
+`docs/open-questions.md` Q10/Q11 for the credentials it needs.
+
+**The trading loop exists and runs, in paper mode only.**
+
+```bash
+.venv/Scripts/algo.exe live config/goldm.yaml --passes 450 --poll 120 --state state/paper.db
+```
+
+`--passes` drives `LiveLoop`: real candles in, the option chain polled and greeked
+once per bar, `BacktestEngine.decide` — the *same* decision path the backtest uses,
+not a second copy — and whatever it returns routed through `OrderRouter` to the
+**paper** broker, which simulates fills with the same `FillSimulator`. Every pass is
+bounded (`--passes` is required and has no default) and the run refuses any mode but
+backtest/paper *before reading a credential*. It has connected and reconciled against
+the real broker; it has not yet traded a live session, because it has only been run
+outside market hours (D-109 through D-113).
+
+What is **not** built: routing to a real account, and the **chain recorder (M1.5)**
+that would persist a live book continuously — `backtest-bhavcopy`, above, is the
+substitute until then.
 
 ## Design notes worth knowing before reading the code
 
@@ -278,6 +314,14 @@ construct a strategy or place an order.
   `effective_from` and a `source`. Unverified values are left null rather than guessed,
   and the calendar refuses to answer for dates beyond its verified holiday range instead
   of assuming a trading day.
+
+  **That refusal is currently switched off, and the config says so.** There is no
+  sourced MCX holiday list yet, so `market.allow_unverified_calendar` is `true`
+  and the calendar knows only weekends plus the weekend sessions MCX was
+  observed to hold (D-107). `mcx_calendar` refuses to start with the flag false
+  and no `holidays_file`, so the gap cannot be closed by accident — it has to be
+  closed by supplying the list. Open as **Q20**; it matters most for the
+  devolvement deadline, which walks back trading days.
 - **Expiry dates are read, never computed.** A derived expiry rule was wrong once in this
   project already. The instrument master is authoritative; the last-Friday rule is only a
   cross-check, and a mismatch halts rather than picking a side.
