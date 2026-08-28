@@ -268,13 +268,13 @@ class _ComexAnchor:
 
 
 def fetch_xauusd(
-    session: "_SpotSession | None" = None,
+    session: _SpotSession | None = None,
     *,
     timeout: float = 10.0,
     seed_prev_close: float | None = None,
     seed_high: float | None = None,
     seed_low: float | None = None,
-    anchor: "_ComexAnchor | None" = None,
+    anchor: _ComexAnchor | None = None,
 ) -> dict[str, Any]:
     """Spot price, with change and range derived from spot's own session."""
     errors: list[str] = []
@@ -348,7 +348,9 @@ def fetch_goldm(
     now_ist = datetime.now(IST)
     if refresh_master or not master_path.exists():
         log.info("fetching Kotak instrument master", path=str(master_path))
-        master = fetch_master(KotakMasterSource(consumer_key=consumer_key), master_path, now=now_ist)
+        master = fetch_master(
+            KotakMasterSource(consumer_key=consumer_key), master_path, now=now_ist
+        )
     else:
         master = InstrumentMaster.from_snapshot(master_path)
 
@@ -369,7 +371,11 @@ def fetch_goldm(
             "error": str(payload.get("Error") or payload.get("error") or payload)[:200],
         }
     if not isinstance(payload, list):
-        return {"price": None, "stale": True, "error": f"unreadable payload: {type(payload).__name__}"}
+        return {
+            "price": None,
+            "stale": True,
+            "error": f"unreadable payload: {type(payload).__name__}",
+        }
 
     quote = _payload_for(
         [entry for entry in payload if isinstance(entry, dict)], row.symboltoken
@@ -410,11 +416,11 @@ def build_document(
     master_path: Path,
     symbol: str,
     refresh_master: bool,
-    session: "_SpotSession | None" = None,
+    session: _SpotSession | None = None,
     seed_prev_close: float | None = None,
     seed_high: float | None = None,
     seed_low: float | None = None,
-    anchor: "_ComexAnchor | None" = None,
+    anchor: _ComexAnchor | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(UTC)
     xau = fetch_xauusd(
@@ -459,7 +465,8 @@ def mark_staleness(document: dict[str, Any]) -> dict[str, Any]:
     """Re-check age at serve time, so a cached file is never served as fresh."""
     try:
         age = (
-            datetime.now(UTC) - datetime.fromisoformat(document["generated_at"].replace("Z", "+00:00"))
+            datetime.now(UTC)
+            - datetime.fromisoformat(document["generated_at"].replace("Z", "+00:00"))
         ).total_seconds()
     except (KeyError, ValueError, TypeError):
         return document
@@ -496,7 +503,7 @@ def _handler_class(out_path: Path, token: str | None) -> type[BaseHTTPRequestHan
             query = self.path.partition("?")[2]
             return f"k={token}" in query
 
-        def do_GET(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler's interface
+        def do_GET(self) -> None:
             route = self.path.split("?")[0]
             if route not in ("/", "/index.html", "/prices", "/prices.json"):
                 self._reject(404, "not found")
@@ -541,12 +548,20 @@ def _handler_class(out_path: Path, token: str | None) -> type[BaseHTTPRequestHan
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="JSON output path")
-    parser.add_argument("--master", type=Path, default=DEFAULT_MASTER, help="Kotak instrument master")
+    parser.add_argument(
+        "--master", type=Path, default=DEFAULT_MASTER, help="Kotak instrument master"
+    )
     parser.add_argument("--symbol", default="GOLDM", help="MCX underlying (default GOLDM)")
-    parser.add_argument("--refresh-master", action="store_true", help="Re-download the master first")
-    parser.add_argument("--loop", type=float, metavar="SECONDS", help="Poll forever on this interval")
+    parser.add_argument(
+        "--refresh-master", action="store_true", help="Re-download the master first"
+    )
+    parser.add_argument(
+        "--loop", type=float, metavar="SECONDS", help="Poll forever on this interval"
+    )
     parser.add_argument("--serve", action="store_true", help="Also serve the document over HTTP")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address for --serve")
     parser.add_argument("--port", type=int, default=8787, help="Bind port for --serve")
@@ -611,7 +626,11 @@ def main() -> int:
         import threading
 
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        log.info("serving", url=f"http://{args.host}:{args.port}/prices.json", token_required=bool(args.token))
+        log.info(
+            "serving",
+            url=f"http://{args.host}:{args.port}/prices.json",
+            token_required=bool(args.token),
+        )
 
     if args.loop:
         try:
