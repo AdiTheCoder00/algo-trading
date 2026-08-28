@@ -10,6 +10,7 @@ cycle it has already traded.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -25,7 +26,7 @@ SEP = date(2026, 9, 25)
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> StateStore:
+def store(tmp_path: Path) -> Iterator[StateStore]:
     with StateStore(tmp_path / "state.db") as s:
         yield s
 
