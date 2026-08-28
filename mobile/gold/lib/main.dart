@@ -267,9 +267,12 @@ class _PriceScreenState extends State<PriceScreen> with WidgetsBindingObserver {
     final lo = (x['day_low'] as num?)?.toDouble();
     final hi = (x['day_high'] as num?)?.toDouble();
     if (lo == null || hi == null) return null;
-    // Range is COMEX front-month, price is spot; the basis is tens of dollars, so
-    // spot routinely sits outside it. Prefixed, or it reads as a bug.
-    return 'CMX ${_usd(lo)}–${_usd(hi)}';
+    // Was labelled "CMX" back when the range came straight from COMEX. The
+    // publisher now tracks spot's own session high/low (see _SpotSession in
+    // price_publisher.py), so the range is the same instrument as the price --
+    // the old label would have been actively misleading, claiming a different
+    // source than what is actually shown.
+    return '${_usd(lo)}–${_usd(hi)}';
   }
 
   Future<void> _spotOnly() async {
