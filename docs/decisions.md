@@ -1578,6 +1578,67 @@ those are its business.
 
 Untested modules are down from four to none.
 
+### D-118 - Config resolution happens once, not once per command
+Three commands each carried "read these fifteen settings out of config, or use
+these defaults" - about a hundred and twenty lines of near-duplicate where every
+new risk setting had to be added in **six** places.
+
+Not a style complaint: adding `flatten_on_trip` (D-115) meant the same edit three
+times, the three `else` branches were missed, and one shipped as an
+`UnboundLocalError` a 790-test suite did not see (D-117). A shape that produces
+that bug once produces it again.
+
+`RunSettings` in `algo/config/runsettings.py` resolves both paths through one
+object, with `defaults()` **built from the schema** rather than written out a
+second time - so "the default" has exactly one definition and cannot drift from
+the reference config. It carries kill-switch *parameters* rather than a built
+`KillSwitch`, keeping config free of any dependency on the risk layer.
+
+**`backtest` was deliberately left alone.** Its no-config branch really is
+different - no margin model, no kill switch, no margin cap - because the
+Milestone 3 falsification is meant to run bare: a kill switch could halt it and a
+margin cap could refuse its trades, and either would break the arithmetic check
+it exists to perform. That divergence is intentional, and is now stated rather
+than looking like the drift the other two had.
+
+The refactor was proven behaviour-preserving the way the others were: the golden
+digest is unchanged and the six-cycle bhavcopy run still returns 22,957.40.
+
+### D-119 - The README described a system that no longer existed
+Its second paragraph read "**Nothing has been connected to a real broker, and no
+real market data has been recorded.** Every number the system can currently
+produce comes from generated data." Both halves were false: the Kotak and
+SmartAPI sessions connect and reconcile, and a backtest has run over 82,020 real
+MCX bhavcopy rows.
+
+The "What exists" section was worse - it still said the live trading loop "does
+not yet construct a strategy or place an order", which had been the single most
+important capability claim in the file and had been wrong since D-109.
+
+Corrected, and with the caveats attached rather than left for the reader to find:
+the paper loop has never traded a live session (only outside market hours), and
+the bhavcopy P&L is not an estimate of edge (D-108). Also fixed: the calendar
+paragraph claimed a verified-holiday refusal that `allow_unverified_calendar:
+true` currently switches off (Q20), the bhavcopy column mapping is no longer an
+"unverified assumption" for the layout that was checked (D-105), the coverage
+example now shows the real archive instead of a three-session sample, `algo/live/`
+was missing from the tree, and the test count was 469 against an actual 880.
+
+The same rule the config now follows applies here: a document describing a system
+that is not the one running is worse than no document, because it is trusted.
+
+### D-120 - The variant configs are pinned against drift
+`config/goldm_bhavcopy_frontcycle.yaml` and `_allstrikes.yaml` were made by
+copying `goldm.yaml`, so every later edit to the reference has to be repeated by
+hand. It had already gone wrong: `max_stale_seconds` was raised to 120 in the
+reference (D-115) and left at 10 in both variants.
+
+`tests/test_config_variants_do_not_drift.py` flattens all three and asserts each
+variant differs from the reference **only** on the settings it declares, naming
+any other divergence. A second test asserts the declared differences are actually
+different, so a stale allowance cannot quietly widen the exemption. Verified
+against the real drift before being trusted.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting
