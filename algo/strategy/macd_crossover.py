@@ -44,16 +44,27 @@ follows `CoinFlip`'s pattern instead: read the held position from the context
 (never from what the strategy itself remembers asking for — the same rule,
 D-041), close on an opposing cross, open on cost signal when flat.
 
-**No independent stop-loss or take-profit is added.** `tools/macd_telegram_alert`
-has none, and inventing one here would no longer be the same strategy the alert
-tool has been watching. That is a real, current gap — reported, not buried: on
-the measured spread and swap economics (D-121), a bad run between crossovers is
-carried to its full extent with no circuit breaker. See D-123.
+## A percentage stop-loss, added after the fact and checked first
+
+`tools/macd_telegram_alert` has none, so the first version of this strategy
+didn't either — a real, stated gap (D-123): on the measured spread and swap
+economics (D-121), a bad run between crossovers was carried to its full extent
+with no circuit breaker. `stop_loss_pct` (default 0.5) closes that. It is
+checked **before** the warmup gate and before the crossover logic, every bar a
+position is held — a held position must never go unprotected because the
+indicator that would eventually close it opposingly has not converged yet.
+
+The check uses the bar's actual low/high, not its close (`algo/strategy/
+price_stop.py`), for the reason stated there: checking only the close would
+understate how often a real broker-side stop fires, and understating a safety
+feature is the wrong direction to be optimistic in. No take-profit is added —
+that remains this strategy's stated position, unchanged.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from decimal import Decimal
 
 from algo.core.enums import Side, SignalAction
 from algo.core.errors import DomainError
@@ -64,6 +75,7 @@ from algo.core.timeutil import iso
 from algo.pricing.indicators import warmup_bars
 from algo.strategy.base import Strategy
 from algo.strategy.context import BarContext
+from algo.strategy.price_stop import stop_touched
 
 
 def _ema_step(close: float, previous: float | None, alpha: float) -> float:
@@ -83,6 +95,7 @@ class MacdCrossover(Strategy):
         fast: int = 12,
         slow: int = 26,
         signal_period: int = 9,
+        stop_loss_pct: Decimal = Decimal("0.5"),
         config_hash: str = "",
     ) -> None:
         super().__init__()
@@ -90,10 +103,13 @@ class MacdCrossover(Strategy):
             raise DomainError(
                 f"the fast period must be shorter than the slow one, got {fast} and {slow}"
             )
+        if stop_loss_pct < 0:
+            raise DomainError(f"stop_loss_pct cannot be negative, got {stop_loss_pct}")
         self._instrument = instrument
         self._fast = fast
         self._slow = slow
         self._signal_period = signal_period
+        self._stop_loss_pct = stop_loss_pct
         self._config_hash = config_hash
         self._fast_ema: float | None = None
         self._slow_ema: float | None = None
@@ -110,6 +126,7 @@ class MacdCrossover(Strategy):
             "fast": str(self._fast),
             "slow": str(self._slow),
             "signal": str(self._signal_period),
+            "stop_loss_pct": str(self._stop_loss_pct),
         }
 
     # ------------------------------------------------------------ persistence
@@ -170,7 +187,29 @@ class MacdCrossover(Strategy):
         return macd_value - self._signal_ema
 
     def on_bar(self, ctx: BarContext) -> list[Signal]:
+        # The EMAs must see every bar regardless of what follows - skipping the
+        # update during warmup or while a stop is being checked would leave
+        # them permanently behind by however many bars were skipped.
         histogram = self._update(float(ctx.bar.close))
+
+        # The stop is checked before anything else, including warmup - a held
+        # position must never go unprotected because the indicator that would
+        # have closed it opposingly has not converged yet.
+        held = ctx.positions().get(self._instrument)
+        if held is not None and not held.is_flat and stop_touched(
+            ctx.bar, held, self._stop_loss_pct
+        ):
+            closing_side = Side.SELL if held.qty > 0 else Side.BUY
+            return [
+                self._signal(
+                    ctx,
+                    SignalAction.CLOSE,
+                    closing_side,
+                    f"stop loss: {self._stop_loss_pct}% move against a "
+                    f"{held.side} position of {held.lots} lot(s), entry "
+                    f"{held.average_price:.2f}",
+                )
+            ]
 
         if self._bars_seen < self.warmup_bars():
             # Still tracked and persisted so the very first post-warmup bar has
@@ -191,7 +230,6 @@ class MacdCrossover(Strategy):
         crossed_up = previous <= 0.0 < histogram
         crossed_down = previous >= 0.0 > histogram
 
-        held = ctx.positions().get(self._instrument)
         if held is not None and not held.is_flat:
             wants_close = (held.qty > 0 and crossed_down) or (held.qty < 0 and crossed_up)
             if not wants_close:

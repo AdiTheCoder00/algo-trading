@@ -45,6 +45,20 @@ def _bar(index: int, close: str) -> Bar:
     )
 
 
+def _bar_range(index: int, *, high: str, low: str, close: str) -> Bar:
+    """A bar with a real intrabar range, for stop-touch tests - `_bar` collapses
+    high/low/close to one value, which cannot exercise an intrabar-only touch."""
+    return Bar(
+        ts=START + timedelta(minutes=5 * index),
+        timeframe=TF,
+        open=Decimal(close),
+        high=Decimal(high),
+        low=Decimal(low),
+        close=Decimal(close),
+        volume=100,
+    )
+
+
 def _ctx(bar: Bar, *, held: Position | None = None) -> BarContext:
     positions = {} if held is None else {held.instrument.key: held}
     return BarContext(
@@ -131,6 +145,7 @@ class TestConstruction:
             "fast": "12",
             "slow": "26",
             "signal": "9",
+            "stop_loss_pct": "0.5",
         }
 
     def test_warmup_matches_the_indicator_modules_formula(self) -> None:
@@ -227,7 +242,11 @@ class TestPositionIsReadFromContextNeverFromMemory:
         assert opens_while_held == [], "must never OPEN while ctx reports a held position"
 
     def test_a_short_the_context_shows_is_closed_on_a_bullish_cross(self) -> None:
-        strategy = MacdCrossover(instrument=XAUUSD)
+        """`stop_loss_pct=0` isolates crossover-driven closing: the v-shaped
+        series moves well past 0.5% before the eventual bearish->bullish cross,
+        so a default-stop strategy would close this short via the stop first,
+        which is a different mechanism than the one under test here."""
+        strategy = MacdCrossover(instrument=XAUUSD, stop_loss_pct=Decimal("0"))
         held = _short()
 
         signals = _feed(strategy, _v_shaped_series(), held=held)
@@ -237,9 +256,10 @@ class TestPositionIsReadFromContextNeverFromMemory:
         assert all(s.legs[0].direction is Side.BUY for s in closes), (
             "closing a short is a BUY leg"
         )
+        assert all("stop loss" not in s.reason for s in closes)
 
     def test_a_long_the_context_shows_is_closed_on_a_bearish_cross(self) -> None:
-        strategy = MacdCrossover(instrument=XAUUSD)
+        strategy = MacdCrossover(instrument=XAUUSD, stop_loss_pct=Decimal("0"))
         held = _long()
 
         signals = _feed(strategy, _inverted_v_series(), held=held)
@@ -249,6 +269,7 @@ class TestPositionIsReadFromContextNeverFromMemory:
         assert all(s.legs[0].direction is Side.SELL for s in closes), (
             "closing a long is a SELL leg"
         )
+        assert all("stop loss" not in s.reason for s in closes)
 
     def test_a_long_survives_a_same_direction_signal(self) -> None:
         """No signal action should fire while the position already agrees with
@@ -320,6 +341,106 @@ class TestRestartPersistence:
         for _ in range(50):
             x = rng.uniform(-9999, 9999)
             assert float(repr(x)) == x
+
+
+class TestStopLoss:
+    """0.5% by default, checked against the bar's actual range - not its close -
+    before anything else, including warmup. See `algo/strategy/price_stop.py`
+    for why intrabar range matters and `algo/strategy/macd_crossover.py`'s
+    docstring for why the ordering does.
+    """
+
+    def test_a_negative_stop_is_refused(self) -> None:
+        with pytest.raises(DomainError, match="cannot be negative"):
+            MacdCrossover(instrument=XAUUSD, stop_loss_pct=Decimal("-0.1"))
+
+    def test_zero_disables_it(self) -> None:
+        """The escape hatch: an adverse move far past 0.5%, on the strategy's
+        own default-off `stop_loss_pct=0`, must not close anything on its own -
+        only a crossover may."""
+        strategy = MacdCrossover(instrument=XAUUSD, stop_loss_pct=Decimal("0"))
+        held = _long()
+        bar = _bar_range(0, high="4400.00", low="4000.00", close="4400.00")
+
+        signal = strategy.on_bar(_ctx(bar, held=held))
+
+        assert signal == []
+
+    def test_a_long_closes_when_the_bars_low_touches_the_level(self) -> None:
+        """0.5% below a 4400 entry is 4378.00 - the bar's low reaching it must
+        close the position even though nothing about a crossover has fired."""
+        strategy = MacdCrossover(instrument=XAUUSD)
+        held = _long()
+        bar = _bar_range(0, high="4400.00", low="4378.00", close="4400.00")
+
+        signal = strategy.on_bar(_ctx(bar, held=held))
+
+        assert len(signal) == 1
+        assert signal[0].action is SignalAction.CLOSE
+        assert signal[0].legs[0].direction is Side.SELL
+
+    def test_a_short_closes_when_the_bars_high_touches_the_level(self) -> None:
+        """0.5% above a 4400 entry is 4422.00."""
+        strategy = MacdCrossover(instrument=XAUUSD)
+        held = _short()
+        bar = _bar_range(0, high="4422.00", low="4400.00", close="4400.00")
+
+        signal = strategy.on_bar(_ctx(bar, held=held))
+
+        assert len(signal) == 1
+        assert signal[0].action is SignalAction.CLOSE
+        assert signal[0].legs[0].direction is Side.BUY
+
+    def test_the_close_alone_not_reaching_the_level_still_closes_on_the_touch(
+        self,
+    ) -> None:
+        """The whole point of checking the range: a bar can spike through the
+        stop and recover before it closes. A close-only check would miss this
+        entirely, understating how often a real stop fires."""
+        strategy = MacdCrossover(instrument=XAUUSD)
+        held = _long()
+        # Close (4390) alone is nowhere near the 4378 level; the low is.
+        bar = _bar_range(0, high="4400.00", low="4370.00", close="4390.00")
+
+        signal = strategy.on_bar(_ctx(bar, held=held))
+
+        assert len(signal) == 1
+        assert signal[0].action is SignalAction.CLOSE
+
+    def test_staying_inside_the_level_does_not_close(self) -> None:
+        strategy = MacdCrossover(instrument=XAUUSD)
+        held = _long()
+        bar = _bar_range(0, high="4400.00", low="4379.00", close="4390.00")
+
+        assert strategy.on_bar(_ctx(bar, held=held)) == []
+
+    def test_it_fires_even_during_warmup(self) -> None:
+        """A held position must never go unprotected because the strategy's own
+        indicator has not converged - checked on the very first bar this
+        strategy instance ever sees, well before `warmup_bars()` bars exist."""
+        strategy = MacdCrossover(instrument=XAUUSD)
+        held = _long()
+        bar = _bar_range(0, high="4400.00", low="4378.00", close="4400.00")
+
+        signal = strategy.on_bar(_ctx(bar, held=held))
+
+        assert len(signal) == 1
+        assert signal[0].action is SignalAction.CLOSE
+
+    def test_the_reason_says_stop_loss_and_names_the_entry(self) -> None:
+        strategy = MacdCrossover(instrument=XAUUSD)
+        held = _long()
+        bar = _bar_range(0, high="4400.00", low="4378.00", close="4400.00")
+
+        signal = strategy.on_bar(_ctx(bar, held=held))
+
+        assert "stop loss" in signal[0].reason
+        assert "4400" in signal[0].reason
+
+    def test_it_is_recorded_in_params(self) -> None:
+        strategy = MacdCrossover(instrument=XAUUSD, stop_loss_pct=Decimal("1.25"))
+
+        assert strategy.params()["stop_loss_pct"] == "1.25"
 
 
 class TestSignalShape:

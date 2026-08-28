@@ -33,12 +33,23 @@ range that already contains it, which cannot be broken by definition.
 Same reasoning: a breakout is its own exit signal for the opposite side. A long
 taken on an upside breakout is closed the moment price makes a fresh
 `lookback`-bar low - the same event that would open a short if the strategy
-were flat. No independent stop-loss is added, for the same reason
-`MacdCrossover` has none: inventing one would make this a strategy nobody asked
-for. See D-123's gap statement - it applies here too.
+were flat.
+
+## A percentage stop-loss, checked before anything else
+
+Added after the fact, the same way and for the same reason as
+`MacdCrossover`'s (D-123's gap statement applied here too, until now):
+`stop_loss_pct` (default 0.5) is checked first, every bar a position is held,
+before even the warmup gate - a held position must never go unprotected
+because the channel has not been recomputed yet. Uses the bar's actual
+low/high rather than its close, via the shared `algo/strategy/price_stop.py` -
+see that module for why a close-only check would understate a real stop's own
+frequency.
 """
 
 from __future__ import annotations
+
+from decimal import Decimal
 
 from algo.core.enums import Side, SignalAction
 from algo.core.errors import DomainError
@@ -48,6 +59,7 @@ from algo.core.signal import PriceIntent, Signal, SignalLeg
 from algo.core.timeutil import iso
 from algo.strategy.base import Strategy
 from algo.strategy.context import BarContext
+from algo.strategy.price_stop import stop_touched
 
 
 class TrendlineBreakout(Strategy):
@@ -56,22 +68,52 @@ class TrendlineBreakout(Strategy):
     strategy_id = "xauusd_trendline_breakout_v1"
 
     def __init__(
-        self, *, instrument: InstrumentId, lookback: int = 20, config_hash: str = ""
+        self,
+        *,
+        instrument: InstrumentId,
+        lookback: int = 20,
+        stop_loss_pct: Decimal = Decimal("0.5"),
+        config_hash: str = "",
     ) -> None:
         super().__init__()
         if lookback < 2:
             raise DomainError(f"lookback must be at least 2, got {lookback}")
+        if stop_loss_pct < 0:
+            raise DomainError(f"stop_loss_pct cannot be negative, got {stop_loss_pct}")
         self._instrument = instrument
         self._lookback = lookback
+        self._stop_loss_pct = stop_loss_pct
         self._config_hash = config_hash
 
     def warmup_bars(self) -> int:
         return self._lookback + 1
 
     def params(self) -> dict[str, str]:
-        return {"instrument": self._instrument.key, "lookback": str(self._lookback)}
+        return {
+            "instrument": self._instrument.key,
+            "lookback": str(self._lookback),
+            "stop_loss_pct": str(self._stop_loss_pct),
+        }
 
     def on_bar(self, ctx: BarContext) -> list[Signal]:
+        # Checked before the warmup gate - a held position must never go
+        # unprotected because the channel has not been recomputed yet.
+        held = ctx.positions().get(self._instrument)
+        if held is not None and not held.is_flat and stop_touched(
+            ctx.bar, held, self._stop_loss_pct
+        ):
+            closing_side = Side.SELL if held.qty > 0 else Side.BUY
+            return [
+                self._signal(
+                    ctx,
+                    SignalAction.CLOSE,
+                    closing_side,
+                    f"stop loss: {self._stop_loss_pct}% move against a "
+                    f"{held.side} position of {held.lots} lot(s), entry "
+                    f"{held.average_price:.2f}",
+                )
+            ]
+
         if not ctx.has_history(self.warmup_bars()):
             self.note(
                 f"no entry: {len(ctx.bars)} bar(s) seen, need {self.warmup_bars()} "
@@ -89,7 +131,6 @@ class TrendlineBreakout(Strategy):
         broke_up = close > channel_high
         broke_down = close < channel_low
 
-        held = ctx.positions().get(self._instrument)
         if held is not None and not held.is_flat:
             wants_close = (held.qty > 0 and broke_down) or (held.qty < 0 and broke_up)
             if not wants_close:

@@ -47,8 +47,8 @@ next-env.d.ts
 .idea/
 Thumbs.db
 desktop.ini
-tools/*/state.json
-tools/*/watchlist.json
+tools/*/state*.json
+tools/*/watchlist*.json
 tools/*/*.csv
 tools/*/ca-bundle.pem
 tools/*/*.log

@@ -197,7 +197,13 @@ class TestPositionIsReadFromContextNeverFromMemory:
         assert opens == []
 
     def test_a_short_is_closed_by_an_upside_breakout(self) -> None:
-        strategy = TrendlineBreakout(instrument=XAUUSD, lookback=10)
+        """`stop_loss_pct=0` isolates breakout-driven closing by design, not by
+        the fixture's 20-point move happening to fall under the 0.5% default -
+        that coincidence is not something a future edit should be trusted to
+        preserve."""
+        strategy = TrendlineBreakout(
+            instrument=XAUUSD, lookback=10, stop_loss_pct=Decimal("0")
+        )
         held = _short()
 
         signals = _feed(strategy, _flat_then_breakout(10, direction="up"), held=held)
@@ -205,9 +211,12 @@ class TestPositionIsReadFromContextNeverFromMemory:
 
         assert closes
         assert closes[0].legs[0].direction is Side.BUY
+        assert "stop loss" not in closes[0].reason
 
     def test_a_long_is_closed_by_a_downside_breakout(self) -> None:
-        strategy = TrendlineBreakout(instrument=XAUUSD, lookback=10)
+        strategy = TrendlineBreakout(
+            instrument=XAUUSD, lookback=10, stop_loss_pct=Decimal("0")
+        )
         held = _long()
 
         signals = _feed(strategy, _flat_then_breakout(10, direction="down"), held=held)
@@ -215,6 +224,7 @@ class TestPositionIsReadFromContextNeverFromMemory:
 
         assert closes
         assert closes[0].legs[0].direction is Side.SELL
+        assert "stop loss" not in closes[0].reason
 
     def test_a_long_survives_a_breakout_in_its_own_direction(self) -> None:
         """The held direction agreeing with the market is not itself an event
@@ -254,6 +264,81 @@ class TestNoIncrementalStateIsNeeded:
         fresh_last = fresh.on_bar(_ctx(bars[-1], window))
 
         assert fresh_last == continuous_signals[-1]
+
+
+class TestStopLoss:
+    """0.5% by default, checked against the bar's actual range - not its close -
+    before even the warmup gate. Same mechanism, same tests as
+    `MacdCrossover`'s `TestStopLoss`, since both go through the shared
+    `algo/strategy/price_stop.py`.
+    """
+
+    def test_a_negative_stop_is_refused(self) -> None:
+        with pytest.raises(DomainError, match="cannot be negative"):
+            TrendlineBreakout(instrument=XAUUSD, stop_loss_pct=Decimal("-0.1"))
+
+    def test_zero_disables_it(self) -> None:
+        strategy = TrendlineBreakout(instrument=XAUUSD, stop_loss_pct=Decimal("0"))
+        held = _long()
+        bar = _bar(0, high="4400.00", low="4000.00", close="4400.00")
+
+        assert strategy.on_bar(_ctx(bar, BarWindow.of((bar,)), held=held)) == []
+
+    def test_a_long_closes_when_the_bars_low_touches_the_level(self) -> None:
+        strategy = TrendlineBreakout(instrument=XAUUSD)
+        held = _long()
+        bar = _bar(0, high="4400.00", low="4378.00", close="4400.00")
+
+        signal = strategy.on_bar(_ctx(bar, BarWindow.of((bar,)), held=held))
+
+        assert len(signal) == 1
+        assert signal[0].action is SignalAction.CLOSE
+        assert signal[0].legs[0].direction is Side.SELL
+
+    def test_a_short_closes_when_the_bars_high_touches_the_level(self) -> None:
+        strategy = TrendlineBreakout(instrument=XAUUSD)
+        held = _short()
+        bar = _bar(0, high="4422.00", low="4400.00", close="4400.00")
+
+        signal = strategy.on_bar(_ctx(bar, BarWindow.of((bar,)), held=held))
+
+        assert len(signal) == 1
+        assert signal[0].action is SignalAction.CLOSE
+        assert signal[0].legs[0].direction is Side.BUY
+
+    def test_a_spike_that_recovers_before_the_close_still_triggers(self) -> None:
+        strategy = TrendlineBreakout(instrument=XAUUSD)
+        held = _long()
+        bar = _bar(0, high="4400.00", low="4370.00", close="4390.00")
+
+        signal = strategy.on_bar(_ctx(bar, BarWindow.of((bar,)), held=held))
+
+        assert signal and signal[0].action is SignalAction.CLOSE
+
+    def test_it_fires_even_during_warmup(self) -> None:
+        """Before even one bar of channel history exists - the position is
+        still real and must still be protected."""
+        strategy = TrendlineBreakout(instrument=XAUUSD, lookback=20)
+        held = _long()
+        bar = _bar(0, high="4400.00", low="4378.00", close="4400.00")
+
+        signal = strategy.on_bar(_ctx(bar, BarWindow.of((bar,)), held=held))
+
+        assert signal and signal[0].action is SignalAction.CLOSE
+
+    def test_the_reason_says_stop_loss(self) -> None:
+        strategy = TrendlineBreakout(instrument=XAUUSD)
+        held = _long()
+        bar = _bar(0, high="4400.00", low="4378.00", close="4400.00")
+
+        signal = strategy.on_bar(_ctx(bar, BarWindow.of((bar,)), held=held))
+
+        assert "stop loss" in signal[0].reason
+
+    def test_it_is_recorded_in_params(self) -> None:
+        strategy = TrendlineBreakout(instrument=XAUUSD, stop_loss_pct=Decimal("1.25"))
+
+        assert strategy.params()["stop_loss_pct"] == "1.25"
 
 
 class TestSignalShape:

@@ -40,6 +40,7 @@ from algo.exchange.specs import ContractSpecStore
 from algo.strategy.base import Strategy
 from algo.strategy.context import BarContext, PositionView, SessionInfo
 from algo.strategy.macd_crossover import MacdCrossover
+from algo.strategy.price_stop import stop_fill_price
 from algo.strategy.trendline_breakout import TrendlineBreakout
 
 XAUUSD = CfdId(symbol="XAUUSD")
@@ -67,6 +68,13 @@ SWAP = SwapModel(
 )
 COMMISSION = CfdChargeModel.vantage_standard()  # verified zero on this account
 CALENDAR = ForexCalendar()
+
+#: Matches both strategies' own default. A stop-triggered close is filled at
+#: the stop level itself (or the bar's open on a gap), not `bar.close +/-
+#: spread` - see the note in `run()` below and `price_stop.py`'s own docstring
+#: for why a close-based fill would be dishonestly optimistic for exactly the
+#: signal that exists to bound a loss.
+STOP_LOSS_PCT = Decimal("0.5")
 
 
 @dataclass
@@ -234,7 +242,27 @@ def run(
 
         for signal in signals:
             leg = signal.legs[0]
-            fill_price = bar.close + (HALF_SPREAD if leg.direction is Side.BUY else -HALF_SPREAD)
+            is_stop_exit = (
+                signal.action is SignalAction.CLOSE
+                and signal.reason.startswith("stop loss")
+            )
+            if is_stop_exit and held_position is not None:
+                # A stop-triggered close fills at the stop level (or the bar's
+                # open, on a gap) - not `bar.close +/- spread`. The whole point
+                # of a stop is to bound the loss at a known level; filling it
+                # at wherever the bar happened to close would be exactly the
+                # kind of optimism `price_stop.py`'s own docstring argues
+                # against, and this is the one place in this script where the
+                # distinction has real weight. No additional spread is charged
+                # on top - `stop_fill_price` already reflects the worst of the
+                # level and the bar's open, which is the honest cost.
+                fill_price = stop_fill_price(bar, held_position, STOP_LOSS_PCT)
+                extra_spread = Decimal("0")
+            else:
+                fill_price = bar.close + (
+                    HALF_SPREAD if leg.direction is Side.BUY else -HALF_SPREAD
+                )
+                extra_spread = HALF_SPREAD * LOTS
             commission = COMMISSION.charges_for(
                 side=leg.direction, lots=LOTS, price=fill_price,
                 multiplier=Decimal("1"), is_option=False, on=current_session,
@@ -243,12 +271,12 @@ def run(
             if signal.action is SignalAction.OPEN:
                 open_trade = Trade(
                     side=leg.direction, lots=LOTS, entry_ts=bar.ts, entry_price=fill_price,
-                    spread_paid=HALF_SPREAD * LOTS, commission_paid=commission,
+                    spread_paid=extra_spread, commission_paid=commission,
                 )
             elif signal.action is SignalAction.CLOSE and open_trade is not None:
                 open_trade.exit_ts = bar.ts
                 open_trade.exit_price = fill_price
-                open_trade.spread_paid += HALF_SPREAD * LOTS
+                open_trade.spread_paid += extra_spread
                 open_trade.commission_paid += commission
                 result.trades.append(open_trade)
                 open_trade = None

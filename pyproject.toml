@@ -37,6 +37,14 @@ dev = [
     # httpx. filterwarnings=error turns that into a collection failure, so the
     # transport it actually wants is declared rather than inherited by luck.
     "httpx2",
+    # tools/macd_telegram_alert/mt5_xauusd_alert.py imports macd_alert.py's
+    # shared MACD/Telegram/state code, and that unconditionally imports ccxt
+    # at module level. The tool has its own isolated venv + requirements.txt
+    # for the crypto path, deliberately with no algo dependency; this is the
+    # other direction - the repo's venv needs ccxt only so that one sibling
+    # script (which does need algo, for MetaTrader5 bar handling) can import
+    # its neighbour without installing a second copy of pandas/requests.
+    "ccxt>=4.2.0",
 ]
 
 [project.scripts]
