@@ -69,12 +69,14 @@ SWAP = SwapModel(
 COMMISSION = CfdChargeModel.vantage_standard()  # verified zero on this account
 CALENDAR = ForexCalendar()
 
-#: Matches both strategies' own default. A stop-triggered close is filled at
-#: the stop level itself (or the bar's open on a gap), not `bar.close +/-
-#: spread` - see the note in `run()` below and `price_stop.py`'s own docstring
-#: for why a close-based fill would be dishonestly optimistic for exactly the
-#: signal that exists to bound a loss.
-STOP_LOSS_PCT = Decimal("0.5")
+#: Single source of truth, passed explicitly into both strategy factories
+#: below rather than relied on as their default - so a change here can never
+#: drift out of sync with what `stop_fill_price()` is told to use. A
+#: stop-triggered close is filled at the stop level itself (or the bar's open
+#: on a gap), not `bar.close +/- spread` - see the note in `run()` below and
+#: `price_stop.py`'s own docstring for why a close-based fill would be
+#: dishonestly optimistic for exactly the signal that exists to bound a loss.
+STOP_LOSS_PCT = Decimal("1.0")
 
 
 @dataclass
@@ -302,8 +304,10 @@ class Row:
 #: gets a fresh instance per call. `MacdCrossover` carries incremental state
 #: and must never be reused across two different bar series.
 STRATEGIES: dict[str, Callable[[], Strategy]] = {
-    "macd": lambda: MacdCrossover(instrument=XAUUSD),
-    "breakout": lambda: TrendlineBreakout(instrument=XAUUSD, lookback=20),
+    "macd": lambda: MacdCrossover(instrument=XAUUSD, stop_loss_pct=STOP_LOSS_PCT),
+    "breakout": lambda: TrendlineBreakout(
+        instrument=XAUUSD, lookback=20, stop_loss_pct=STOP_LOSS_PCT
+    ),
 }
 
 

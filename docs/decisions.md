@@ -1891,6 +1891,118 @@ its own module docstring) - a single badly-timed hold between the entry and
 the eventual opposing signal is uninsured against on either instrument, at any
 timeframe.
 
+### D-125 - A 0.5% price stop, added to both strategies, measured the same honest way
+D-123 and D-124 both flagged the same gap in their own module docstrings: neither
+strategy carried a stop-loss, so a single badly-timed hold between entry and the
+next opposing signal was uninsured against. Closed for both, via one shared,
+independently tested module (`algo/strategy/price_stop.py`) rather than two
+copies that could drift apart: `stop_touched()` checks the bar's actual `low`/
+`high` against a level `stop_pct` away from entry, not just the close - the same
+"pessimistic reading, stop goes first" doctrine `algo/risk/exits.py` already
+states for the MCX path (Q15), extended here because MT5 bars carry real
+intrabar range that bhavcopy never did. A stop-triggered close fills at the
+level itself, or the bar's `open` on a gap through it (`GAPPED_STOP`, mirroring
+`algo/execution/fills.py`) - never at `bar.close +/- spread`, which would be
+dishonestly optimistic for the one exit whose entire purpose is bounding a loss.
+The stop is checked first in both strategies' `on_bar()`, before the warmup
+gate, so a held position is never unprotected while an indicator is still
+converging.
+
+Three tests were found passing for the wrong reason while wiring this in - a
+stop-triggered close and a signal-triggered close both look like "CLOSE,
+opposite direction" from the outside, so assertions that only checked the
+outcome couldn't tell which mechanism fired. Confirmed by computing the exact
+move at which each fixture would trip a stop vs. a crossover/breakout, then
+fixed by isolating the mechanism under test (`stop_loss_pct=Decimal("0")` where
+a test means to exercise the signal alone) and asserting `"stop loss" not in
+reason` to make the isolation checkable rather than incidental. Separately,
+`stop_level()`'s side (which side subtracts vs. adds the move) was deliberately
+sign-flipped and the suite re-run to confirm real coverage: 11 tests failed
+across 3 files, including strategy-integration tests that never import
+`price_stop.py` directly.
+
+**Re-measured on the same fair, common-window methodology as D-124
+(2.11-year overlap, both strategies, all three timeframes), stop vs. no-stop:**
+
+    MacdCrossover          M15 (no stop -> stop)   M30                H1
+      trades                  1,946 -> 2,055     965 -> 1,075     473 -> 569
+      net P&L          -$230,052 -> -$77,668   $97,653 -> $77,836   $190,186 -> $132,919
+
+    TrendlineBreakout(20)  M15 (no stop -> stop)   M30                H1
+      trades                    937 -> 1,083     451 -> 582        204 -> 305
+      net P&L            $50,983 -> -$14,779   $102,207 -> $52,467  $162,298 -> $136,477
+
+**The effect is not uniformly good, and that is the honest result.** Trade
+count rises everywhere (a stop-out is an exit that can re-enter before the
+original signal would have reversed) which adds spread on every row. Where the
+strategy was previously worst - `MacdCrossover` on M15, the one deeply negative
+case in D-124 - the stop is a large net improvement (-$230k to -$78k): it caps
+the worst crossover holds before they run further against the position. But on
+every row that was previously net *positive*, the stop makes it worse,
+including flipping `TrendlineBreakout` M15 from +$50,983 to -$14,779. A
+Donchian channel already carries its own exit (the opposing breakout); a
+tighter 0.5%-of-entry price stop sitting in front of it now closes some winning
+trend-following holds early, before the channel's own signal would have, and
+the resulting re-entries add cost without adding edge. A stop-loss bounds the
+worst case; it does not come free on a strategy whose own exit was already
+doing useful work, and reporting only the M15 MACD improvement while leaving
+the other five rows out would have been the same kind of dishonesty D-011/D-108
+already rule out.
+
+This does not mean 0.5% is the right distance for every case above - only that
+a single, unfitted default was measured plainly rather than tuned to look good.
+Choosing a per-strategy or per-timeframe stop distance (tighter for the M15
+crossover, looser or absent for the slower trend-following rows) is a genuine
+follow-up, not attempted here since it was not asked for and risks fitting the
+stop to this one 2.11-year window's particulars.
+
+### D-126 - Widening the stop to 1% does not simply split the difference
+Direct follow-up to D-125's own closing caveat, now actually checked: re-ran
+the identical fair-window methodology with `STOP_LOSS_PCT` at 1.0 instead of
+0.5, both strategies, all three timeframes.
+
+    MacdCrossover net P&L      M15               M30              H1
+      no stop            -$230,052.41       $97,653.20      $190,185.54
+      0.5% stop            -$77,668.32       $77,835.84      $132,919.15
+      1.0% stop           -$246,375.46       $44,000.66       $77,915.80
+
+    TrendlineBreakout net P&L  M15               M30              H1
+      no stop              $50,983.08      $102,206.55      $162,297.62
+      0.5% stop           -$14,778.90       $52,466.78      $136,477.21
+      1.0% stop           $131,882.10       $71,710.76       $79,592.87
+
+**There is no monotonic "wider stop is closer to no stop" relationship in this
+data, and it is worth being precise about why not.** A wider stop is not simply
+a weaker version of a tighter one on the same trade: whether a trade's outcome
+touches 0.5% before recovering, touches 1% before recovering, or never
+recovers at all is a property of that trade's own path, not something that
+interpolates smoothly as the threshold moves. Two opposite failure modes are
+visible side by side here. On `MacdCrossover` M15, 1% is worse than *no stop at
+all* ($-246,375 vs $-230,052, on nearly the same trade count) - some fraction
+of trades run past 0.5% (where D-125's tighter stop would already have cut
+them for less), keep going to 1% before the stop locks in a larger loss, on
+holds that would have closed smaller, or even recovered, by the time the next
+opposing crossover fired. On `TrendlineBreakout` M15, the same 1% widening
+does the opposite: it turns 0.5%'s worst result (-$14,779, the one row D-125
+flagged as the stop actively hurting a working exit) into the *best* result of
+all nine cells in both tables ($131,882) - loose enough here to stop avoiding
+the channel's own genuine winners, tight enough to still cut the trades that
+were dragging the unstopped case down.
+
+Both strategies' M30/H1 rows tell a third story again: every stop setting
+underperforms no-stop at H1 for both strategies, and the ordering between 0.5%
+and 1% flips between the two strategies at M30 (`MacdCrossover` gets worse as
+the stop widens; `TrendlineBreakout` gets better). Nine cells, no shared
+pattern a single number would capture - which is the actual finding, not a
+gap in the analysis. **A stop distance is not a property of "safety" that a
+strategy either has enough of or not; it interacts with each strategy's own
+holding-period and exit logic differently enough that picking one without
+testing per case is a guess, not an improvement.** Restated from D-125: choosing
+a distance per strategy/timeframe pairing - or concluding some pairings (both
+strategies at H1, on this window) are better left with no stop at all - is the
+real next step, and still has not been attempted, to avoid fitting nine cells
+of one 2.11-year sample.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting

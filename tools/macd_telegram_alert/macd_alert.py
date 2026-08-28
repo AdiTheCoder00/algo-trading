@@ -118,6 +118,7 @@ class Config:
     log_level: str
     enable_command_panel: bool
     watchlist_path: Path
+    mt5_broker_label: str
 
     @property
     def warmup_needed(self) -> int:
@@ -179,6 +180,7 @@ def load_config(
         log_level=_env_str("LOG_LEVEL", "INFO").upper(),
         enable_command_panel=_env_bool("ENABLE_COMMAND_PANEL", True),
         watchlist_path=Path(_env_str("WATCHLIST_FILE", str(default_watchlist))),
+        mt5_broker_label=_env_str("MT5_BROKER_LABEL", "MT5"),
     )
 
 
@@ -377,7 +379,12 @@ class MarketData:
             retry_on=(ccxt.NetworkError, ccxt.ExchangeNotAvailable),
             rate_limit_on=(ccxt.RateLimitExceeded, ccxt.DDoSProtection),
         )
-        missing = [s for s in self.config.symbols if s not in self.exchange.markets]
+        # "/" is what marks a symbol as ccxt's in the unified watch list (see
+        # MultiBackendMarket) - an MT5 symbol seeded in the same TRADING_PAIR
+        # list is not this exchange's to validate.
+        missing = [
+            s for s in self.config.symbols if "/" in s and s not in self.exchange.markets
+        ]
         if missing:
             raise SystemExit(
                 f"{self.config.exchange_id} does not list: {', '.join(missing)}"
@@ -512,6 +519,195 @@ class MarketData:
         period = self.timeframe_seconds
         now = time.time()
         return (period - (now % period)) + self.config.poll_buffer_seconds
+
+    def exchange_label(self, symbol: str) -> str:
+        del symbol  # one exchange for every ccxt symbol this instance serves
+        return self.config.exchange_id
+
+    def is_valid_symbol(self, symbol: str) -> bool:
+        return symbol in self.exchange.markets
+
+
+# --------------------------------------------------------------------------- MT5 backend
+#
+# Optional: only imported if MetaTrader5 and the repo's own `algo` package are
+# both importable. Neither is in this tool's own requirements.txt - the
+# crypto path stays fully standalone (own venv, ccxt only) for anyone running
+# this tool outside this repo, or on a platform MetaTrader5 does not ship for.
+# Where they ARE available (this repo's venv, on Windows, with a logged-in
+# terminal), `/watch` can route a non-ccxt symbol like XAUUSD here instead.
+
+try:
+    import MetaTrader5 as mt5
+
+    _repo_root = Path(__file__).resolve().parent.parent.parent
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+    from algo.core.bar import Timeframe as _Mt5Timeframe
+    from algo.core.errors import DataError as _Mt5DataError
+    from algo.data.mt5_feed import Mt5BarFeed as _Mt5BarFeed
+    from algo.data.mt5_feed import measure_server_offset as _measure_server_offset
+
+    MT5_AVAILABLE = True
+except ImportError:
+    MT5_AVAILABLE = False
+
+#: MT5 timeframe minutes Mt5BarFeed supports (algo/data/mt5_feed.py's
+#: _TIMEFRAME_MINUTES). A `TIMEFRAME` that does not divide evenly into one of
+#: these cannot be served by MT5 - not fatal, just means MT5 symbols are
+#: unavailable for this run (crypto symbols are unaffected).
+MT5_TIMEFRAME_MINUTES = frozenset({1, 5, 15, 30, 60, 240})
+
+
+class Mt5Source:
+    """MT5-backed candles for any symbol the terminal can select - not fixed
+    to one, so it can serve whatever `/watch` sends its way. Connects and
+    disconnects per call, matching this repo's own convention
+    (scripts/measure_macd_xauusd.py): simpler than holding a session open,
+    and a poll only happens once a timeframe period.
+    """
+
+    def __init__(
+        self,
+        timeframe_minutes: int,
+        *,
+        candle_limit: int,
+        max_retries: int,
+        retry_base_delay: float,
+        poll_buffer_seconds: float,
+        broker_label: str,
+    ) -> None:
+        self._timeframe = _Mt5Timeframe(minutes=timeframe_minutes)
+        self.timeframe_seconds = timeframe_minutes * 60
+        self._candle_limit = candle_limit
+        self._max_retries = max_retries
+        self._retry_base_delay = retry_base_delay
+        self._poll_buffer_seconds = poll_buffer_seconds
+        self._broker_label = broker_label
+
+    def exchange_label(self, symbol: str) -> str:
+        del symbol
+        return self._broker_label
+
+    def is_valid_symbol(self, symbol: str) -> bool:
+        if not mt5.initialize():
+            return False
+        try:
+            return bool(mt5.symbol_select(symbol, True))
+        finally:
+            mt5.shutdown()
+
+    def closed_candles(self, symbol: str) -> pd.DataFrame:
+        return with_retries(
+            lambda: self._fetch(symbol),
+            what=f"MT5 closed_bars({symbol} {self._timeframe.label})",
+            attempts=self._max_retries,
+            base_delay=self._retry_base_delay,
+            retry_on=(_Mt5DataError,),
+        )
+
+    def _fetch(self, symbol: str) -> pd.DataFrame:
+        if not mt5.initialize():
+            raise _Mt5DataError(f"could not attach to MT5: {mt5.last_error()}")
+        try:
+            if not mt5.symbol_select(symbol, True):
+                raise _Mt5DataError(f"could not select {symbol}: {mt5.last_error()}")
+            offset = _measure_server_offset(mt5, symbol)
+            feed = _Mt5BarFeed(
+                terminal=mt5, symbol=symbol, timeframe=self._timeframe, server_offset=offset
+            )
+            bars = feed.closed_bars(count=self._candle_limit)
+        finally:
+            mt5.shutdown()
+
+        return pd.DataFrame(
+            {
+                "timestamp": [int(b.ts.timestamp() * 1000) for b in bars],
+                "close": [float(b.close) for b in bars],
+            }
+        )
+
+    def format_price(self, symbol: str, price: float) -> str:
+        del symbol
+        return f"{price:,.2f}"
+
+    def seconds_until_next_close(self) -> float:
+        period = self.timeframe_seconds
+        now = time.time()
+        return (period - (now % period)) + self._poll_buffer_seconds
+
+
+class MultiBackendMarket:
+    """Routes each symbol to ccxt or MT5 by shape: a "/" is what every ccxt
+    symbol has and no MT5 symbol does (BTC/USDT vs XAUUSD), so the format
+    IS the routing decision - no separate registry to keep in sync, and a
+    typo just fails validation on whichever side it happens to resemble.
+
+    One timeframe for the whole watch list, not one per symbol or per
+    backend: `Monitor` schedules a single poll cadence, and `build_message`
+    reports a single period, so both backends are constructed from the same
+    resolved `Config.timeframe`. If MT5 cannot serve that period (a ccxt-only
+    timeframe like `3m`), MT5 symbols are simply unavailable for this run -
+    crypto symbols still work, and `/watch` on an MT5 symbol explains why.
+    """
+
+    def __init__(self, ccxt_market: MarketData, mt5_source: Mt5Source | None) -> None:
+        self._ccxt = ccxt_market
+        self._mt5 = mt5_source
+        self.timeframe_seconds = ccxt_market.timeframe_seconds
+
+    @staticmethod
+    def is_ccxt_symbol(symbol: str) -> bool:
+        return "/" in symbol
+
+    def _backend_for(self, symbol: str) -> MarketData | Mt5Source | None:
+        return self._ccxt if self.is_ccxt_symbol(symbol) else self._mt5
+
+    def load_markets(self) -> None:
+        self._ccxt.load_markets()
+        if self._mt5 is None:
+            return
+        if mt5.initialize():
+            mt5.shutdown()
+            LOG.info("MT5 terminal reachable - symbols without a \"/\" route there.")
+        else:
+            LOG.warning(
+                "MT5 configured but the terminal is not reachable right now "
+                "(%s). Crypto symbols are unaffected; an MT5 /watch will retry "
+                "when it is next polled.",
+                mt5.last_error(),
+            )
+
+    def closed_candles(self, symbol: str) -> pd.DataFrame:
+        backend = self._backend_for(symbol)
+        if backend is None:
+            # Not `_Mt5DataError`: that name only exists when MT5_AVAILABLE,
+            # which is exactly the case that can put us here.
+            raise RuntimeError(f"{symbol}: MT5 is not available in this run.")
+        return backend.closed_candles(symbol)
+
+    def format_price(self, symbol: str, price: float) -> str:
+        backend = self._backend_for(symbol)
+        if backend is None:
+            return f"{price:,.2f}"
+        return backend.format_price(symbol, price)
+
+    def exchange_label(self, symbol: str) -> str:
+        backend = self._backend_for(symbol)
+        if backend is None:
+            return "MT5 (unavailable)"
+        return backend.exchange_label(symbol)
+
+    def is_valid_symbol(self, symbol: str) -> bool:
+        backend = self._backend_for(symbol)
+        if backend is None:
+            return False
+        return backend.is_valid_symbol(symbol)
+
+    def seconds_until_next_close(self) -> float:
+        # One shared schedule (see the class docstring) - the ccxt side's is
+        # as good as either, since both resolve from the same Config.timeframe.
+        return self._ccxt.seconds_until_next_close()
 
 
 # --------------------------------------------------------------------------- telegram
@@ -696,7 +892,11 @@ class CommandPanel:
     POLL_TIMEOUT_S = 25
 
     def __init__(
-        self, config: Config, notifier: TelegramNotifier, watchlist: WatchList, market: MarketData
+        self,
+        config: Config,
+        notifier: TelegramNotifier,
+        watchlist: WatchList,
+        market: MarketData | MultiBackendMarket,
     ) -> None:
         self._config = config
         self._notifier = notifier
@@ -769,13 +969,13 @@ class CommandPanel:
 
     def _cmd_watch(self, args: list[str]) -> None:
         if not args:
-            self._reply("Usage: /watch SYMBOL (e.g. /watch ETH/USDT)")
+            self._reply("Usage: /watch SYMBOL (e.g. /watch ETH/USDT or /watch XAUUSD)")
             return
         symbol = args[0].upper()
-        if symbol not in self._market.exchange.markets:
+        if not self._market.is_valid_symbol(symbol):
             self._reply(
-                f"{html.escape(symbol)} is not listed on "
-                f"{html.escape(self._config.exchange_id)}."
+                f"{html.escape(symbol)} is not available on "
+                f"{html.escape(self._market.exchange_label(symbol))}."
             )
             return
         if self._watchlist.add(symbol):
@@ -846,6 +1046,7 @@ def build_message(
     cross: Crossover,
     *,
     symbol: str,
+    exchange_label: str,
     price_text: str,
     config: Config,
     period_seconds: int,
@@ -860,7 +1061,7 @@ def build_message(
     lines = [
         f"{icon} <b>{headline} MACD crossover</b>",
         "",
-        f"<b>Pair:</b> {html.escape(symbol)} ({html.escape(config.exchange_id)})",
+        f"<b>Pair:</b> {html.escape(symbol)} ({html.escape(exchange_label)})",
         f"<b>Timeframe:</b> {html.escape(config.timeframe)}",
         f"<b>Crossover price:</b> {html.escape(price_text)}",
         "",
@@ -884,7 +1085,7 @@ def build_message(
 @dataclass
 class Monitor:
     config: Config
-    market: MarketData
+    market: MarketData | MultiBackendMarket
     notifier: TelegramNotifier
     state: StateStore
     watchlist: WatchList
@@ -943,7 +1144,8 @@ class Monitor:
         if cross is None:
             return
 
-        key = f"{self.config.exchange_id}:{symbol}:{self.config.timeframe}"
+        exchange_label = self.market.exchange_label(symbol)
+        key = f"{exchange_label}:{symbol}:{self.config.timeframe}"
         if self.state.already_alerted(key, cross.candle_open_ms):
             LOG.debug("%s: crossover already alerted for this candle.", symbol)
             return
@@ -951,6 +1153,7 @@ class Monitor:
         message = build_message(
             cross,
             symbol=symbol,
+            exchange_label=exchange_label,
             price_text=self.market.format_price(symbol, cross.price),
             config=self.config,
             period_seconds=self.market.timeframe_seconds,
@@ -962,12 +1165,14 @@ class Monitor:
         if self.notifier.send(message):
             self.state.record(key, cross.candle_open_ms)
 
+    def _pairs_with_labels(self) -> list[str]:
+        return [f"{s} ({self.market.exchange_label(s)})" for s in self.watchlist.symbols()]
+
     def run(self) -> None:
         self.market.load_markets()
         LOG.info(
-            "Watching %s on %s (%s), MACD(%d, %d, %d), closed candles only.",
-            ", ".join(self.watchlist.symbols()) or "(nothing yet)",
-            self.config.exchange_id,
+            "Watching %s (%s), MACD(%d, %d, %d), closed candles only.",
+            ", ".join(self._pairs_with_labels()) or "nothing yet",
             self.config.timeframe,
             self.config.fast_period,
             self.config.slow_period,
@@ -978,10 +1183,9 @@ class Monitor:
             panel_line = (
                 "\nSend /help to add or remove pairs." if self.command_panel is not None else ""
             )
-            pairs = html.escape(", ".join(self.watchlist.symbols()) or "(none yet)")
+            pairs = html.escape(", ".join(self._pairs_with_labels()) or "(none yet)")
             self.notifier.send(
                 "⚙️ <b>MACD monitor started</b>\n"
-                f"<b>Exchange:</b> {html.escape(self.config.exchange_id)}\n"
                 f"<b>Pairs:</b> {pairs}\n"
                 f"<b>Timeframe:</b> {html.escape(self.config.timeframe)}\n"
                 f"<b>Settings:</b> MACD({self.config.fast_period}, "
@@ -1329,6 +1533,7 @@ class Backtester:
             message = "🕗 <b>[BACKTEST REPLAY]</b>\n\n" + build_message(
                 cross,
                 symbol=symbol,
+                exchange_label=self.market.exchange_label(symbol),
                 price_text=self.market.format_price(symbol, cross.price),
                 config=self.config,
                 period_seconds=self.market.timeframe_seconds,
@@ -1448,7 +1653,28 @@ def main(argv: Iterable[str] | None = None) -> int:
             LOG.info("Backtest complete: %d crossovers across all pairs.", found)
             return 0
 
-        market = MarketData(config)
+        ccxt_market = MarketData(config)
+        mt5_source: Mt5Source | None = None
+        if MT5_AVAILABLE:
+            mt5_minutes = ccxt_market.timeframe_seconds // 60
+            if mt5_minutes in MT5_TIMEFRAME_MINUTES:
+                mt5_source = Mt5Source(
+                    mt5_minutes,
+                    candle_limit=config.candle_limit,
+                    max_retries=config.max_retries,
+                    retry_base_delay=config.retry_base_delay,
+                    poll_buffer_seconds=config.poll_buffer_seconds,
+                    broker_label=config.mt5_broker_label,
+                )
+            else:
+                LOG.warning(
+                    "TIMEFRAME %s (%d min) is not one MT5 offers %s - MT5 symbols "
+                    "(anything without a \"/\") will not be watchable this run.",
+                    config.timeframe,
+                    mt5_minutes,
+                    sorted(MT5_TIMEFRAME_MINUTES),
+                )
+        market = MultiBackendMarket(ccxt_market, mt5_source)
         notifier = TelegramNotifier(config)
         watchlist = WatchList(config.watchlist_path, initial=config.symbols)
         monitor = Monitor(
