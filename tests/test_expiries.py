@@ -159,14 +159,14 @@ class TestExpiriesFromMaster:
                 instrumenttype=kind,
                 expiry=e,
                 strike=Decimal("160000") if kind == "OPTFUT" else None,
-                lot_size=100,
+                lot_size=Decimal(100),
                 tick_size=Decimal("1"),
             )
             for i, (e, kind) in enumerate(
                 [(e, "OPTFUT") for e in options] + [(e, "FUTCOM") for e in futures]
             )
         ]
-        return InstrumentMaster(tuple(rows), fetched_at=datetime(2026, 8, 27, tzinfo=UTC))
+        return InstrumentMaster(rows, fetched_at=datetime(2026, 8, 27, tzinfo=UTC))
 
     def test_a_cycle_pairs_with_the_first_future_expiring_after_it(self) -> None:
         master = self._master(

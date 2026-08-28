@@ -22,7 +22,7 @@ from __future__ import annotations
 import pathlib
 
 import pytest
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
 from algo.cli.main import app
 
@@ -30,11 +30,11 @@ RUNNER = CliRunner()
 REFERENCE = pathlib.Path("config/goldm.yaml")
 
 
-def _run(*args: str, stdin: str | None = None):
+def _run(*args: str, stdin: str | None = None) -> Result:
     return RUNNER.invoke(app, list(args), input=stdin)
 
 
-def _ok(*args: str, stdin: str | None = None):
+def _ok(*args: str, stdin: str | None = None) -> Result:
     result = _run(*args, stdin=stdin)
     assert result.exit_code == 0, (
         f"`algo {' '.join(args)}` exited {result.exit_code}\n{result.output}"
