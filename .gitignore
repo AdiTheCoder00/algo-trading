@@ -49,3 +49,6 @@ Thumbs.db
 desktop.ini
 tools/*/state.json
 tools/*/*.csv
+tools/*/ca-bundle.pem
+tools/*/*.log
+tools/*/*.pid
