@@ -2003,6 +2003,62 @@ strategies at H1, on this window) are better left with no stop at all - is the
 real next step, and still has not been attempted, to avoid fitting nine cells
 of one 2.11-year sample.
 
+### D-127 - A minimum-2%-profit, 0.5%-trailing exit, and why it is not the same question as D-125/D-126
+A different request from the flat stop D-125/D-126 measured: a trailing stop
+that does nothing until a position is up 2%, then follows the best price seen
+since entry at 0.5%. New shared module, `algo/strategy/trailing_profit_stop.py`
+(`start_trail`/`advance_trail`/`is_armed`/`trail_level`/`trail_touched`/
+`trail_fill_price`), wired into both strategies as a second, independent exit
+behind a `trail_pct` parameter that defaults to 0 (off) so every existing
+caller and test keeps today's behaviour unchanged. Same conventions as the
+flat stop: the peak advances to each bar's best-case price before the trail is
+tested against that same bar's worst-case price (documented as a stated,
+deliberate resolution of the OHLC same-bar ordering ambiguity, the same way
+`price_stop.py` resolves "which touched first"); a triggered exit fills at the
+trail level or the bar's open on a gap, never `bar.close +/- spread`. Enabling
+it is the one thing that gives `TrendlineBreakout` persisted state - the
+running peak needs to survive a restart the same way `MacdCrossover`'s EMAs
+already do.
+
+**Measured with the flat stop turned off** (`stop_loss_pct=0`) so the trailing
+mechanism's own effect is not tangled with D-125/D-126's already-measured one -
+this is "does 2%-then-0.5%-trail work as the *only* exit beyond the strategy's
+own signal", not "does adding it on top of a flat stop help":
+
+    MacdCrossover net P&L        M15               M30               H1
+      no stop (D-124)      -$230,052.41       $97,653.20      $190,185.54
+      2%/0.5% trail         -$406,480.37     -$245,940.96     -$136,984.56
+
+    TrendlineBreakout net P&L    M15               M30               H1
+      no stop (D-124)        $50,983.08      $102,206.55      $162,297.62
+      2%/0.5% trail        -$162,229.22     -$144,519.44      -$48,683.50
+
+**Every one of six cells is negative, several by more than any configuration
+measured so far** - worse than no stop, worse than either flat-stop width in
+D-125/D-126, on both strategies, at every timeframe. Win rate actually rose on
+every row (MACD: 30.6/37.2/37.2% -> 32.8/34.1/36.1%; breakout: 36.1/36.8/42.6%
+-> 36.6/36.3/45.3%) while net P&L collapsed - the signature of winners being
+cut short while losers run unbounded. That is exactly what this configuration
+does by construction: a trade that never reaches +2% has **no exit of its own**
+until the opposing crossover or breakout eventually fires - the flat stop that
+would have bounded it is off - while a trade that does reach +2% is locked in
+at roughly that level the moment it gives back 0.5%, well short of how far
+`MacdCrossover` M30's and `TrendlineBreakout` H1's own unstopped winners ran in
+D-124. Both strategies' real edge on this window came from a small number of
+large trend-following winners (D-124's own read of the numbers); capping
+exactly those while leaving every loser fully exposed is close to the worst
+combination available, and the measured collapse is that mechanism, not a
+defect in it.
+
+**This is not a verdict on trailing stops in general - it is a verdict on
+running one with no downside protection under it.** D-125/D-126 already showed
+a flat stop alone is not a uniform improvement either. Whether a flat stop
+*and* a 2%-activated trail together - the flat one bounding the loser side this
+measurement left open, the trail locking in the winner side once a trade earns
+it - beats either alone is a real, different question this run does not
+answer, and is the natural next measurement rather than a conclusion to draw
+from extrapolation.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting

@@ -41,6 +41,12 @@ from algo.strategy.base import Strategy
 from algo.strategy.context import BarContext, PositionView, SessionInfo
 from algo.strategy.macd_crossover import MacdCrossover
 from algo.strategy.price_stop import stop_fill_price
+from algo.strategy.trailing_profit_stop import (
+    TrailState,
+    advance_trail,
+    start_trail,
+    trail_fill_price,
+)
 from algo.strategy.trendline_breakout import TrendlineBreakout
 
 XAUUSD = CfdId(symbol="XAUUSD")
@@ -76,7 +82,20 @@ CALENDAR = ForexCalendar()
 #: on a gap), not `bar.close +/- spread` - see the note in `run()` below and
 #: `price_stop.py`'s own docstring for why a close-based fill would be
 #: dishonestly optimistic for exactly the signal that exists to bound a loss.
-STOP_LOSS_PCT = Decimal("1.0")
+#: Zero here: this measurement is testing the trailing profit stop below on
+#: its own, not stacked on top of the flat entry-anchored one.
+STOP_LOSS_PCT = Decimal("0")
+
+#: The trailing profit stop, same single-source-of-truth treatment as
+#: `STOP_LOSS_PCT` above - `algo/strategy/trailing_profit_stop.py`. No
+#: protection before `TRAIL_ACTIVATION_PCT` is reached; once armed, follows
+#: the peak `TRAIL_PCT` behind, floored at entry ("cost to cost" - the trail
+#: module's own docstring) so an armed trail's worst outcome is a scratch,
+#: never a loser. A trail-triggered close fills the same honest way as a
+#: flat-stop one: at the trail level, or the bar's open on a gap - never
+#: `bar.close +/- spread`.
+TRAIL_ACTIVATION_PCT = Decimal("2")
+TRAIL_PCT = Decimal("1")
 
 
 @dataclass
@@ -189,6 +208,10 @@ def run(
 
     open_trade: Trade | None = None
     last_session_date: date | None = None
+    # Mirrors the trail each strategy keeps internally, purely so this
+    # script's own cost accounting can compute an honest fill price for a
+    # "trailing stop" close - see the note where it is used, below.
+    trail_state: TrailState | None = None
 
     for index, bar in enumerate(bars):
         recent.append(bar)
@@ -205,6 +228,14 @@ def run(
                 qty=signed_qty,
                 cost_basis=Decimal(open_trade.lots) * open_trade.entry_price,
             )
+
+        if held_position is not None:
+            trail_side = Side.BUY if held_position.qty > 0 else Side.SELL
+            if trail_state is None or trail_state.side is not trail_side:
+                trail_state = start_trail(held_position.average_price, trail_side)
+            trail_state = advance_trail(trail_state, bar)
+        else:
+            trail_state = None
 
         current_session = _session_date(bar.ts)
         # Charge one night's swap each time the bar crosses into a new session
@@ -248,6 +279,10 @@ def run(
                 signal.action is SignalAction.CLOSE
                 and signal.reason.startswith("stop loss")
             )
+            is_trail_exit = (
+                signal.action is SignalAction.CLOSE
+                and signal.reason.startswith("trailing stop")
+            )
             if is_stop_exit and held_position is not None:
                 # A stop-triggered close fills at the stop level (or the bar's
                 # open, on a gap) - not `bar.close +/- spread`. The whole point
@@ -259,6 +294,13 @@ def run(
                 # on top - `stop_fill_price` already reflects the worst of the
                 # level and the bar's open, which is the honest cost.
                 fill_price = stop_fill_price(bar, held_position, STOP_LOSS_PCT)
+                extra_spread = Decimal("0")
+            elif is_trail_exit and trail_state is not None:
+                # Same honesty argument as the flat stop, applied to the
+                # trail: the level it locks in is the point of the exit, so
+                # the fill is that level (or the bar's open on a gap), not an
+                # optimistic `bar.close +/- spread`.
+                fill_price = trail_fill_price(trail_state, bar, TRAIL_PCT)
                 extra_spread = Decimal("0")
             else:
                 fill_price = bar.close + (
@@ -304,9 +346,18 @@ class Row:
 #: gets a fresh instance per call. `MacdCrossover` carries incremental state
 #: and must never be reused across two different bar series.
 STRATEGIES: dict[str, Callable[[], Strategy]] = {
-    "macd": lambda: MacdCrossover(instrument=XAUUSD, stop_loss_pct=STOP_LOSS_PCT),
+    "macd": lambda: MacdCrossover(
+        instrument=XAUUSD,
+        stop_loss_pct=STOP_LOSS_PCT,
+        trail_activation_pct=TRAIL_ACTIVATION_PCT,
+        trail_pct=TRAIL_PCT,
+    ),
     "breakout": lambda: TrendlineBreakout(
-        instrument=XAUUSD, lookback=20, stop_loss_pct=STOP_LOSS_PCT
+        instrument=XAUUSD,
+        lookback=20,
+        stop_loss_pct=STOP_LOSS_PCT,
+        trail_activation_pct=TRAIL_ACTIVATION_PCT,
+        trail_pct=TRAIL_PCT,
     ),
 }
 

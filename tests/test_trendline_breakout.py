@@ -19,6 +19,7 @@ from algo.core.enums import Exchange, Side, SignalAction
 from algo.core.errors import DomainError
 from algo.core.instrument import CfdId
 from algo.core.position import Position
+from algo.core.signal import Signal
 from algo.exchange.specs import ContractSpecStore
 from algo.strategy.context import BarContext, PositionView, SessionInfo
 from algo.strategy.trendline_breakout import TrendlineBreakout
@@ -75,10 +76,12 @@ def _short(lots: int = 100) -> Position:
     )
 
 
-def _feed(strategy: TrendlineBreakout, bars: list[Bar], *, held: Position | None = None) -> list:
+def _feed(
+    strategy: TrendlineBreakout, bars: list[Bar], *, held: Position | None = None
+) -> list[list[Signal]]:
     """Run every bar through the strategy in order, growing the window as a
     real engine would, returning every batch of signals."""
-    signals = []
+    signals: list[list[Signal]] = []
     for i in range(len(bars)):
         window = BarWindow.of(tuple(bars[: i + 1]))
         signals.append(strategy.on_bar(_ctx(bars[i], window, held=held)))
@@ -339,6 +342,151 @@ class TestStopLoss:
         strategy = TrendlineBreakout(instrument=XAUUSD, stop_loss_pct=Decimal("1.25"))
 
         assert strategy.params()["stop_loss_pct"] == "1.25"
+
+
+class TestTrailingStop:
+    """Off by default (`trail_pct=0`). Enabling it adds a second, independent
+    exit that protects nothing before `trail_activation_pct` is reached, then
+    follows the peak - see `algo/strategy/trailing_profit_stop.py` and this
+    strategy's own module docstring for why it is checked after the flat
+    stop, and why enabling it is the one case where this strategy carries
+    persisted state.
+    """
+
+    def test_a_negative_activation_is_refused(self) -> None:
+        with pytest.raises(DomainError, match="cannot be negative"):
+            TrendlineBreakout(instrument=XAUUSD, trail_activation_pct=Decimal("-1"))
+
+    def test_a_negative_trail_pct_is_refused(self) -> None:
+        with pytest.raises(DomainError, match="cannot be negative"):
+            TrendlineBreakout(instrument=XAUUSD, trail_pct=Decimal("-0.1"))
+
+    def test_off_by_default_even_after_a_2pct_run_and_a_big_pullback(self) -> None:
+        strategy = TrendlineBreakout(instrument=XAUUSD, stop_loss_pct=Decimal("0"))
+        held = _long()
+        bar = _bar(0, high="4488.00", low="4465.00", close="4470.00")
+
+        signal = strategy.on_bar(_ctx(bar, BarWindow.of((bar,)), held=held))
+
+        assert signal == []
+
+    def test_not_armed_below_the_activation_move_does_not_close(self) -> None:
+        strategy = TrendlineBreakout(
+            instrument=XAUUSD,
+            stop_loss_pct=Decimal("0"),
+            trail_activation_pct=Decimal("2"),
+            trail_pct=Decimal("0.5"),
+        )
+        held = _long()
+        bar = _bar(0, high="4430.00", low="4300.00", close="4400.00")
+
+        signal = strategy.on_bar(_ctx(bar, BarWindow.of((bar,)), held=held))
+
+        assert signal == []
+
+    def test_a_long_closes_once_armed_and_pulled_back_from_the_peak(self) -> None:
+        strategy = TrendlineBreakout(
+            instrument=XAUUSD,
+            stop_loss_pct=Decimal("0"),
+            trail_activation_pct=Decimal("2"),
+            trail_pct=Decimal("0.5"),
+        )
+        held = _long()
+        # Peak 4488.00 (+2%); trail level 0.5% behind it is 4465.56.
+        bar = _bar(0, high="4488.00", low="4465.56", close="4470.00")
+
+        signal = strategy.on_bar(_ctx(bar, BarWindow.of((bar,)), held=held))
+
+        assert len(signal) == 1
+        assert signal[0].action is SignalAction.CLOSE
+        assert signal[0].legs[0].direction is Side.SELL
+
+    def test_a_short_closes_once_armed_and_pulled_back_from_the_trough(self) -> None:
+        strategy = TrendlineBreakout(
+            instrument=XAUUSD,
+            stop_loss_pct=Decimal("0"),
+            trail_activation_pct=Decimal("2"),
+            trail_pct=Decimal("0.5"),
+        )
+        held = _short()
+        # Trough 4312.00 (-2%); trail level 0.5% above it is 4333.56.
+        bar = _bar(0, high="4333.56", low="4312.00", close="4320.00")
+
+        signal = strategy.on_bar(_ctx(bar, BarWindow.of((bar,)), held=held))
+
+        assert len(signal) == 1
+        assert signal[0].action is SignalAction.CLOSE
+        assert signal[0].legs[0].direction is Side.BUY
+
+    def test_the_flat_stop_takes_priority_when_both_would_fire_the_same_bar(self) -> None:
+        strategy = TrendlineBreakout(
+            instrument=XAUUSD,
+            stop_loss_pct=Decimal("0.5"),
+            trail_activation_pct=Decimal("2"),
+            trail_pct=Decimal("0.5"),
+        )
+        held = _long()
+        bar = _bar(0, high="4488.00", low="4378.00", close="4400.00")
+
+        signal = strategy.on_bar(_ctx(bar, BarWindow.of((bar,)), held=held))
+
+        assert "stop loss" in signal[0].reason
+        assert "trailing stop" not in signal[0].reason
+
+    def test_the_reason_says_trailing_stop_and_names_the_peak(self) -> None:
+        strategy = TrendlineBreakout(
+            instrument=XAUUSD,
+            stop_loss_pct=Decimal("0"),
+            trail_activation_pct=Decimal("2"),
+            trail_pct=Decimal("0.5"),
+        )
+        held = _long()
+        bar = _bar(0, high="4488.00", low="4465.56", close="4470.00")
+
+        signal = strategy.on_bar(_ctx(bar, BarWindow.of((bar,)), held=held))
+
+        assert "trailing stop" in signal[0].reason
+        assert "4488" in signal[0].reason
+
+    def test_it_is_recorded_in_params(self) -> None:
+        strategy = TrendlineBreakout(
+            instrument=XAUUSD, trail_activation_pct=Decimal("3"), trail_pct=Decimal("0.75")
+        )
+
+        assert strategy.params()["trail_activation_pct"] == "3"
+        assert strategy.params()["trail_pct"] == "0.75"
+
+    def test_enabling_it_makes_state_persist_the_running_peak(self) -> None:
+        """The one case that breaks `TestNoIncrementalStateIsNeeded`'s premise
+        - a trail that has armed mid-trade must survive a restart, so `state`
+        is no longer always empty once `trail_pct` is turned on."""
+        strategy = TrendlineBreakout(
+            instrument=XAUUSD,
+            stop_loss_pct=Decimal("0"),
+            trail_activation_pct=Decimal("2"),
+            trail_pct=Decimal("0.5"),
+        )
+        held = _long()
+        # Peak 4488.00 is exactly +2% from the 4400 entry - armed.
+        bar = _bar(0, high="4488.00", low="4480.00", close="4485.00")
+
+        strategy.on_bar(_ctx(bar, BarWindow.of((bar,)), held=held))
+
+        assert strategy.state()["trail_peak"] == "4488.00"
+
+        restored = TrendlineBreakout(
+            instrument=XAUUSD,
+            stop_loss_pct=Decimal("0"),
+            trail_activation_pct=Decimal("2"),
+            trail_pct=Decimal("0.5"),
+        )
+        restored.restore(strategy.state())
+        # 0.5% behind the restored 4488.00 peak is 4465.56.
+        next_bar = _bar(1, high="4470.00", low="4465.56", close="4466.00")
+
+        signal = restored.on_bar(_ctx(next_bar, BarWindow.of((bar, next_bar)), held=held))
+
+        assert signal and signal[0].action is SignalAction.CLOSE
 
 
 class TestSignalShape:

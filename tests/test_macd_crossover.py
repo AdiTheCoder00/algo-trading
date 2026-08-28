@@ -24,6 +24,7 @@ from algo.core.enums import Exchange, Side, SignalAction
 from algo.core.errors import DomainError
 from algo.core.instrument import CfdId
 from algo.core.position import Position
+from algo.core.signal import Signal
 from algo.exchange.specs import ContractSpecStore
 from algo.strategy.context import BarContext, PositionView, SessionInfo
 from algo.strategy.macd_crossover import MacdCrossover
@@ -90,9 +91,11 @@ def _short(lots: int = 100) -> Position:
     )
 
 
-def _feed(strategy: MacdCrossover, closes: list[str], *, held: Position | None = None) -> list:
+def _feed(
+    strategy: MacdCrossover, closes: list[str], *, held: Position | None = None
+) -> list[list[Signal]]:
     """Run every close through the strategy in order, returning all signals."""
-    signals = []
+    signals: list[list[Signal]] = []
     for i, close in enumerate(closes):
         ctx = _ctx(_bar(i, close), held=held)
         signals.append(strategy.on_bar(ctx))
@@ -146,6 +149,8 @@ class TestConstruction:
             "slow": "26",
             "signal": "9",
             "stop_loss_pct": "0.5",
+            "trail_activation_pct": "2",
+            "trail_pct": "0",
         }
 
     def test_warmup_matches_the_indicator_modules_formula(self) -> None:
@@ -441,6 +446,153 @@ class TestStopLoss:
         strategy = MacdCrossover(instrument=XAUUSD, stop_loss_pct=Decimal("1.25"))
 
         assert strategy.params()["stop_loss_pct"] == "1.25"
+
+
+class TestTrailingStop:
+    """Off by default (`trail_pct=0`). Enabling it adds a second, independent
+    exit that protects nothing before `trail_activation_pct` is reached, then
+    follows the peak - see `algo/strategy/trailing_profit_stop.py` and this
+    strategy's own module docstring for why it is checked after the flat
+    stop.
+    """
+
+    def test_a_negative_activation_is_refused(self) -> None:
+        with pytest.raises(DomainError, match="cannot be negative"):
+            MacdCrossover(instrument=XAUUSD, trail_activation_pct=Decimal("-1"))
+
+    def test_a_negative_trail_pct_is_refused(self) -> None:
+        with pytest.raises(DomainError, match="cannot be negative"):
+            MacdCrossover(instrument=XAUUSD, trail_pct=Decimal("-0.1"))
+
+    def test_off_by_default_even_after_a_2pct_run_and_a_big_pullback(self) -> None:
+        """The strategy's own default (`trail_pct=0`) must not close anything
+        via this mechanism on its own. The flat stop is disabled too, to
+        isolate the trailing mechanism under test."""
+        strategy = MacdCrossover(instrument=XAUUSD, stop_loss_pct=Decimal("0"))
+        held = _long()
+        bar = _bar_range(0, high="4488.00", low="4465.00", close="4470.00")
+
+        signal = strategy.on_bar(_ctx(bar, held=held))
+
+        assert signal == []
+
+    def test_not_armed_below_the_activation_move_does_not_close(self) -> None:
+        strategy = MacdCrossover(
+            instrument=XAUUSD,
+            stop_loss_pct=Decimal("0"),
+            trail_activation_pct=Decimal("2"),
+            trail_pct=Decimal("0.5"),
+        )
+        held = _long()
+        # Never reaches +2% (4488.00); a pullback below that never arms it.
+        bar = _bar_range(0, high="4430.00", low="4300.00", close="4400.00")
+
+        signal = strategy.on_bar(_ctx(bar, held=held))
+
+        assert signal == []
+
+    def test_a_long_closes_once_armed_and_pulled_back_from_the_peak(self) -> None:
+        strategy = MacdCrossover(
+            instrument=XAUUSD,
+            stop_loss_pct=Decimal("0"),
+            trail_activation_pct=Decimal("2"),
+            trail_pct=Decimal("0.5"),
+        )
+        held = _long()
+        # Peak 4488.00 (+2%); trail level 0.5% behind it is 4465.56.
+        bar = _bar_range(0, high="4488.00", low="4465.56", close="4470.00")
+
+        signal = strategy.on_bar(_ctx(bar, held=held))
+
+        assert len(signal) == 1
+        assert signal[0].action is SignalAction.CLOSE
+        assert signal[0].legs[0].direction is Side.SELL
+
+    def test_a_short_closes_once_armed_and_pulled_back_from_the_trough(self) -> None:
+        strategy = MacdCrossover(
+            instrument=XAUUSD,
+            stop_loss_pct=Decimal("0"),
+            trail_activation_pct=Decimal("2"),
+            trail_pct=Decimal("0.5"),
+        )
+        held = _short()
+        # Trough 4312.00 (-2%); trail level 0.5% above it is 4333.56.
+        bar = _bar_range(0, high="4333.56", low="4312.00", close="4320.00")
+
+        signal = strategy.on_bar(_ctx(bar, held=held))
+
+        assert len(signal) == 1
+        assert signal[0].action is SignalAction.CLOSE
+        assert signal[0].legs[0].direction is Side.BUY
+
+    def test_the_peak_advances_across_bars_and_tightens_the_trail(self) -> None:
+        """A held position across several bars: the trail follows the running
+        peak, not a level fixed at the first bar it armed on."""
+        strategy = MacdCrossover(
+            instrument=XAUUSD,
+            stop_loss_pct=Decimal("0"),
+            trail_activation_pct=Decimal("2"),
+            trail_pct=Decimal("0.5"),
+        )
+        held = _long()
+        first = strategy.on_bar(
+            _ctx(_bar_range(0, high="4488.00", low="4480.00", close="4485.00"), held=held)
+        )
+        assert first == []
+        second = strategy.on_bar(
+            _ctx(_bar_range(1, high="4500.00", low="4490.00", close="4495.00"), held=held)
+        )
+        assert second == []
+        # 4470.00 is above the first peak's trail level (4465.56), but the
+        # peak has since advanced to 4500.00, raising the trail to 4477.50 -
+        # which this low does cross.
+        third = strategy.on_bar(
+            _ctx(_bar_range(2, high="4495.00", low="4470.00", close="4480.00"), held=held)
+        )
+        assert len(third) == 1
+        assert third[0].action is SignalAction.CLOSE
+
+    def test_the_reason_says_trailing_stop_and_names_the_peak(self) -> None:
+        strategy = MacdCrossover(
+            instrument=XAUUSD,
+            stop_loss_pct=Decimal("0"),
+            trail_activation_pct=Decimal("2"),
+            trail_pct=Decimal("0.5"),
+        )
+        held = _long()
+        bar = _bar_range(0, high="4488.00", low="4465.56", close="4470.00")
+
+        signal = strategy.on_bar(_ctx(bar, held=held))
+
+        assert "trailing stop" in signal[0].reason
+        assert "4488" in signal[0].reason
+
+    def test_the_flat_stop_takes_priority_when_both_would_fire_the_same_bar(self) -> None:
+        """Checked first (module docstring) - a bar violent enough to trip
+        both must be reported as the flat stop, not the trail."""
+        strategy = MacdCrossover(
+            instrument=XAUUSD,
+            stop_loss_pct=Decimal("0.5"),
+            trail_activation_pct=Decimal("2"),
+            trail_pct=Decimal("0.5"),
+        )
+        held = _long()
+        # High of 4488.00 arms the trail; low of 4378.00 is past the flat
+        # stop's own level (0.5% below the 4400 entry).
+        bar = _bar_range(0, high="4488.00", low="4378.00", close="4400.00")
+
+        signal = strategy.on_bar(_ctx(bar, held=held))
+
+        assert "stop loss" in signal[0].reason
+        assert "trailing stop" not in signal[0].reason
+
+    def test_it_is_recorded_in_params(self) -> None:
+        strategy = MacdCrossover(
+            instrument=XAUUSD, trail_activation_pct=Decimal("3"), trail_pct=Decimal("0.75")
+        )
+
+        assert strategy.params()["trail_activation_pct"] == "3"
+        assert strategy.params()["trail_pct"] == "0.75"
 
 
 class TestSignalShape:

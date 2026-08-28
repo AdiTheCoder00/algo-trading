@@ -10,15 +10,16 @@ is what "price broke its recent trend line" means once you have to write it
 down. It is also the literal core of the Turtle Trading system, so "trend line
 breakout" has a long, checkable precedent in this exact shape.
 
-## No incremental state, unlike `MacdCrossover`
+## No incremental state for the channel itself
 
 An EMA is path-dependent - its value depends on every bar it has ever seen, so
 `MacdCrossover` has to carry running state and persist it across a restart. A
 rolling max/min over the last `lookback` bars depends on **only** those bars,
 recomputed identically from `ctx.history(...)` on every call. There is nothing
-to seed and nothing to lose on a restart - a strategy instance and a freshly
-constructed one facing the same recent history make the same decision. So
-`state`/`restore` are left at the base class's no-op default.
+to seed and nothing to lose on a restart for the channel itself - a strategy
+instance and a freshly constructed one facing the same recent history make the
+same decision. (The optional trailing stop below is path-dependent in its own
+right and does carry state when enabled - see that section.)
 
 ## The channel excludes the bar being tested
 
@@ -45,10 +46,26 @@ because the channel has not been recomputed yet. Uses the bar's actual
 low/high rather than its close, via the shared `algo/strategy/price_stop.py` -
 see that module for why a close-only check would understate a real stop's own
 frequency.
+
+## An optional trailing profit stop, layered on top
+
+`trail_pct` (default 0, meaning off) adds a second, independent exit -
+`algo/strategy/trailing_profit_stop.py`, the same module `MacdCrossover` uses.
+Once a held position has moved `trail_activation_pct` (default 2%) in its
+favour, a trailing stop arms `trail_pct` behind the best price seen since
+entry. It protects nothing before that threshold - a profit-lock, not a
+loss-bound - and is checked *after* the flat stop each bar. Once armed, its
+level can never sit worse than entry - "cost to cost", see the trail module's
+own docstring - so an armed trail's worst outcome is a scratch, never a
+loser. This is the one piece of this strategy that is path-dependent:
+enabling it (`trail_pct > 0`) means `state`/`restore` now persist the running
+peak too, so a restart does not silently drop a trail that was already armed
+mid-trade.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal
 
 from algo.core.enums import Side, SignalAction
@@ -60,6 +77,12 @@ from algo.core.timeutil import iso
 from algo.strategy.base import Strategy
 from algo.strategy.context import BarContext
 from algo.strategy.price_stop import stop_touched
+from algo.strategy.trailing_profit_stop import (
+    TrailState,
+    advance_trail,
+    start_trail,
+    trail_touched,
+)
 
 
 class TrendlineBreakout(Strategy):
@@ -73,6 +96,8 @@ class TrendlineBreakout(Strategy):
         instrument: InstrumentId,
         lookback: int = 20,
         stop_loss_pct: Decimal = Decimal("0.5"),
+        trail_activation_pct: Decimal = Decimal("2"),
+        trail_pct: Decimal = Decimal("0"),
         config_hash: str = "",
     ) -> None:
         super().__init__()
@@ -80,10 +105,19 @@ class TrendlineBreakout(Strategy):
             raise DomainError(f"lookback must be at least 2, got {lookback}")
         if stop_loss_pct < 0:
             raise DomainError(f"stop_loss_pct cannot be negative, got {stop_loss_pct}")
+        if trail_activation_pct < 0:
+            raise DomainError(
+                f"trail_activation_pct cannot be negative, got {trail_activation_pct}"
+            )
+        if trail_pct < 0:
+            raise DomainError(f"trail_pct cannot be negative, got {trail_pct}")
         self._instrument = instrument
         self._lookback = lookback
         self._stop_loss_pct = stop_loss_pct
+        self._trail_activation_pct = trail_activation_pct
+        self._trail_pct = trail_pct
         self._config_hash = config_hash
+        self._trail: TrailState | None = None
 
     def warmup_bars(self) -> int:
         return self._lookback + 1
@@ -93,12 +127,51 @@ class TrendlineBreakout(Strategy):
             "instrument": self._instrument.key,
             "lookback": str(self._lookback),
             "stop_loss_pct": str(self._stop_loss_pct),
+            "trail_activation_pct": str(self._trail_activation_pct),
+            "trail_pct": str(self._trail_pct),
         }
 
+    # ------------------------------------------------------------ persistence
+    def state(self) -> dict[str, str]:
+        """Only the trailing stop's running peak, when one is enabled and
+        armed - the channel itself needs nothing (see the module docstring)."""
+        if self._trail is None:
+            return {}
+        return {
+            "trail_side": self._trail.side.value,
+            "trail_entry": str(self._trail.entry_price),
+            "trail_peak": str(self._trail.peak),
+        }
+
+    def restore(self, state: Mapping[str, str]) -> None:
+        raw_trail_side = state.get("trail_side", "").strip()
+        if not raw_trail_side:
+            return
+        try:
+            self._trail = TrailState(
+                side=Side(raw_trail_side),
+                entry_price=Decimal(state["trail_entry"]),
+                peak=Decimal(state["trail_peak"]),
+            )
+        except (KeyError, ValueError) as exc:
+            raise DomainError(
+                f"cannot restore trailing-stop state from {dict(state)!r}: {exc}. "
+                "Refusing to run with a partially-restored trail."
+            ) from exc
+
+    # ------------------------------------------------------------------ logic
     def on_bar(self, ctx: BarContext) -> list[Signal]:
         # Checked before the warmup gate - a held position must never go
         # unprotected because the channel has not been recomputed yet.
         held = ctx.positions().get(self._instrument)
+        if held is not None and not held.is_flat:
+            side = Side.BUY if held.qty > 0 else Side.SELL
+            if self._trail is None or self._trail.side is not side:
+                self._trail = start_trail(held.average_price, side)
+            self._trail = advance_trail(self._trail, ctx.bar)
+        else:
+            self._trail = None
+
         if held is not None and not held.is_flat and stop_touched(
             ctx.bar, held, self._stop_loss_pct
         ):
@@ -111,6 +184,25 @@ class TrendlineBreakout(Strategy):
                     f"stop loss: {self._stop_loss_pct}% move against a "
                     f"{held.side} position of {held.lots} lot(s), entry "
                     f"{held.average_price:.2f}",
+                )
+            ]
+
+        if (
+            held is not None
+            and not held.is_flat
+            and self._trail is not None
+            and trail_touched(self._trail, ctx.bar, self._trail_activation_pct, self._trail_pct)
+        ):
+            closing_side = Side.SELL if held.qty > 0 else Side.BUY
+            return [
+                self._signal(
+                    ctx,
+                    SignalAction.CLOSE,
+                    closing_side,
+                    f"trailing stop: {self._trail_pct}% pullback from a peak of "
+                    f"{self._trail.peak:.2f} (armed at {self._trail_activation_pct}% "
+                    f"profit) on a {held.side} position of {held.lots} lot(s), "
+                    f"entry {held.average_price:.2f}",
                 )
             ]
 

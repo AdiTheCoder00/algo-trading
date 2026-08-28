@@ -57,8 +57,22 @@ indicator that would eventually close it opposingly has not converged yet.
 The check uses the bar's actual low/high, not its close (`algo/strategy/
 price_stop.py`), for the reason stated there: checking only the close would
 understate how often a real broker-side stop fires, and understating a safety
-feature is the wrong direction to be optimistic in. No take-profit is added —
-that remains this strategy's stated position, unchanged.
+feature is the wrong direction to be optimistic in.
+
+## An optional trailing profit stop, layered on top
+
+`trail_pct` (default 0, meaning off) adds a second, independent exit —
+`algo/strategy/trailing_profit_stop.py`. Once a held position has moved
+`trail_activation_pct` (default 2%) in its favour, a trailing stop arms
+`trail_pct` behind the best price seen since entry and tightens as that peak
+advances. Unlike `stop_loss_pct`, it protects nothing before the activation
+threshold is reached — it is a profit-lock, not a loss-bound — and is checked
+*after* the flat stop each bar, so a catastrophic adverse move is still caught
+first. Once armed, its level can never sit worse than entry — "cost to cost",
+see the trail module's own docstring — so an armed trail's worst outcome is a
+scratch, never a loser. Off by default so every existing caller and test keeps
+the stop-only behaviour unchanged; the measurement script turns it on
+explicitly.
 """
 
 from __future__ import annotations
@@ -76,6 +90,12 @@ from algo.pricing.indicators import warmup_bars
 from algo.strategy.base import Strategy
 from algo.strategy.context import BarContext
 from algo.strategy.price_stop import stop_touched
+from algo.strategy.trailing_profit_stop import (
+    TrailState,
+    advance_trail,
+    start_trail,
+    trail_touched,
+)
 
 
 def _ema_step(close: float, previous: float | None, alpha: float) -> float:
@@ -96,6 +116,8 @@ class MacdCrossover(Strategy):
         slow: int = 26,
         signal_period: int = 9,
         stop_loss_pct: Decimal = Decimal("0.5"),
+        trail_activation_pct: Decimal = Decimal("2"),
+        trail_pct: Decimal = Decimal("0"),
         config_hash: str = "",
     ) -> None:
         super().__init__()
@@ -105,17 +127,26 @@ class MacdCrossover(Strategy):
             )
         if stop_loss_pct < 0:
             raise DomainError(f"stop_loss_pct cannot be negative, got {stop_loss_pct}")
+        if trail_activation_pct < 0:
+            raise DomainError(
+                f"trail_activation_pct cannot be negative, got {trail_activation_pct}"
+            )
+        if trail_pct < 0:
+            raise DomainError(f"trail_pct cannot be negative, got {trail_pct}")
         self._instrument = instrument
         self._fast = fast
         self._slow = slow
         self._signal_period = signal_period
         self._stop_loss_pct = stop_loss_pct
+        self._trail_activation_pct = trail_activation_pct
+        self._trail_pct = trail_pct
         self._config_hash = config_hash
         self._fast_ema: float | None = None
         self._slow_ema: float | None = None
         self._signal_ema: float | None = None
         self._prev_histogram: float | None = None
         self._bars_seen = 0
+        self._trail: TrailState | None = None
 
     def warmup_bars(self) -> int:
         return warmup_bars(slow=self._slow, signal=self._signal_period)
@@ -127,6 +158,8 @@ class MacdCrossover(Strategy):
             "slow": str(self._slow),
             "signal": str(self._signal_period),
             "stop_loss_pct": str(self._stop_loss_pct),
+            "trail_activation_pct": str(self._trail_activation_pct),
+            "trail_pct": str(self._trail_pct),
         }
 
     # ------------------------------------------------------------ persistence
@@ -140,7 +173,7 @@ class MacdCrossover(Strategy):
         """
         if self._fast_ema is None:
             return {}
-        return {
+        out = {
             "fast_ema": repr(self._fast_ema),
             "slow_ema": repr(self._slow_ema),
             "signal_ema": repr(self._signal_ema),
@@ -149,6 +182,11 @@ class MacdCrossover(Strategy):
             ),
             "bars_seen": str(self._bars_seen),
         }
+        if self._trail is not None:
+            out["trail_side"] = self._trail.side.value
+            out["trail_entry"] = str(self._trail.entry_price)
+            out["trail_peak"] = str(self._trail.peak)
+        return out
 
     def restore(self, state: Mapping[str, str]) -> None:
         raw_fast = state.get("fast_ema", "").strip()
@@ -161,6 +199,16 @@ class MacdCrossover(Strategy):
             raw_hist = state.get("prev_histogram", "").strip()
             self._prev_histogram = float(raw_hist) if raw_hist else None
             self._bars_seen = int(state.get("bars_seen", "0"))
+            raw_trail_side = state.get("trail_side", "").strip()
+            self._trail = (
+                TrailState(
+                    side=Side(raw_trail_side),
+                    entry_price=Decimal(state["trail_entry"]),
+                    peak=Decimal(state["trail_peak"]),
+                )
+                if raw_trail_side
+                else None
+            )
         except (KeyError, ValueError) as exc:
             # A half-restored indicator is worse than a cold one: it would
             # compute a histogram value that looks legitimate but is not
@@ -196,6 +244,14 @@ class MacdCrossover(Strategy):
         # position must never go unprotected because the indicator that would
         # have closed it opposingly has not converged yet.
         held = ctx.positions().get(self._instrument)
+        if held is not None and not held.is_flat:
+            side = Side.BUY if held.qty > 0 else Side.SELL
+            if self._trail is None or self._trail.side is not side:
+                self._trail = start_trail(held.average_price, side)
+            self._trail = advance_trail(self._trail, ctx.bar)
+        else:
+            self._trail = None
+
         if held is not None and not held.is_flat and stop_touched(
             ctx.bar, held, self._stop_loss_pct
         ):
@@ -208,6 +264,25 @@ class MacdCrossover(Strategy):
                     f"stop loss: {self._stop_loss_pct}% move against a "
                     f"{held.side} position of {held.lots} lot(s), entry "
                     f"{held.average_price:.2f}",
+                )
+            ]
+
+        if (
+            held is not None
+            and not held.is_flat
+            and self._trail is not None
+            and trail_touched(self._trail, ctx.bar, self._trail_activation_pct, self._trail_pct)
+        ):
+            closing_side = Side.SELL if held.qty > 0 else Side.BUY
+            return [
+                self._signal(
+                    ctx,
+                    SignalAction.CLOSE,
+                    closing_side,
+                    f"trailing stop: {self._trail_pct}% pullback from a peak of "
+                    f"{self._trail.peak:.2f} (armed at {self._trail_activation_pct}% "
+                    f"profit) on a {held.side} position of {held.lots} lot(s), "
+                    f"entry {held.average_price:.2f}",
                 )
             ]
 
