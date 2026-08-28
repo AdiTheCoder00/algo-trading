@@ -17,6 +17,7 @@ tells you it moved.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import html
 import json
@@ -29,19 +30,16 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
+from functools import partial
 from pathlib import Path
 from typing import TypeVar
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import ccxt
 import pandas as pd
 import requests
 from dotenv import load_dotenv
-
-try:  # stdlib on 3.9+, but the IANA database itself may be missing on Windows.
-    from zoneinfo import ZoneInfo
-except ImportError:  # pragma: no cover - Python < 3.9
-    ZoneInfo = None  # type: ignore[assignment]
 
 LOG = logging.getLogger("macd_alert")
 
@@ -419,15 +417,18 @@ class MarketData:
         cursor = since_ms
 
         for page_number in range(1, max_pages + 1):
-            at = cursor
+            # partial, not a lambda: the cursor moves every iteration, and a
+            # lambda would close over the variable rather than this page's value.
+            fetch_page = partial(
+                self.exchange.fetch_ohlcv,
+                symbol,
+                timeframe=self.config.timeframe,
+                since=cursor,
+                limit=self.config.candle_limit,
+            )
             page = with_retries(
-                lambda: self.exchange.fetch_ohlcv(
-                    symbol,
-                    timeframe=self.config.timeframe,
-                    since=at,
-                    limit=self.config.candle_limit,
-                ),
-                what=f"fetch_ohlcv({symbol} {self.config.timeframe} @ {at})",
+                fetch_page,
+                what=f"fetch_ohlcv({symbol} {self.config.timeframe} @ {cursor})",
                 attempts=self.config.max_retries,
                 base_delay=self.config.retry_base_delay,
                 retry_on=(
@@ -496,7 +497,9 @@ class MarketData:
     def format_price(self, symbol: str, price: float) -> str:
         try:
             return str(self.exchange.price_to_precision(symbol, price))
-        except Exception:  # precision metadata is best-effort
+        except (ccxt.BaseError, LookupError, TypeError, ValueError):
+            # Precision metadata is best-effort: a market the exchange did not
+            # describe fully should not cost us the alert.
             return f"{price:,.8f}".rstrip("0").rstrip(".")
 
     def seconds_until_next_close(self) -> float:
@@ -528,12 +531,12 @@ class TelegramNotifier:
             response = self.session.post(self.url, data=payload, timeout=20)
             if response.status_code == 429:
                 retry_after = 5
-                try:
+                # JSONDecodeError subclasses ValueError; a non-object body
+                # reaches .get as an AttributeError.
+                with contextlib.suppress(ValueError, AttributeError, TypeError):
                     retry_after = int(
                         response.json().get("parameters", {}).get("retry_after", 5)
                     )
-                except ValueError:
-                    pass
                 LOG.warning("Telegram rate limited, sleeping %ss", retry_after)
                 time.sleep(retry_after)
                 raise requests.RequestException("Telegram 429")
@@ -606,17 +609,19 @@ class StateStore:
 # --------------------------------------------------------------------------- formatting
 
 
-def resolve_timezone(name: str):
-    if ZoneInfo is None or name.upper() == "UTC":
+def resolve_timezone(name: str) -> tzinfo:
+    if name.upper() == "UTC":
         return UTC
     try:
+        # ZoneInfoNotFoundError subclasses KeyError, and is what a Windows box
+        # without the tzdata package raises for every name.
         return ZoneInfo(name)
-    except Exception:
+    except (ZoneInfoNotFoundError, ValueError, OSError):
         LOG.warning("Unknown DISPLAY_TIMEZONE %r, falling back to UTC", name)
         return UTC
 
 
-def stamp(ms: int, tz) -> str:
+def stamp(ms: int, tz: tzinfo) -> str:
     return datetime.fromtimestamp(ms / 1000, tz).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
@@ -1178,10 +1183,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             if getattr(args, flag):
                 LOG.warning("--%s only applies to --backtest; ignoring it.", flag)
 
+    if args.backtest and args.candles <= 0:
+        raise SystemExit("--candles must be a positive number.")
+
     try:
         if args.backtest:
-            if args.candles <= 0:
-                raise SystemExit("--candles must be a positive number.")
             backtester = Backtester(
                 config=config,
                 market=MarketData(config),

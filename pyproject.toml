@@ -114,3 +114,8 @@ ignore = [
 "algo/core/clock.py" = ["DTZ003", "DTZ005"]
 # typer declares CLI arguments as call-valued defaults; that is its documented API.
 "algo/cli/main.py" = ["B008"]
+# The backtest report is a document written to stdout for a human to read or
+# pipe, not log output. T20 exists to keep print() out of the engine, where
+# every line must be timestamped and levelled; a report renderer is the one
+# place where stdout IS the product. Progress and errors there still log.
+"tools/macd_telegram_alert/macd_alert.py" = ["T201"]
