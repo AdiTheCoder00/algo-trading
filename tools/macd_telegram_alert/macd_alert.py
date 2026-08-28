@@ -27,6 +27,7 @@ import random
 import re
 import signal
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
@@ -115,6 +116,8 @@ class Config:
     display_timezone: str
     send_startup_message: bool
     log_level: str
+    enable_command_panel: bool
+    watchlist_path: Path
 
     @property
     def warmup_needed(self) -> int:
@@ -152,6 +155,7 @@ def load_config(
         )
 
     default_state = Path(__file__).with_name("state.json")
+    default_watchlist = Path(__file__).with_name("watchlist.json")
 
     return Config(
         telegram_token=_env_str("TELEGRAM_BOT_TOKEN", required=require_telegram),
@@ -173,6 +177,8 @@ def load_config(
         display_timezone=_env_str("DISPLAY_TIMEZONE", "UTC"),
         send_startup_message=_env_bool("SEND_STARTUP_MESSAGE", True),
         log_level=_env_str("LOG_LEVEL", "INFO").upper(),
+        enable_command_panel=_env_bool("ENABLE_COMMAND_PANEL", True),
+        watchlist_path=Path(_env_str("WATCHLIST_FILE", str(default_watchlist))),
     )
 
 
@@ -606,6 +612,208 @@ class StateStore:
             LOG.warning("Could not persist state to %s: %s", self.path, exc)
 
 
+# --------------------------------------------------------------------------- watch list
+
+
+class WatchList:
+    """The symbols currently being polled - mutable at runtime via Telegram
+    commands, unlike the rest of `Config`. Persisted so a restart keeps
+    whatever the owner last set rather than reverting to `TRADING_PAIR`, which
+    becomes only the first-ever bootstrap.
+
+    One lock, `list` in and out through it: contention is a handful of
+    Telegram commands, never a hot path, so simplicity wins over anything
+    fancier.
+    """
+
+    def __init__(self, path: Path, initial: Sequence[str]) -> None:
+        self._path = path
+        self._lock = threading.Lock()
+        loaded = self._load()
+        self._symbols: list[str] = loaded if loaded is not None else list(initial)
+        if loaded is None:
+            self._save()
+
+    def _load(self) -> list[str] | None:
+        if not self._path.exists():
+            return None
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            LOG.warning("Ignoring unreadable watch list %s: %s", self._path, exc)
+            return None
+        if isinstance(data, list) and all(isinstance(s, str) for s in data):
+            return data
+        LOG.warning("Ignoring malformed watch list %s (expected a list of strings).", self._path)
+        return None
+
+    def _save(self) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+            tmp.write_text(json.dumps(self._symbols, indent=2), encoding="utf-8")
+            tmp.replace(self._path)
+        except OSError as exc:
+            LOG.warning("Could not persist watch list to %s: %s", self._path, exc)
+
+    def symbols(self) -> list[str]:
+        with self._lock:
+            return list(self._symbols)
+
+    def add(self, symbol: str) -> bool:
+        """Returns False if `symbol` was already being watched."""
+        with self._lock:
+            if symbol in self._symbols:
+                return False
+            self._symbols.append(symbol)
+            self._save()
+            return True
+
+    def remove(self, symbol: str) -> bool:
+        """Returns False if `symbol` was not being watched."""
+        with self._lock:
+            if symbol not in self._symbols:
+                return False
+            self._symbols.remove(symbol)
+            self._save()
+            return True
+
+
+# --------------------------------------------------------------------------- command panel
+
+
+class CommandPanel:
+    """Telegram commands that change what the live monitor watches, with no
+    restart. Locked to `TELEGRAM_CHAT_ID`: a command from any other chat is
+    read - so its `update_id` still advances the offset and is never
+    reprocessed - but never acted on. The bot's username being discoverable
+    must not be enough for a stranger to redirect what it watches.
+    """
+
+    #: Telegram holds the connection open until a message arrives or this
+    #: elapses, so an idle bot costs one held connection, not one request a
+    #: second the way a short-poll loop would.
+    POLL_TIMEOUT_S = 25
+
+    def __init__(
+        self, config: Config, notifier: TelegramNotifier, watchlist: WatchList, market: MarketData
+    ) -> None:
+        self._config = config
+        self._notifier = notifier
+        self._watchlist = watchlist
+        self._market = market
+        self._offset: int | None = None
+        self._session = requests.Session()
+
+    def poll_once(self) -> None:
+        """One `getUpdates` call - blocks up to `POLL_TIMEOUT_S` if nothing is
+        waiting. Meant to be the thing the command-panel thread spends its
+        life inside."""
+        params: dict[str, int] = {"timeout": self.POLL_TIMEOUT_S}
+        if self._offset is not None:
+            params["offset"] = self._offset
+
+        try:
+            response = self._session.get(
+                f"https://api.telegram.org/bot{self._config.telegram_token}/getUpdates",
+                params=params,
+                timeout=self.POLL_TIMEOUT_S + 10,
+            )
+            data = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            LOG.warning("Command panel: getUpdates failed: %s", exc)
+            time.sleep(5)
+            return
+
+        if not data.get("ok"):
+            LOG.warning("Command panel: getUpdates rejected: %s", data)
+            time.sleep(5)
+            return
+
+        for update in data.get("result", []):
+            self._offset = update["update_id"] + 1
+            self._handle(update)
+
+    def _handle(self, update: dict) -> None:
+        message = update.get("message") or {}
+        chat = message.get("chat") or {}
+        text = (message.get("text") or "").strip()
+        if not text.startswith("/"):
+            return
+
+        if str(chat.get("id", "")) != str(self._config.telegram_chat_id):
+            LOG.warning(
+                "Command panel: ignoring %r from chat %s (not the owner).",
+                text.split()[0],
+                chat.get("id"),
+            )
+            return
+
+        parts = text.split()
+        command = parts[0].split("@", 1)[0].lower()  # strip a /cmd@botname suffix
+        args = parts[1:]
+
+        handlers = {
+            "/watch": self._cmd_watch,
+            "/unwatch": self._cmd_unwatch,
+            "/list": lambda _args: self._cmd_list(),
+            "/status": lambda _args: self._cmd_list(),
+            "/help": lambda _args: self._cmd_help(),
+            "/start": lambda _args: self._cmd_help(),
+        }
+        handler = handlers.get(command)
+        if handler is None:
+            self._reply(f"Unknown command: {html.escape(command)}. Try /help.")
+            return
+        handler(args)
+
+    def _cmd_watch(self, args: list[str]) -> None:
+        if not args:
+            self._reply("Usage: /watch SYMBOL (e.g. /watch ETH/USDT)")
+            return
+        symbol = args[0].upper()
+        if symbol not in self._market.exchange.markets:
+            self._reply(
+                f"{html.escape(symbol)} is not listed on "
+                f"{html.escape(self._config.exchange_id)}."
+            )
+            return
+        if self._watchlist.add(symbol):
+            self._reply(f"Now watching {html.escape(symbol)}.")
+        else:
+            self._reply(f"Already watching {html.escape(symbol)}.")
+
+    def _cmd_unwatch(self, args: list[str]) -> None:
+        if not args:
+            self._reply("Usage: /unwatch SYMBOL")
+            return
+        symbol = args[0].upper()
+        if self._watchlist.remove(symbol):
+            self._reply(f"Stopped watching {html.escape(symbol)}.")
+        else:
+            self._reply(f"Wasn't watching {html.escape(symbol)}.")
+
+    def _cmd_list(self) -> None:
+        symbols = self._watchlist.symbols()
+        if not symbols:
+            self._reply("Not watching anything. /watch SYMBOL to start.")
+            return
+        body = "\n".join(f"- {html.escape(s)}" for s in symbols)
+        self._reply(f"<b>Watching</b> ({html.escape(self._config.timeframe)}):\n{body}")
+
+    def _cmd_help(self) -> None:
+        self._reply(
+            "<b>Commands</b>\n"
+            "/watch SYMBOL - add a pair, e.g. /watch ETH/USDT\n"
+            "/unwatch SYMBOL - remove a pair\n"
+            "/list - show what's being watched\n"
+            "/help - this message"
+        )
+
+    def _reply(self, text: str) -> None:
+        self._notifier.send(text)
+
+
 # --------------------------------------------------------------------------- formatting
 
 
@@ -679,8 +887,11 @@ class Monitor:
     market: MarketData
     notifier: TelegramNotifier
     state: StateStore
+    watchlist: WatchList
+    command_panel: CommandPanel | None = None
     tz: object = field(init=False)
     _stop: bool = field(default=False, init=False)
+    _panel_thread: threading.Thread | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self.tz = resolve_timezone(self.config.display_timezone)
@@ -688,6 +899,15 @@ class Monitor:
     def request_stop(self, *_args) -> None:
         LOG.info("Shutdown requested - finishing the current cycle.")
         self._stop = True
+
+    def _run_command_panel(self) -> None:
+        assert self.command_panel is not None
+        while not self._stop:
+            try:
+                self.command_panel.poll_once()
+            except Exception:  # the panel is a convenience; it must not take the monitor down
+                LOG.exception("Command panel: unexpected error - retrying.")
+                time.sleep(5)
 
     def check_symbol(self, symbol: str) -> None:
         candles = self.market.closed_candles(symbol)
@@ -746,7 +966,7 @@ class Monitor:
         self.market.load_markets()
         LOG.info(
             "Watching %s on %s (%s), MACD(%d, %d, %d), closed candles only.",
-            ", ".join(self.config.symbols),
+            ", ".join(self.watchlist.symbols()) or "(nothing yet)",
             self.config.exchange_id,
             self.config.timeframe,
             self.config.fast_period,
@@ -755,17 +975,32 @@ class Monitor:
         )
 
         if self.config.send_startup_message:
+            panel_line = (
+                "\nSend /help to add or remove pairs." if self.command_panel is not None else ""
+            )
+            pairs = html.escape(", ".join(self.watchlist.symbols()) or "(none yet)")
             self.notifier.send(
                 "⚙️ <b>MACD monitor started</b>\n"
                 f"<b>Exchange:</b> {html.escape(self.config.exchange_id)}\n"
-                f"<b>Pairs:</b> {html.escape(', '.join(self.config.symbols))}\n"
+                f"<b>Pairs:</b> {pairs}\n"
                 f"<b>Timeframe:</b> {html.escape(self.config.timeframe)}\n"
                 f"<b>Settings:</b> MACD({self.config.fast_period}, "
                 f"{self.config.slow_period}, {self.config.signal_period})"
+                f"{panel_line}"
             )
 
+        if self.command_panel is not None:
+            self._panel_thread = threading.Thread(
+                target=self._run_command_panel, name="telegram-commands", daemon=True
+            )
+            self._panel_thread.start()
+            LOG.info("Command panel listening (owner chat only) - try /help.")
+
         while not self._stop:
-            for symbol in self.config.symbols:
+            symbols = self.watchlist.symbols()
+            if not symbols:
+                LOG.info("Watch list is empty - waiting for /watch.")
+            for symbol in symbols:
                 if self._stop:
                     break
                 try:
@@ -786,11 +1021,15 @@ class Monitor:
                 sleep_for,
                 self.config.timeframe,
             )
-            # Sleep in slices so Ctrl-C / SIGTERM is honoured promptly.
+            # Sleep in slices so Ctrl-C / SIGTERM is honoured promptly, and so a
+            # /watch command lands in the very next cycle rather than after a
+            # sleep already in progress when it arrived.
             deadline = time.monotonic() + sleep_for
             while not self._stop and time.monotonic() < deadline:
                 time.sleep(min(1.0, deadline - time.monotonic()))
 
+        if self._panel_thread is not None:
+            self._panel_thread.join(timeout=CommandPanel.POLL_TIMEOUT_S + 15)
         LOG.info("Monitor stopped.")
 
 
@@ -1175,8 +1414,14 @@ def main(argv: Iterable[str] | None = None) -> int:
         config = replace(config, symbols=symbols)
     if args.timeframe:
         config = replace(config, timeframe=args.timeframe)
-    if not config.symbols:
-        raise SystemExit("No trading pair: set TRADING_PAIR in .env or pass --symbol.")
+    # A backtest and a panel-less monitor have no other way to learn a pair; a
+    # monitor with the command panel on can start empty and bootstrap via
+    # /watch, or pick up whatever watchlist.json already has from last time.
+    if not config.symbols and (args.backtest or not config.enable_command_panel):
+        raise SystemExit(
+            "No trading pair: set TRADING_PAIR in .env, pass --symbol, or enable "
+            "ENABLE_COMMAND_PANEL and /watch one once it's running."
+        )
 
     if not args.backtest:
         for flag in ("since", "csv", "notify"):
@@ -1203,11 +1448,20 @@ def main(argv: Iterable[str] | None = None) -> int:
             LOG.info("Backtest complete: %d crossovers across all pairs.", found)
             return 0
 
+        market = MarketData(config)
+        notifier = TelegramNotifier(config)
+        watchlist = WatchList(config.watchlist_path, initial=config.symbols)
         monitor = Monitor(
             config=config,
-            market=MarketData(config),
-            notifier=TelegramNotifier(config),
+            market=market,
+            notifier=notifier,
             state=StateStore(config.state_path),
+            watchlist=watchlist,
+            command_panel=(
+                CommandPanel(config, notifier, watchlist, market)
+                if config.enable_command_panel
+                else None
+            ),
         )
         signal.signal(signal.SIGINT, monitor.request_stop)
         if hasattr(signal, "SIGTERM"):

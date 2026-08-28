@@ -1763,6 +1763,134 @@ XAUUSD, and **0 of the account's 72 existing deals adopted** - the `FixedVol100`
 position and every prior hand-placed trade are correctly foreign. No order has
 been placed through it.
 
+### D-123 - `MacdCrossover`, and the honest first measurement against real costs
+Mirrors `tools/macd_telegram_alert` exactly: `EMA(adjust=False)`, MACD(12,26,9)
+by default, the same `<=`/`>=` crossover rule (`algo/pricing/indicators.py`,
+cross-checked line-for-line against pandas with `adjust=False` - 0.0 max
+difference over an 800-bar random walk). A signal here and an alert there answer
+the same question the same way.
+
+**Indicator state is incremental, not recomputed per bar.** The alert tool's
+live poller refetches a rolling 300-candle window and reseeds the EMA from
+scratch on every poll - a deliberate, bounded-cost approximation for a
+rate-limited exchange API. That approximation would cost this engine its
+live/backtest parity guarantee (two polls of the same instant could show
+different histogram values depending on window alignment), so `MacdCrossover`
+instead carries the three EMAs as running state, fed one close per `on_bar`.
+Persisted across a restart, for the same reason `DeltaStrangle`'s cadence is
+(D-110): reseeding from zero on every restart would silently spend
+`warmup_bars()` bars re-converging with no signal, at exactly the moment - a
+restart during an open position - that blind spot is least acceptable. Verified
+by feeding one continuous run and one restarted-midway run the same bars and
+requiring bit-identical subsequent decisions.
+
+**It owns its own exits, unlike `DeltaStrangle`.** A strangle's exit is a
+devolvement deadline or a P&L level unrelated to the entry signal, so
+`DeltaStrangle` does nothing while held and lets the risk layer close it. A
+crossover strategy's entry signal *is* the exit signal for the opposite side -
+holding a long after MACD has turned bearish means holding a position the
+strategy's own logic no longer believes in. So `MacdCrossover` follows
+`CoinFlip`'s pattern instead: read the held position from the context, never
+from memory (D-041), close on an opposing cross, open on a fresh cross when
+flat. **No independent stop-loss or take-profit is added** - the alert tool has
+none, and inventing one would no longer be the same strategy it watches. Between
+crossings the strategy sits flat rather than always being long or short: closing
+a position consumes the crossing event that triggered it, and re-entry waits for
+the *next* one rather than immediately reversing into the opposite side. That is
+a real design choice, not an oversight, and it costs roughly half of every
+reversal's timeliness.
+
+**Measured against real M5 XAUUSD bars and the real cost structure (D-121),
+literal and unfiltered, in `scripts/measure_macd_xauusd.py`**: not routed
+through `BacktestEngine`, which groups every session by `ist_date(bar.ts)`
+throughout (margin lookups, chain snapshots, devolvement) - correct for MCX's
+one-session-a-day shape, wrong for a 22:00-21:00 UTC continuous session, and not
+something to generalise silently in code that also backs live MCX trading. The
+same spirit as `bhavcopy_runner.py`: real strategy, real data, real costs,
+reported as a shape test.
+
+    50,000 M5 bars, 2025-12-12 .. 2026-08-28 (0.71 yr), 1 MT5 lot (100 oz) fixed
+    trades closed   1,952         win rate    32.3%
+    gross P&L       $12,271.00    buy-and-hold over the same window: $15,682.00
+    spread paid     $56,608.00
+    swap paid       $-4,541.13 (a net credit - see below)
+    net P&L         -$39,795.87
+
+**The literal, unfiltered crossover does not clear its own costs.** Gross P&L is
+positive; spread ($56,608, at the $0.29 round-trip measured live) is more than
+four and a half times larger and dominates completely. This is the same
+arithmetic the back-of-envelope estimate gave before any strategy code was
+written - 15.2 crossovers/day implies roughly 36% of notional a year in spread
+alone - now confirmed against the actual strategy and the actual account's
+numbers rather than a frequency count. Swap nets to a small *credit* here,
+consistent with the account being roughly balanced between long and short
+exposure over the window and short paying more than long costs (D-121);
+consistent with the sign convention tests in `test_cfd_costs.py`.
+
+This is not evidence the underlying MACD signal has no edge - gross P&L being
+positive says the direction is doing something. It is evidence that trading
+*every* crossover on a five-minute chart, with no filter and no minimum move
+size, pays away the edge in spread faster than it collects it. Reported plainly
+rather than adjusted to look better, per this project's standing rule (D-011,
+D-108): a number is not trustworthy for having been made comfortable.
+
+### D-124 - Slower timeframes, and a second strategy, measured the same honest way
+Follow-up to D-123, on two fronts: does a slower bar interval change the
+spread-dominates-everything conclusion, and how does a structurally different
+signal (`TrendlineBreakout`, a Donchian channel - the well-defined form of
+"trend line breakout": the highest high / lowest low of the last `lookback`
+bars, no incremental state, no numeric-matching concern the way an EMA has)
+fare under the same real costs.
+
+**The first comparison was confounded, and worth stating exactly how.**
+Fetching each timeframe's full 50,000-bar history (MT5's per-request cap) gives
+each one a *different* calendar window - M15 covers 2.11 years, M30 4.22, H1
+8.73 - so a naive comparison conflates "this timeframe" with "this historical
+period happened to trend". `scripts/measure_macd_xauusd.py` now fetches all
+requested timeframes, then trims every series to their **common overlapping
+window** before the fair comparison, so the only thing that differs between
+rows is genuinely the bar interval.
+
+**On the same 2.11-year window (2024-07-17 .. 2026-08-28), both strategies get
+better as the timeframe slows - dramatically, not marginally:**
+
+    MacdCrossover              M15            M30            H1
+      trades                 1,946            965            473
+      win rate               30.6%          37.2%          37.2%
+      net P&L          -$230,052.41     $97,653.20    $190,185.54
+
+    TrendlineBreakout(20)       M15            M30            H1
+      trades                   937            451            204
+      win rate               36.1%          36.8%          42.6%
+      net P&L            $50,983.08    $102,206.55    $162,297.62
+
+Trade count roughly halves with each step to a slower timeframe (crossover/
+breakout frequency, on this data, scales with **bar count** far more than with
+calendar time - MACD's own full-history run had ~1,900-1,950 trades at every
+one of M15/M30/H1 despite those windows differing by a factor of four, which is
+what motivated checking whether the *fair* comparison told a different story).
+Spread cost falls in lockstep with trade count while gross P&L holds up or
+grows, so net P&L improves for the same reason it collapsed on M5 in D-123:
+fewer round trips paying the same $0.29 each.
+
+**`TrendlineBreakout` is net positive at every timeframe tested, including
+M15** - the one place `MacdCrossover` was most deeply negative. Its spread cost
+is lower at every timeframe too (a 20-bar channel breaks out far less often than
+a MACD histogram crosses zero), and at H1 its net P&L ($162,297.62) is over 80%
+of buy-and-hold ($199,700) on only 204 trades across 2.11 years - about one every
+3.6 trading days.
+
+**Two things this does not establish, stated because a positive number invites
+skipping past them.** This is one 2.11-year window on one instrument, and it is
+gold's own recent trending period (buy-and-hold itself returns ~$200k on the same
+window) - a trend-following signal doing well while the underlying trended is not
+distinguishable, from a single run, from the signal having genuine edge versus
+merely being long-biased through a bull run. And neither strategy carries a
+stop-loss (D-123's gap statement applies to `TrendlineBreakout` too, stated in
+its own module docstring) - a single badly-timed hold between the entry and
+the eventual opposing signal is uninsured against on either instrument, at any
+timeframe.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting

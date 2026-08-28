@@ -71,6 +71,36 @@ python macd_alert.py /etc/macd-alert/eth.env
 That is the clean way to run several instances with different pairs or
 timeframes — give each its own env file and its own `STATE_FILE`.
 
+## Command panel
+
+While the live monitor is running, message the bot to change what it watches
+— no restart needed:
+
+| Command | Effect |
+| --- | --- |
+| `/watch ETH/USDT` | Add a pair (must be listed on `EXCHANGE_ID`, or it's refused) |
+| `/unwatch ETH/USDT` | Remove one |
+| `/list` / `/status` | Show what's currently being watched |
+| `/help` / `/start` | List commands |
+
+**Locked to `TELEGRAM_CHAT_ID`.** A command from any other chat is read (so
+its `update_id` is never reprocessed) but never acted on — the bot's username
+being discoverable must not be enough for a stranger to redirect what it
+watches. There is no allowlist of *additional* chats; if you want more than
+one person able to issue commands, they need to share the one configured
+chat (a group works for this).
+
+The watch list lives in `WATCHLIST_FILE` (default `watchlist.json`, gitignored
+like `state.json`). `TRADING_PAIR` only seeds it the first time the file
+doesn't exist yet — once it does, it's the source of truth, so a `/watch` from
+last week survives a restart today. Set `ENABLE_COMMAND_PANEL=false` for a
+read-only deployment that never listens for anything inbound; `--symbol`
+still works as a one-off override either way.
+
+Implementation note: commands are polled via Telegram's long-poll `getUpdates`
+on a background thread, alongside the candle-close loop — an idle bot costs
+one held connection, not one request a second.
+
 ## Backtest mode
 
 Replays a stretch of history and lists every crossover the live loop *would*
@@ -182,9 +212,39 @@ Keep `.env` readable only by the service user: `chmod 600 .env`.
 
 ### Windows
 
-Run it as a scheduled task set to "Run whether user is logged on or not" with
-the trigger "At startup", action `…\.venv\Scripts\python.exe`, argument
-`macd_alert.py`, and "Start in" set to this directory.
+Run `setup_scheduled_task.ps1` once, elevated: right-click it -> "Run with
+PowerShell", accept the UAC prompt. It registers "MACD Telegram Alert" in Task
+Scheduler, set to start at logon and restart itself (up to 999 times, 1 minute
+apart) if the process ever exits, with no execution time limit - Task
+Scheduler kills tasks after 3 days by default, which would otherwise stop a
+monitor meant to run forever without either of you noticing.
+
+Elevation is required even though the task only runs as your own user - a
+plain PowerShell window gets "Access is denied" on *any* scheduled task
+creation on this kind of setup, confirmed by probing with a trivial one. There
+is no way around that step short of running as Administrator.
+
+It runs `run_live.ps1`, which sets `REQUESTS_CA_BUNDLE` before launching
+`macd_alert.py` - Task Scheduler starts a task with none of your shell's
+environment, so this is what makes the CA bundle (see
+[CERTIFICATE_VERIFY_FAILED](#certificate_verify_failed) below) actually reach
+the process. Both scripts assume `ca-bundle.pem` lives next to them; rebuild
+it there if it goes stale.
+
+By design this only runs while you are logged on - no password is stored, so
+it cannot start before you log in. If you want it to survive being logged out
+entirely, that needs Task Scheduler's own "Run whether user is logged on or
+not" option with a stored password, which you'd set up yourself through the
+GUI.
+
+Check on it any time with:
+
+```powershell
+Get-ScheduledTaskInfo -TaskName "MACD Telegram Alert"
+```
+
+and stop it with `Stop-ScheduledTask` / `Disable-ScheduledTask` /
+`Unregister-ScheduledTask` (same `-TaskName`).
 
 ## Error handling
 

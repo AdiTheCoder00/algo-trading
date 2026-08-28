@@ -65,7 +65,9 @@ def _ctx(bar: Bar, *, held: Position | None = None) -> BarContext:
 
 
 def _long(lots: int = 100) -> Position:
-    return Position(instrument=XAUUSD, lots=lots, qty=Decimal(lots), cost_basis=Decimal(lots) * 4400)
+    return Position(
+        instrument=XAUUSD, lots=lots, qty=Decimal(lots), cost_basis=Decimal(lots) * 4400
+    )
 
 
 def _short(lots: int = 100) -> Position:
