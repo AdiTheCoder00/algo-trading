@@ -1,0 +1,3 @@
+2026-08-29 01:49:24 | INFO    | macd_alert | Watching BTC/USDT on binance (1h), MACD(12, 26, 9), closed candles only.
+2026-08-29 01:49:27 | INFO    | macd_alert | BTC/USDT 1h | close=77580.03 macd=-493.52 signal=-238.45 hist=-255.07 (candle 2026-08-28 19:00:00 UTC)
+2026-08-29 01:49:27 | INFO    | macd_alert | Next check in 2448s (just after the next 1h close).
