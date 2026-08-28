@@ -73,7 +73,51 @@ class OptionId(BaseModel):
         return self.key
 
 
-InstrumentId: TypeAlias = Annotated[FutureId | OptionId, Field(discriminator="kind")]
+class CfdId(BaseModel):
+    """A rolling CFD on a spot instrument - XAUUSD on a Vantage MT5 account.
+
+    **It has no expiry, and that is the defining difference.** A futures contract
+    ends; a spot CFD is held open indefinitely and the broker charges or pays a
+    financing rate every night for the privilege (`SwapModel`). That financing is
+    the cost MCX does not have and this project deliberately removed at Milestone
+    0 - it comes back here, because on this venue it is real.
+
+    Consequences that follow from having no expiry: there is no devolvement, no
+    roll, no cycle cadence, and nothing for `DevolvementGuard` to guard. The
+    strangle's entire calendar structure has no meaning against this instrument.
+
+    `symbol` is the broker's own string because on an OTC product there is no
+    exchange identifier to prefer - "XAUUSD" means whatever Vantage says it
+    means, which is precisely why `Exchange.OTC` labels it.
+    """
+
+    model_config = _FROZEN
+
+    kind: Literal["cfd"] = "cfd"
+    symbol: str
+    exchange: Exchange = Exchange.OTC
+
+    @property
+    def underlying(self) -> str:
+        """The same string as `symbol`.
+
+        Present because the rest of the engine asks every instrument for its
+        underlying when looking up a contract spec, and a CFD is its own
+        underlying - there is no separate contract behind it.
+        """
+        return self.symbol
+
+    @property
+    def key(self) -> str:
+        return f"{self.exchange}:{self.symbol}:CFD"
+
+    def __str__(self) -> str:
+        return self.key
+
+
+InstrumentId: TypeAlias = Annotated[
+    FutureId | OptionId | CfdId, Field(discriminator="kind")
+]
 
 
 class InstrumentSpec(BaseModel):

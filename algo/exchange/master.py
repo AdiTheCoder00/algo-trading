@@ -38,7 +38,7 @@ from pydantic import BaseModel, ConfigDict
 
 from algo.core.enums import Exchange, Right
 from algo.core.errors import DataError
-from algo.core.instrument import InstrumentId, OptionId
+from algo.core.instrument import CfdId, InstrumentId, OptionId
 from algo.core.timeutil import ensure_utc
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
@@ -342,6 +342,16 @@ class InstrumentMaster:
 
     # ---------------------------------------------------------------- lookup
     def row_for(self, instrument: InstrumentId) -> MasterRow:
+        if isinstance(instrument, CfdId):
+            # This master is Angel One's / Kotak's list of exchange contracts. A
+            # CFD is a bilateral contract with an MT5 broker and has no entry in
+            # it, no symboltoken, and no expiry to match on. Saying so beats the
+            # AttributeError that reaching for `.expiry` would otherwise raise.
+            raise DataError(
+                f"{instrument.key} is an OTC CFD and has no row in an exchange "
+                "instrument master. CFD instruments are resolved by the MT5 "
+                "adapter against the broker's own symbol list."
+            )
         exchange = instrument.exchange
         candidates = [
             r

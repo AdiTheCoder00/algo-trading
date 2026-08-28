@@ -22,6 +22,15 @@ class Exchange(StrEnum):
     MCX = "MCX"
     NSE = "NSE"
     NFO = "NFO"
+    OTC = "OTC"
+    """Not an exchange at all, and named that way on purpose.
+
+    A CFD is a **bilateral contract with the broker**, not an exchange-traded
+    instrument. There is no central order book, the quote is the broker's own,
+    and the broker is the counterparty to every position. None of the guarantees
+    that make an MCX fill comparable across venues apply here, so the venue is
+    labelled for what it is rather than borrowed from the underlying's exchange.
+    """
 
 
 class Side(StrEnum):

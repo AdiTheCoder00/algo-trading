@@ -1,0 +1,67 @@
+# XAUUSD contract specification, as offered by Vantage Markets over MT5.
+#
+# Decision D-010: every entry carries effective_from and a source. Unlike the
+# GOLDM spec, these were not read off a screenshot - they were queried from the
+# live terminal via `MetaTrader5.symbol_info("XAUUSD")` on 2026-08-28 against
+# account 25804244 (VantageMarkets-Demo). The `source` line below is
+# reproducible: run `algo mt5` and the same numbers come back.
+#
+# ============================================================================
+# THE UNIT DECISION. READ THIS BEFORE CHANGING ANY NUMBER HERE.
+# ============================================================================
+#
+# MT5 sizes XAUUSD in *broker lots* of 100 troy ounces, in steps of 0.01.
+# This engine's `Order.lots` is an INTEGER and is validated `>= 1`, because MCX
+# lots are whole contracts and always have been.
+#
+# Those two facts cannot both hold at once, so a unit had to be chosen:
+#
+#     ONE ENGINE LOT = 1 TROY OUNCE = 0.01 MT5 LOTS
+#
+# That keeps `lots` an integer, gives the same 0.01 granularity MT5 allows, and
+# means no change to the order model, the sizer, the portfolio or the fill
+# simulator. The conversion lives in exactly one place - the MT5 broker adapter -
+# and is tested in both directions.
+#
+# The hazard is obvious and worth naming: reading "10 lots" as ten MT5 lots
+# instead of ten ounces is a **100x position size error**. Anything printing a
+# size to a human should say the unit.
+#
+# So, per ONE ENGINE LOT (one ounce):
+#   lot_size   = 1        troy ounce
+#   multiplier = 1        USD per 1.00 of quoted price, per ounce
+#   tick_size  = 0.01     (MT5 point; digits = 2)
+#
+# Cross-check against MT5's own numbers, per BROKER lot of 100 oz:
+#   trade_contract_size = 100    -> 100 x our lot_size of 1        OK
+#   trade_tick_value    = $1.00  -> 100 oz x 0.01 x our multiplier OK
+#
+# ============================================================================
+#
+# `dpr_pct` is null and stays null: a CFD has no exchange circuit limit. The
+# broker can widen, requote or stop quoting, which is a different failure and is
+# not modelled as a price band.
+
+specs:
+  - underlying: XAUUSD
+    exchange: OTC
+    lot_size: "1"             # troy ounces per ENGINE lot (see above)
+    multiplier: "1"           # USD per point of quoted price, per engine lot
+    tick_size: "0.01"
+    strike_interval: null     # no options on this instrument
+    max_order_qty_lots: 10000 # MT5 volume_max 100 broker lots = 10,000 ounces
+    min_lots: 1               # MT5 volume_min 0.01 broker lots = 1 ounce
+    max_lots: null
+    dpr_pct: null             # a CFD has no circuit; see the note above
+    effective_from: "2026-01-01"
+    effective_to: null
+    source: >-
+      MetaTrader5.symbol_info("XAUUSD") queried live on 2026-08-28 from the
+      Vantage Markets MT5 terminal (build 6140), account 25804244,
+      server VantageMarkets-Demo. Reported: trade_contract_size 100,
+      trade_tick_size 0.01, trade_tick_value 1.0, digits 2, volume_min 0.01,
+      volume_step 0.01, volume_max 100, trade_stops_level 20 points.
+      Converted to a one-ounce engine lot as documented above. These are one
+      broker's terms on one account type, not an exchange specification - a
+      different Vantage account tier may differ, and another broker certainly
+      will.

@@ -1639,6 +1639,130 @@ any other divergence. A second test asserts the declared differences are actuall
 different, so a stale allowance cannot quietly widen the exemption. Verified
 against the real drift before being trusted.
 
+### D-121 - The MT5 venue layer: XAUUSD on Vantage
+`docs/milestone-0-plan.md` has a section headed "S6 is an MT5 forex/CFD model;
+this is MCX commodity options", which reconciled the original brief *away* from
+MT5 item by item. This adds MT5 back as a second venue - not by reversing that
+reconciliation, but because a CFD really is the other thing, and the differences
+it listed are exactly the ones that had to be built.
+
+**MT5 cannot trade this strategy.** Its API has no option-chain concept at all -
+no strike, no right, no expiry ladder - and no broker routes MCX through it.
+`DeltaStrangle` does not port; a `CfdId` has no expiry, so there is no roll, no
+cadence, and nothing for `DevolvementGuard` to guard. What ports is everything
+else: the engine's `decide` loop, risk layer, portfolio, backtest, live loop and
+dashboard.
+
+Everything below was **measured from the live terminal**, account 25804244
+(VantageMarkets-Demo), 2026-08-28, not taken from documentation.
+
+**Two correctness traps in the data feed.** MT5 stamps every bar and tick in
+*broker server time* and the API never says what that is - Vantage runs UTC+3 in
+summer, and EET brokers shift twice a year, so a hard-coded offset is wrong for a
+third of the year. `measure_server_offset` measures it against a real clock,
+rounds away network latency and refuses an implausible result. Separately,
+`copy_rates_from_pos(..., 0, n)` includes the bar **still forming**, whose high,
+low and close can all still change; handing that to a strategy is look-ahead by
+the back door, and it is the one form the backtest firewall cannot catch because
+in live there is no future array to withhold. `closed_bars` drops it.
+
+**The unit decision, because getting it wrong is a 100x position error.** MT5
+sizes XAUUSD in 100-ounce broker lots in steps of 0.01; `Order.lots` is an
+integer validated `>= 1`. Both cannot hold, so **one engine lot = one troy ounce
+= 0.01 MT5 lots**. That keeps the order model, sizer, portfolio and fill
+simulator untouched and preserves MT5's own granularity. The conversion belongs
+in exactly one place - the broker adapter - and anything printing a size to a
+person must name the unit.
+
+**Financing is back, and it is the dominant cost.** Milestone 0 struck "swap /
+financing, triple-swap Wednesday" off with "Does not exist" - true for MCX, where
+margin is blocked rather than borrowed. Measured here: long **-80.54 points/lot/
+night = -6.59% a year**, short **+32.67 = +2.67% a year**, tripled on Wednesday.
+A long held a year pays 6.6% of notional before making anything; for any
+multi-day hold this is larger than spread. The sign convention is stated and
+tested because reversing it turns the largest cost in the model into income.
+
+The swap rate is a **snapshot and can never be otherwise**: MT5 publishes no
+historical series, so a backtest over four years applies today's rate to all of
+it. `SwapModel.is_verified` is permanently False - unlike a contract note, no
+evidence could ever settle a rate that was never published.
+
+**Commission, by contrast, is verified.** Not from marketing: all 54 XAU deals in
+the account's own dealing history carry `commission == 0.0` and `fee == 0.0`.
+`CfdChargeModel.vantage_standard()` is verified on that evidence, scoped to this
+account tier. The MCX taxes (CTT, SEBI, stamp, GST) are zero here because the
+venue has none, not because they are unmodelled.
+
+**The trading week, derived from 5,000 real bars** rather than from what an FX
+week is generally like. Sunday 22:00 to Friday 21:00 UTC, no Saturday, with a
+90-minute daily break whose empty slots are exactly 21:00 and 21:30. Naming a
+session by the date it *closes* on makes the rest fall out: Sunday evening's bars
+belong to Monday's session, and the daily break stops being an intra-session
+special case - it is precisely the gap *between* sessions. 21:00 UTC is midnight
+on the broker's clock, which is also when financing is charged, so a session
+boundary and a swap charge are the same instant. Validated: **0 of 5,000 real
+bars fall outside the modelled session.**
+
+`Exchange.OTC` names the venue for what it is. A CFD is a bilateral contract with
+the broker - no central order book, the broker is the counterparty, and none of
+the guarantees that make an MCX fill comparable across venues apply.
+
+**Still to build: the broker adapter.** Two findings shape it. The account is
+**HEDGING**, so MT5 holds independent tickets per trade rather than one netted
+position per symbol, which the engine's `Portfolio` assumes. And MT5 **overwrites
+the order comment** with its own text (`[sl 4641.92]`, `closePosition`), so the
+comment cannot carry a client order id through a lifecycle - the adapter needs
+its own persisted ledger, exactly as `KotakBroker` does for the same reason.
+Filling mode is IOC-only on this symbol.
+
+### D-122 - The MT5 broker adapter
+Implements `Broker` against a running terminal, so `OrderRouter`, `Reconciler`,
+`OrderJournal` and `LiveLoop` all work unchanged. Four things about MT5 shaped
+it, each found by probing the live account rather than reading documentation.
+
+**The comment field is not a tag.** MT5 lets an order carry a `comment`, which
+looks like the client-order-id slot the Kotak SDK lacks. It is not: the terminal
+**overwrites it**. Deals pulled from the same account carry comments MT5 wrote
+itself - `[sl 4641.92]`, `[tp 4635.00]`, `closePosition` - in place of whatever
+was sent, so an id put there survives until the first stop-out and is then gone.
+Same answer as Kotak, for a different reason: the adapter keeps its own persisted
+ledger, and `magic` (a fixed constant) is what separates our orders from the
+account's existing ones.
+
+**The account is HEDGING; the engine nets.** `positions_get` returns an
+independent ticket per trade, while `Portfolio` and `BrokerPositionSnapshot`
+assume one signed net position per instrument. Tickets are aggregated with a
+signed-volume-weighted average entry. That is the right arithmetic, but netting
+hides something real - two opposing tickets cancel on paper while both still pay
+financing - so `opposing_tickets` reports the pair rather than letting the
+netting swallow it.
+
+**Sizes are ounces here and lots there.** `volume = lots / 100`, in one place
+only, tested in both directions and at the venue's own limits. A volume finer
+than MT5's 0.01 step raises rather than rounding, because a silently rounded size
+is a silently wrong position. This is the hundredfold error the spec file already
+warns about (D-121).
+
+**Filling is read, not assumed.** `symbol_info("XAUUSD").filling_mode` reports
+IOC only on this account; sending FOK would be rejected. A symbol advertising
+neither raises rather than guessing how the venue wants to be filled.
+
+Two smaller decisions worth stating. `cancel` **raises** rather than no-opping:
+every order this adapter sends is a market IOC that fills or is rejected
+immediately and never rests, so a caller believing it had cancelled something
+would be reasoning about a position that is open. And `connect` refuses when the
+terminal reports `trade_allowed == False` - better than discovering Algo Trading
+is switched off when the first order bounces.
+
+**A security property worth noting.** Unlike the Kotak adapter there is no login
+step here: the terminal is already signed in, so **no credential passes through
+this process at all** - no TOTP seed, no MPIN, nothing to leak into a log.
+
+Verified against the live account, read-only: funds and health correct, flat on
+XAUUSD, and **0 of the account's 72 existing deals adopted** - the `FixedVol100`
+position and every prior hand-placed trade are correctly foreign. No order has
+been placed through it.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting
