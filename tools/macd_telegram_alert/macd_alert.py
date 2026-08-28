@@ -27,10 +27,11 @@ import re
 import signal
 import sys
 import time
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Sequence, TypeVar
+from typing import TypeVar
 
 import ccxt
 import pandas as pd
@@ -50,7 +51,7 @@ T = TypeVar("T")
 # --------------------------------------------------------------------------- config
 
 
-def _env_str(name: str, default: Optional[str] = None, *, required: bool = False) -> str:
+def _env_str(name: str, default: str | None = None, *, required: bool = False) -> str:
     value = (os.getenv(name) or "").strip()
     if not value:
         if required:
@@ -124,7 +125,7 @@ class Config:
 
 
 def load_config(
-    env_file: Optional[str] = None,
+    env_file: str | None = None,
     *,
     require_telegram: bool = True,
     require_pair: bool = True,
@@ -205,7 +206,7 @@ def with_retries(
 ) -> T:
     """Run `operation`, backing off exponentially on the listed exceptions."""
 
-    last_error: Optional[BaseException] = None
+    last_error: BaseException | None = None
     for attempt in range(1, attempts + 1):
         try:
             return operation()
@@ -271,7 +272,7 @@ class Crossover:
     prev_histogram: float
 
 
-def classify(prev_histogram: float, histogram: float) -> Optional[str]:
+def classify(prev_histogram: float, histogram: float) -> str | None:
     """The one and only definition of a crossover, shared by live and backtest."""
     if prev_histogram <= 0 < histogram:
         return "bullish"
@@ -282,7 +283,7 @@ def classify(prev_histogram: float, histogram: float) -> Optional[str]:
 
 def _crossover_at(
     candles: pd.DataFrame, macd: pd.DataFrame, position: int
-) -> Optional[Crossover]:
+) -> Crossover | None:
     """Build a Crossover for row `position`, comparing it with `position - 1`.
 
     Both rows must have a defined MACD and signal, otherwise the EMAs are still
@@ -310,20 +311,20 @@ def _crossover_at(
     )
 
 
-def detect_crossover(candles: pd.DataFrame, macd: pd.DataFrame) -> Optional[Crossover]:
+def detect_crossover(candles: pd.DataFrame, macd: pd.DataFrame) -> Crossover | None:
     """Compare the last two *closed* candles and report a sign change, if any."""
     if len(macd) < 2:
         return None
     return _crossover_at(candles, macd, len(macd) - 1)
 
 
-def find_crossovers(candles: pd.DataFrame, macd: pd.DataFrame) -> List[Crossover]:
+def find_crossovers(candles: pd.DataFrame, macd: pd.DataFrame) -> list[Crossover]:
     """Every crossover in the series, oldest first.
 
     Walks the same comparison the live loop makes, one candle at a time, so a
     replay reports exactly what the monitor would have alerted on.
     """
-    found: List[Crossover] = []
+    found: list[Crossover] = []
     for position in range(1, len(macd)):
         cross = _crossover_at(candles, macd, position)
         if cross is not None:
@@ -446,7 +447,7 @@ class MarketData:
                 "  page %d: %d candles, through %s",
                 page_number,
                 len(fresh),
-                stamp(rows[-1][0], timezone.utc),
+                stamp(rows[-1][0], UTC),
             )
             cursor = rows[-1][0] + period_ms
             if cursor >= now_ms:
@@ -607,12 +608,12 @@ class StateStore:
 
 def resolve_timezone(name: str):
     if ZoneInfo is None or name.upper() == "UTC":
-        return timezone.utc
+        return UTC
     try:
         return ZoneInfo(name)
     except Exception:
         LOG.warning("Unknown DISPLAY_TIMEZONE %r, falling back to UTC", name)
-        return timezone.utc
+        return UTC
 
 
 def stamp(ms: int, tz) -> str:
@@ -799,14 +800,14 @@ class Trade:
     signal_ms: int
     entry_ms: int
     entry_price: float
-    exit_ms: Optional[int]
-    exit_price: Optional[float]
+    exit_ms: int | None
+    exit_price: float | None
 
     @property
     def is_open(self) -> bool:
         return self.exit_price is None
 
-    def return_pct(self, mark_price: Optional[float] = None) -> Optional[float]:
+    def return_pct(self, mark_price: float | None = None) -> float | None:
         close_price = self.exit_price if self.exit_price is not None else mark_price
         if close_price is None or not self.entry_price:
             return None
@@ -815,7 +816,7 @@ class Trade:
         return (self.entry_price / close_price - 1) * 100
 
 
-def simulate_flips(candles: pd.DataFrame, crossovers: Sequence[Crossover]) -> List[Trade]:
+def simulate_flips(candles: pd.DataFrame, crossovers: Sequence[Crossover]) -> list[Trade]:
     """Walk the crossovers as a long/short flip, entering at the next open.
 
     The signal is only known once its candle has closed, so the earliest
@@ -824,15 +825,15 @@ def simulate_flips(candles: pd.DataFrame, crossovers: Sequence[Crossover]) -> Li
     avoids by refusing to read the forming bar.
     """
     position_of = {int(ts): i for i, ts in enumerate(candles["timestamp"])}
-    trades: List[Trade] = []
+    trades: list[Trade] = []
 
     for index, cross in enumerate(crossovers):
         entry_row = position_of.get(cross.candle_open_ms, -1) + 1
         if entry_row <= 0 or entry_row >= len(candles):
             continue  # signalled on the last closed candle: nothing to enter on yet
 
-        exit_ms: Optional[int] = None
-        exit_price: Optional[float] = None
+        exit_ms: int | None = None
+        exit_price: float | None = None
         if index + 1 < len(crossovers):
             exit_row = position_of.get(crossovers[index + 1].candle_open_ms, -1) + 1
             if 0 < exit_row < len(candles):
@@ -859,7 +860,7 @@ class Backtester:
 
     config: Config
     market: MarketData
-    notifier: Optional[TelegramNotifier] = None
+    notifier: TelegramNotifier | None = None
     tz: object = field(init=False)
 
     def __post_init__(self) -> None:
@@ -868,9 +869,9 @@ class Backtester:
     def run(
         self,
         *,
-        since: Optional[str] = None,
+        since: str | None = None,
         candles: int = 500,
-        csv_path: Optional[Path] = None,
+        csv_path: Path | None = None,
         notify: bool = False,
     ) -> int:
         self.market.load_markets()
@@ -897,7 +898,7 @@ class Backtester:
             warmup_bars,
         )
 
-        rows_for_csv: List[dict] = []
+        rows_for_csv: list[dict] = []
         total = 0
 
         for symbol in self.config.symbols:
@@ -1040,7 +1041,7 @@ class Backtester:
                 + (f" (mark {mark:+.2f}%)" if mark is not None else "")
             )
 
-    def _csv_rows(self, symbol: str, crossovers: Sequence[Crossover]) -> List[dict]:
+    def _csv_rows(self, symbol: str, crossovers: Sequence[Crossover]) -> list[dict]:
         period_ms = self.market.timeframe_seconds * 1000
         return [
             {
@@ -1048,8 +1049,8 @@ class Backtester:
                 "symbol": symbol,
                 "timeframe": self.config.timeframe,
                 "direction": cross.direction,
-                "candle_open_utc": stamp(cross.candle_open_ms, timezone.utc),
-                "candle_close_utc": stamp(cross.candle_open_ms + period_ms, timezone.utc),
+                "candle_open_utc": stamp(cross.candle_open_ms, UTC),
+                "candle_close_utc": stamp(cross.candle_open_ms + period_ms, UTC),
                 "candle_open_ms": cross.candle_open_ms,
                 "price": cross.price,
                 "macd": cross.macd,
@@ -1148,7 +1149,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[Iterable[str]] = None) -> int:
+def main(argv: Iterable[str] | None = None) -> int:
     args = build_parser().parse_args(
         list(argv) if argv is not None else sys.argv[1:]
     )
