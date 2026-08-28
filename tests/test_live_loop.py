@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -36,6 +37,24 @@ from algo.live.loop import LiveLoop
 from algo.portfolio.book import Portfolio
 from algo.risk.engine import FixedLotSizer, RiskEngine
 from algo.strategy.coin_flip import CoinFlip
+
+if TYPE_CHECKING:
+    from algo.core.order import BrokerOrderRef, Order
+    from algo.core.signal import Signal
+    from algo.execution.broker import (
+        BrokerFillSnapshot,
+        BrokerHealth,
+        BrokerOrderSnapshot,
+        BrokerPositionSnapshot,
+        Funds,
+    )
+    from algo.live.feeds import BrokerFillFeed
+    from algo.live.loop import PassResult
+    from algo.strategy.context import BarContext
+
+# What the `rig` fixture hands a test: the loop plus the three doubles it
+# was built from, and the bars the feed replays.
+Rig = tuple[LiveLoop, "ScriptedBars", "ScriptedFills", "RecordingPlacer", list[Bar]]
 
 INSTRUMENT = FutureId(underlying="GOLDM", expiry=date(2026, 9, 4), exchange=Exchange.MCX)
 TF = Timeframe(minutes=30)
@@ -64,9 +83,9 @@ class ScriptedBars:
 
 class ScriptedFills:
     def __init__(self) -> None:
-        self.queue: list = []
+        self.queue: list[Fill] = []
 
-    def new_fills(self) -> list:
+    def new_fills(self) -> list[Fill]:
         out, self.queue = self.queue, []
         return out
 
@@ -75,10 +94,10 @@ class RecordingPlacer:
     """Stands in for `Router.place_all`, recording what it was asked to send."""
 
     def __init__(self, outcome: Outcome = Outcome.PLACED) -> None:
-        self.calls: list[list] = []
+        self.calls: list[list[Order]] = []
         self._outcome = outcome
 
-    def __call__(self, orders):
+    def __call__(self, orders: list[Order]) -> list[RoutingResult]:
         orders = list(orders)
         self.calls.append(orders)
         return [
@@ -104,7 +123,7 @@ def _opening_fill(ts: datetime) -> Fill:
         instrument=INSTRUMENT,
         side=Side.BUY,
         lots=1,
-        qty=100,
+        qty=Decimal(100),
         price=Decimal("156640.00"),
         ts=ts,
         charges=Charges(
@@ -153,7 +172,7 @@ def _engine(seed_bars: list[Bar]) -> BacktestEngine:
 
 
 @pytest.fixture
-def rig():
+def rig() -> Rig:
     all_bars = _bars()
     feed = ScriptedBars()
     fills = ScriptedFills()
@@ -174,7 +193,7 @@ def rig():
 class TestEachBarActsExactlyOnce:
     """A duplicated entry signal is a doubled position."""
 
-    def test_a_repeated_poll_does_not_act_again(self, rig) -> None:
+    def test_a_repeated_poll_does_not_act_again(self, rig: Rig) -> None:
         loop, feed, _fills, placer, all_bars = rig
         feed.visible = all_bars[:2]
 
@@ -187,7 +206,7 @@ class TestEachBarActsExactlyOnce:
         assert placer.sent == before
         assert "already acted on" in second.summary()
 
-    def test_a_new_bar_does_act(self, rig) -> None:
+    def test_a_new_bar_does_act(self, rig: Rig) -> None:
         loop, feed, _fills, _placer, all_bars = rig
         feed.visible = all_bars[:2]
         loop.pass_once()
@@ -198,14 +217,14 @@ class TestEachBarActsExactlyOnce:
         assert result.decision is not None
         assert result.bar_ts == all_bars[2].ts
 
-    def test_the_watermark_is_the_bar_timestamp(self, rig) -> None:
+    def test_the_watermark_is_the_bar_timestamp(self, rig: Rig) -> None:
         loop, feed, _fills, _placer, all_bars = rig
         feed.visible = all_bars[:2]
         loop.pass_once()
 
         assert loop.last_bar_ts == all_bars[1].ts
 
-    def test_an_out_of_order_bar_is_refused(self, rig) -> None:
+    def test_an_out_of_order_bar_is_refused(self, rig: Rig) -> None:
         """A feed that goes backwards is broken; guessing which bar is real
         would be worse than stopping."""
         loop, feed, _fills, _placer, all_bars = rig
@@ -220,7 +239,7 @@ class TestEachBarActsExactlyOnce:
 
 
 class TestItSettlesBeforeDeciding:
-    def test_an_empty_feed_still_settles(self, rig) -> None:
+    def test_an_empty_feed_still_settles(self, rig: Rig) -> None:
         """Fills must be booked even on a pass that has no new bar to act on -
         otherwise they queue up and the next decision is made on stale
         positions."""
@@ -245,7 +264,7 @@ class TestItSettlesBeforeDeciding:
         seen: list[bool] = []
 
         class RecordsWhatItWasTold(CoinFlip):
-            def on_bar(self, ctx):
+            def on_bar(self, ctx: BarContext) -> list[Signal]:
                 seen.append(ctx.positions().is_flat)
                 return []
 
@@ -269,15 +288,16 @@ class TestItSettlesBeforeDeciding:
 
 
 class TestRoutingIsNotAssumedToSucceed:
-    def test_orders_reach_the_placer(self, rig) -> None:
+    def test_orders_reach_the_placer(self, rig: Rig) -> None:
         loop, feed, _fills, placer, all_bars = rig
         feed.visible = all_bars[:2]
 
         result = loop.pass_once()
 
+        assert result.decision is not None
         assert placer.sent == len(result.decision.orders)
 
-    def test_a_blocked_order_is_a_result_not_an_exception(self, rig) -> None:
+    def test_a_blocked_order_is_a_result_not_an_exception(self, rig: Rig) -> None:
         """`BLOCKED_UNRECONCILED` is the reconcile-before-send rule working, and
         the loop must carry on rather than crash."""
         loop, feed, _fills, _placer, all_bars = rig
@@ -290,7 +310,7 @@ class TestRoutingIsNotAssumedToSucceed:
         assert all(r.outcome is Outcome.BLOCKED_UNRECONCILED for r in result.routed)
         assert "BLOCKED_UNRECONCILED" in result.summary()
 
-    def test_no_orders_means_no_call_at_all(self, rig) -> None:
+    def test_no_orders_means_no_call_at_all(self, rig: Rig) -> None:
         """A pass with nothing to send must not call the router - an empty send
         is still a round trip to a broker."""
         loop, feed, _fills, placer, all_bars = rig
@@ -303,12 +323,13 @@ class TestRoutingIsNotAssumedToSucceed:
         feed.visible = all_bars[:3]
         result = loop.pass_once()
 
+        assert result.decision is not None
         if not result.decision.orders:
             assert len(placer.calls) == calls_after_first
 
 
 class TestItStops:
-    def test_max_passes_is_honoured(self, rig) -> None:
+    def test_max_passes_is_honoured(self, rig: Rig) -> None:
         loop, feed, _fills, _placer, all_bars = rig
         feed.visible = all_bars[:2]
 
@@ -316,13 +337,13 @@ class TestItStops:
 
         assert len(results) == 3
 
-    def test_max_passes_must_be_positive(self, rig) -> None:
+    def test_max_passes_must_be_positive(self, rig: Rig) -> None:
         loop, _feed, _fills, _placer, _all = rig
 
         with pytest.raises(DomainError, match="at least 1"):
             loop.run(max_passes=0)
 
-    def test_until_stops_the_loop_early(self, rig) -> None:
+    def test_until_stops_the_loop_early(self, rig: Rig) -> None:
         loop, feed, _fills, _placer, all_bars = rig
         feed.visible = all_bars[:2]
         past = all_bars[0].ts - timedelta(hours=1)
@@ -331,10 +352,10 @@ class TestItStops:
 
         assert results == []
 
-    def test_on_pass_sees_every_pass(self, rig) -> None:
+    def test_on_pass_sees_every_pass(self, rig: Rig) -> None:
         loop, feed, _fills, _placer, all_bars = rig
         feed.visible = all_bars[:2]
-        seen: list = []
+        seen: list[PassResult] = []
 
         loop.run(max_passes=4, on_pass=seen.append)
 
@@ -342,7 +363,7 @@ class TestItStops:
 
 
 class TestItSharesTheBacktestDecisionPath:
-    def test_the_loop_never_reimplements_sizing(self, rig) -> None:
+    def test_the_loop_never_reimplements_sizing(self, rig: Rig) -> None:
         """The orders in a decision are the engine's, byte for byte - the loop
         only forwards them. Guards against a future edit that 'adjusts' an
         order on the way out."""
@@ -351,22 +372,53 @@ class TestItSharesTheBacktestDecisionPath:
 
         result = loop.pass_once()
 
+        assert result.decision is not None
         assert list(result.decision.orders) == placer.calls[0]
 
 
 class FakeBroker:
-    """Only the one method `BrokerFillFeed` uses."""
+    """`executions` is the only method `BrokerFillFeed` calls; the rest are
+    here because `Broker` is the declared parameter type, and a double that
+    quietly implements less than the interface is how a test starts passing
+    for the wrong reason."""
 
-    def __init__(self, snaps: list) -> None:
+    def __init__(self, snaps: list[BrokerFillSnapshot]) -> None:
         self.snaps = snaps
-        self.since_calls: list = []
+        self.since_calls: list[datetime] = []
 
-    def executions(self, since):
+    def executions(self, since: datetime) -> list[BrokerFillSnapshot]:
         self.since_calls.append(since)
         return [s for s in self.snaps if s.ts >= since]
 
+    def connect(self) -> None:
+        raise NotImplementedError
 
-def _snap(fill_id: str, ts: datetime, key: str | None = None):
+    def disconnect(self) -> None:
+        raise NotImplementedError
+
+    def place(self, order: Order) -> BrokerOrderRef:
+        raise NotImplementedError
+
+    def cancel(self, client_order_id: str) -> None:
+        raise NotImplementedError
+
+    def open_orders(self) -> list[BrokerOrderSnapshot]:
+        raise NotImplementedError
+
+    def order_by_client_id(self, client_order_id: str) -> BrokerOrderSnapshot | None:
+        raise NotImplementedError
+
+    def positions(self) -> list[BrokerPositionSnapshot]:
+        raise NotImplementedError
+
+    def funds(self) -> Funds:
+        raise NotImplementedError
+
+    def health(self) -> BrokerHealth:
+        raise NotImplementedError
+
+
+def _snap(fill_id: str, ts: datetime, key: str | None = None) -> BrokerFillSnapshot:
     from algo.execution.broker import BrokerFillSnapshot
 
     return BrokerFillSnapshot(
@@ -383,7 +435,7 @@ def _snap(fill_id: str, ts: datetime, key: str | None = None):
 
 
 class TestBrokerFillFeed:
-    def _feed(self, snaps, at):
+    def _feed(self, snaps: list[BrokerFillSnapshot], at: datetime) -> BrokerFillFeed:
         from algo.live.feeds import BrokerFillFeed
 
         return BrokerFillFeed(

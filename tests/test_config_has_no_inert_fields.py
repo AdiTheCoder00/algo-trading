@@ -117,7 +117,9 @@ class TestNoFieldIsSilentlyIgnored:
                     label = getattr(func, "id", None) or getattr(func, "attr", "")
                     if label == "field_validator":
                         names.update(
-                            a.value for a in dec.args if isinstance(a, ast.Constant)
+                            a.value
+                            for a in dec.args
+                            if isinstance(a, ast.Constant) and isinstance(a.value, str)
                         )
         return names
 

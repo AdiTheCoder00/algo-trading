@@ -11,15 +11,22 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import pytest
 
 from algo.core.enums import Exchange, Right
 from algo.core.errors import DataError
-from algo.core.instrument import FutureId
+from algo.core.instrument import FutureId, OptionId
 from algo.core.timeutil import to_ist
 from algo.data.synthetic_chain import build_chain
 from algo.live.chain import LiveChainProvider
+
+if TYPE_CHECKING:
+    from algo.core.bar import Bar
+    from algo.core.chain import OptionChainSnapshot
+    from algo.live.loop import LiveLoop
+    from tests.test_live_loop import RecordingPlacer, ScriptedBars
 
 FUTURE = FutureId(underlying="GOLDM", expiry=date(2026, 9, 4), exchange=Exchange.MCX)
 EXPIRY = date(2026, 8, 28)
@@ -33,7 +40,7 @@ class StubFeed:
         self.ts = ts
         self.polls = 0
 
-    def poll(self, option_expiry: date):
+    def poll(self, option_expiry: date) -> OptionChainSnapshot:
         self.polls += 1
         chain = build_chain(
             ts=self.ts,
@@ -170,7 +177,9 @@ class TestTheLoopTradesTheStrangleEndToEnd:
     Everything here is the production path except the market-data transport.
     """
 
-    def _rig(self):
+    def _rig(
+        self,
+    ) -> tuple[LiveLoop, ScriptedBars, RecordingPlacer, list[Bar], StubFeed]:
         from algo.backtest.engine import BacktestEngine
         from algo.backtest.prices import BarPriceSource, CompositePriceSource
         from algo.core.bar import Timeframe
@@ -261,7 +270,13 @@ class TestTheLoopTradesTheStrangleEndToEnd:
         assert result.decision is not None, result.summary()
         assert placer.sent == 2, f"a strangle is two legs, got {placer.sent}"
         sent = placer.calls[0]
-        assert {o.instrument.right.value for o in sent} == {"CE", "PE"}
+        rights = set()
+        for order in sent:
+            # An order carries FutureId | OptionId; this test is about
+            # the option legs, so narrow rather than assume.
+            assert isinstance(order.instrument, OptionId), order.instrument
+            rights.add(order.instrument.right.value)
+        assert rights == {"CE", "PE"}
         assert all(o.side.value == "SELL" for o in sent)
 
     def test_the_chain_is_polled_once_per_bar(self) -> None:
@@ -280,7 +295,7 @@ class TestTheLoopTradesTheStrangleEndToEnd:
         loop, bar_feed, placer, bars, _feed = self._rig()
         bar_feed.visible = bars[:2]
 
-        def boom(_bar):
+        def boom(_bar: Bar) -> OptionChainSnapshot:
             raise DataError("market data poll failed")
 
         loop._chain = boom

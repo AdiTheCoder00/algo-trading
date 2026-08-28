@@ -16,7 +16,11 @@ from decimal import Decimal
 
 import pytest
 
-from algo.backtest.bhavcopy_runner import ENTRY_TIME_IST, build_dataset
+from algo.backtest.bhavcopy_runner import (
+    ENTRY_TIME_IST,
+    BhavcopyDataset,
+    build_dataset,
+)
 from algo.core.enums import Right
 from algo.core.errors import DataError
 from algo.core.timeutil import to_ist
@@ -71,7 +75,7 @@ def _ladder(day: date = DAY) -> list[BhavcopyRow]:
     return rows
 
 
-def _build(rows: list[BhavcopyRow], **kwargs: object):
+def _build(rows: list[BhavcopyRow], **kwargs: object) -> BhavcopyDataset:
     return build_dataset(rows, symbol="GOLDM", calendar=CAL, **kwargs)  # type: ignore[arg-type]
 
 

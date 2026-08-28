@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -18,7 +19,12 @@ from algo.core.enums import Exchange, Right
 from algo.core.instrument import FutureId
 from algo.core.signal import ComboExit
 from algo.data.synthetic_chain import build_chain
-from algo.risk.exits import ExitReason, resolve_levels
+from algo.risk.exits import ExitLevels, ExitReason, resolve_levels
+
+if TYPE_CHECKING:
+    from algo.backtest.engine import BacktestResult
+    from algo.core.chain import OptionChainSnapshot
+    from algo.strategy.context import BarContext
 
 FUTURE = FutureId(underlying="GOLDM", expiry=date(2026, 9, 4), exchange=Exchange.MCX)
 TS = datetime(2026, 8, 19, 4, 30, tzinfo=UTC)
@@ -26,7 +32,7 @@ EXPIRY = date(2026, 8, 28)
 EXPIRES_AT = datetime(2026, 8, 28, 18, 0, tzinfo=UTC)
 
 
-def _chain(strike_centre: str = "156640", **kwargs: object):
+def _chain(strike_centre: str = "156640", **kwargs: object) -> OptionChainSnapshot:
     return build_chain(
         ts=TS,
         underlying_future=FUTURE,
@@ -94,7 +100,7 @@ class TestStrikeMultiple:
 class TestExitLevelsWithoutAStop:
     """D-102."""
 
-    def _levels(self, *, stop: ComboExit | None):
+    def _levels(self, *, stop: ComboExit | None) -> ExitLevels:
         return resolve_levels(
             take_profit=ComboExit(kind="PCT_OF_MARGIN_AT_ENTRY", value=Decimal("4")),
             stop_loss=stop,
@@ -195,7 +201,7 @@ class TestTheRoll:
     AUG = date(2026, 8, 28)
     SEP = date(2026, 9, 25)
 
-    def _ctx(self, on: date):
+    def _ctx(self, on: date) -> BarContext:
         from algo.core.bar import Bar, BarWindow, Timeframe
         from algo.exchange.expiries import (
             ExpiryCalendar,
@@ -315,7 +321,7 @@ class TestTheMissingStopIsAnnounced:
     failure mode this whole warning list exists to prevent.
     """
 
-    def _result(self, *, no_stop: bool):
+    def _result(self, *, no_stop: bool) -> BacktestResult:
         from algo.backtest.engine import BacktestEngine
         from algo.backtest.prices import ChainFeedProvider, ChainPriceSource, CompositePriceSource
         from algo.core.bar import Timeframe

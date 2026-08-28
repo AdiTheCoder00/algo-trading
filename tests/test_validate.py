@@ -14,7 +14,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from algo.core.bar import Bar, Timeframe
-from algo.data.validate import Severity, validate_bars
+from algo.data.validate import QualityReport, Severity, validate_bars
 from algo.exchange.calendar import synthetic_calendar
 
 TF = Timeframe(minutes=30)
@@ -34,7 +34,7 @@ def _bar(offset: int, *, volume: int = 10, high: str = "101", low: str = "99") -
     )
 
 
-def _report(bars: list[Bar], **kwargs: object):
+def _report(bars: list[Bar], **kwargs: object) -> QualityReport:
     return validate_bars(bars, calendar=CAL, timeframe=TF, **kwargs)  # type: ignore[arg-type]
 
 

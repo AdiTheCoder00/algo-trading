@@ -33,7 +33,10 @@ dev = [
     "ruff>=0.4",
     "pandas-stubs",
     "types-PyYAML",
-    "httpx",
+    # starlette's TestClient moved to httpx2 and warns when it falls back to
+    # httpx. filterwarnings=error turns that into a collection failure, so the
+    # transport it actually wants is declared rather than inherited by luck.
+    "httpx2",
 ]
 
 [project.scripts]

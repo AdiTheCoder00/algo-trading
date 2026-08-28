@@ -40,15 +40,20 @@ def _row(
     return (*ce, strike, *pe)
 
 
-def _write(path: Path, body: list[tuple[object, ...]], *, header: tuple[str, ...] | None = None):
+def _write(
+    path: Path,
+    body: list[tuple[object, ...]],
+    *,
+    header: tuple[str, ...] | None = None,
+) -> Path:
     workbook = openpyxl.Workbook()
     sheet = workbook.active
     sheet.title = "option_chain"
     for line in TITLES:
         sheet.append(list(line))
     sheet.append(list(header if header is not None else EXPECTED_HEADER))
-    for line in body:
-        sheet.append(list(line))
+    for row in body:
+        sheet.append(list(row))
     workbook.save(path)
     workbook.close()
     return path
