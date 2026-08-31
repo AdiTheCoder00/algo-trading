@@ -23,6 +23,7 @@ from algo.cli.cmd_killswitch import kill_switch
 from algo.cli.cmd_live import live
 from algo.cli.cmd_mt5 import live_mt5, mt5_replay
 from algo.cli.cmd_serve import serve
+from algo.cli.cmd_telegram import telegram_check
 from algo.cli.cmd_verify import verify
 from algo.cli.cmd_walkforward import walk_forward_feasibility
 
@@ -40,6 +41,7 @@ app.command("walkforward")(walk_forward_feasibility)
 app.command("serve")(serve)
 app.command("killswitch")(kill_switch)
 app.command("credentials")(credentials)
+app.command("telegram-check")(telegram_check)
 app.command("bhavcopy")(inspect_bhavcopy)
 app.command("chain")(inspect_chain)
 app.command("backtest-bhavcopy")(backtest_bhavcopy)

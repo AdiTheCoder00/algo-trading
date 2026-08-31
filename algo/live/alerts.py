@@ -169,6 +169,16 @@ class TelegramNotifier:
             return self._post
         import requests
 
+        from algo.core.tls import trust_the_os_certificate_store
+
+        # D-113, and the exact accident its docstring warns about: the fix was
+        # only ever injected by the SmartAPI and Kotak transports' constructors,
+        # so a run that builds neither - `live-mt5` builds neither - reached
+        # Telegram with Python's bundled roots and failed
+        # `CERTIFICATE_VERIFY_FAILED` behind a TLS-scanning antivirus. Found by
+        # running `telegram-check` against a real endpoint; the injected-`post`
+        # tests could never have caught it. Idempotent by design.
+        trust_the_os_certificate_store()
         return requests.post
 
     def deliver(self, alert: Alert) -> bool:
