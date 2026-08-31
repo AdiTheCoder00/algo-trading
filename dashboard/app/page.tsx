@@ -20,6 +20,7 @@ import { EquityChart } from "@/components/EquityChart";
 import { Heatmap } from "@/components/Heatmap";
 import { KillSwitch } from "@/components/KillSwitch";
 import { KillSwitchHistory } from "@/components/KillSwitchHistory";
+import { AccountPanel } from "@/components/AccountPanel";
 import { MarginUtilisation } from "@/components/MarginUtilisation";
 import { OptionChain } from "@/components/OptionChain";
 import { TradeLog } from "@/components/TradeLog";
@@ -30,6 +31,7 @@ import {
   api,
   money,
   shortTime,
+  type Account,
   type ChainSnapshot,
   type EquityPoint,
   type Health,
@@ -45,6 +47,7 @@ const REFRESH_MS = 15_000;
 
 export default function Page() {
   const [health, setHealth] = useState<Health | null>(null);
+  const [account, setAccount] = useState<Account | null>(null);
   const [equity, setEquity] = useState<EquityPoint[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
   const [signals, setSignals] = useState<Signal[]>([]);
@@ -68,8 +71,9 @@ export default function Page() {
 
   const load = useCallback(async () => {
     try {
-      const [h, e, p, s, n, t, ts, c, k] = await Promise.all([
+      const [h, a, e, p, s, n, t, ts, c, k] = await Promise.all([
         api.health(),
+        api.account(),
         api.equity(),
         api.positions(),
         api.signals(),
@@ -80,6 +84,7 @@ export default function Page() {
         api.killSwitchHistory(),
       ]);
       setHealth(h);
+      setAccount(a);
       setEquity(e);
       setPositions(p);
       setSignals(s);
@@ -181,7 +186,13 @@ export default function Page() {
           >
             kill switch {health?.kill_switch ?? "…"}
           </span>
-          <span className={`chip ${health?.broker === "connected" ? "good" : "bad"}`}>
+          {/* Any broker the engine actually named is a working one. Only
+              "unknown" - nothing has written health yet - is a red state. */}
+          <span
+            className={`chip ${
+              !health?.broker || health.broker === "unknown" ? "bad" : "good"
+            }`}
+          >
             broker {health?.broker ?? "…"}
           </span>
           {staleness && (
@@ -239,6 +250,18 @@ export default function Page() {
           </dd>
         </div>
       </dl>
+
+      {/* Above margin utilisation deliberately: that panel describes the
+          engine's own cap, this one describes the account the orders land in,
+          and when they disagree the account is the one that is true. */}
+      <section className="panel">
+        <div className="panel-bar">
+          <span>broker account</span>
+        </div>
+        <div className="panel-in">
+          <AccountPanel account={account} />
+        </div>
+      </section>
 
       <section className="panel">
         <div className="panel-bar">

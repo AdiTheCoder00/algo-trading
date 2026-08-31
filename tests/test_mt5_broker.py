@@ -67,6 +67,9 @@ class FakeTerminal:
         trade_allowed: bool = True,
         account: bool = True,
         tick: bool = True,
+        trade_mode: int = 0,  # 0 demo, 1 contest, 2 real
+        margin_level: float = 0.0,
+        profit: float = 0.0,
     ) -> None:
         self.sent: list[dict[str, object]] = []
         self.positions: list[Row] = []
@@ -77,6 +80,9 @@ class FakeTerminal:
         self._trade_allowed = trade_allowed
         self._account = account
         self._tick = tick
+        self._trade_mode = trade_mode
+        self._margin_level = margin_level
+        self._profit = profit
 
     def initialize(self, *args: object, **kwargs: object) -> bool:
         return True
@@ -92,9 +98,15 @@ class FakeTerminal:
         return Row(
             login=25804244,
             server="VantageMarkets-Demo",
+            currency="USD",
+            leverage=100,
+            trade_mode=self._trade_mode,
             balance=108805.15,
+            equity=108805.15 + self._profit,
             margin=0.31,
             margin_free=108812.76,
+            margin_level=self._margin_level,
+            profit=self._profit,
             trade_allowed=self._trade_allowed,
         )
 
@@ -469,3 +481,79 @@ class TestNoQuote:
 
         with pytest.raises(RetryableBrokerError, match="no quote"):
             broker.place(_order())
+
+
+class TestTheAccountSnapshot:
+    """What the dashboard's account panel is drawn from.
+
+    `funds()` answers the router's question and is three numbers wide.
+    `account()` answers the operator's, and the two must not be confused: a
+    margin level is not a routing input, it is a reason to go and look.
+    """
+
+    def test_it_reports_what_the_terminal_says(self) -> None:
+        snapshot = _broker().account()
+        assert snapshot.login == "25804244"
+        assert snapshot.server == "VantageMarkets-Demo"
+        assert snapshot.currency == "USD"
+        assert snapshot.leverage == 100
+        assert snapshot.balance == Decimal("108805.15")
+        assert snapshot.margin_used == Decimal("0.31")
+        assert snapshot.margin_free == Decimal("108812.76")
+
+    def test_a_demo_account_is_recognised_as_one(self) -> None:
+        assert _broker(FakeTerminal(trade_mode=0)).account().is_demo is True
+        assert _broker(FakeTerminal(trade_mode=0)).account().trade_mode == "demo"
+
+    def test_a_contest_account_is_play_money_too(self) -> None:
+        assert _broker(FakeTerminal(trade_mode=1)).account().is_demo is True
+
+    def test_a_real_account_is_not(self) -> None:
+        snapshot = _broker(FakeTerminal(trade_mode=2)).account()
+        assert snapshot.is_demo is False
+        assert snapshot.trade_mode == "real"
+
+    def test_an_unrecognised_trade_mode_is_not_treated_as_demo(self) -> None:
+        """One-directional on purpose. A mode a future terminal build invents
+        must not become play money because it failed to match a string."""
+        snapshot = _broker(FakeTerminal(trade_mode=7)).account()
+        assert snapshot.is_demo is False
+        assert "7" in snapshot.trade_mode
+
+    def test_a_flat_account_has_no_margin_level_rather_than_zero(self) -> None:
+        """MT5 reports 0 when nothing is at risk, and 0% is what a margin call
+        looks like. Reporting it as a number would invert the meaning."""
+        assert _broker(FakeTerminal(margin_level=0.0)).account().margin_level is None
+
+    def test_a_live_margin_level_comes_through(self) -> None:
+        assert _broker(FakeTerminal(margin_level=2926.4)).account().margin_level == Decimal(
+            "2926.4"
+        )
+
+    def test_floating_pnl_is_carried_and_moves_equity_off_balance(self) -> None:
+        snapshot = _broker(FakeTerminal(profit=-157.90)).account()
+        assert snapshot.floating_pnl == Decimal("-157.9")
+        assert snapshot.equity != snapshot.balance
+
+    def test_open_tickets_counts_the_whole_account_not_just_our_symbol(self) -> None:
+        """A margin level is an account-wide fact. A panel reporting "0 open"
+        beside a margin level of 300% would be describing two accounts."""
+        terminal = FakeTerminal()
+        terminal.positions = [
+            Row(ticket=1, type=0, volume=1.0, price_open=4400.0, magic=MAGIC, symbol="XAUUSD"),
+            Row(ticket=2, type=1, volume=0.5, price_open=4410.0, magic=0, symbol="EURUSD"),
+        ]
+        assert _broker(terminal).account().open_tickets == 2
+
+    def test_it_refuses_before_connecting(self) -> None:
+        broker = Mt5Broker(terminal=FakeTerminal(), symbol="XAUUSD", clock=FrozenClock())
+        with pytest.raises(FatalBrokerError, match="not attached"):
+            broker.account()
+
+    def test_an_account_that_vanishes_is_retryable_not_fatal(self) -> None:
+        """A blip reading the account is not a reason to stop trading."""
+        terminal = FakeTerminal()
+        broker = _broker(terminal)
+        terminal._account = False
+        with pytest.raises(RetryableBrokerError):
+            broker.account()

@@ -151,8 +151,17 @@ def build_mt5_paper_loop(
     max_lots: int = DEFAULT_LOTS,
     state: StateStore | None = None,
     kill_switch: KillSwitch | None = None,
+    mode: str = "paper",
+    broker_label: str = "paper",
 ) -> Mt5PaperRun:
-    """Assemble the loop. Nothing here polls, sleeps, or decides when to stop."""
+    """Assemble the loop. Nothing here polls, sleeps, or decides when to stop.
+
+    `mode` and `broker_label` are recorded in the state file and are what the
+    dashboard's header reads. They are arguments rather than being derived from
+    the `broker` object because the label has to be *right* on a screen someone
+    glances at to decide whether real orders are going out - and inferring that
+    from a duck-typed protocol is how a live run comes to be labelled paper.
+    """
     if not seed_bars:
         raise DataError(
             "the loop needs at least one closed bar to start from - the terminal "
@@ -204,8 +213,8 @@ def build_mt5_paper_loop(
         price_source=BarPriceSource(instrument, list(seed_bars)),
         kill_switch=kill_switch,
         state=state,
-        mode="paper",
-        broker="paper",
+        mode=mode,
+        broker=broker_label,
     )
 
     router = OrderRouter(broker=broker, journal=journal, clock=clock)

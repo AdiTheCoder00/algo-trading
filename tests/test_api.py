@@ -26,7 +26,13 @@ from fastapi.testclient import TestClient
 from algo.api.app import TOKEN_ENV, create_app
 from algo.core.clock import BacktestClock
 from algo.core.timeutil import utc
-from algo.persistence.state import EquityRow, PositionRow, SignalRow, StateStore
+from algo.persistence.state import (
+    AccountRow,
+    EquityRow,
+    PositionRow,
+    SignalRow,
+    StateStore,
+)
 
 NOW = utc(2026, 8, 19, 4, 0)
 TOKEN = "test-token-not-a-real-secret"
@@ -466,3 +472,87 @@ class TestResearchDoesNotWeakenTheReadOnlyRule:
         # console must not render one for it.
         lookback = next(p for p in body["parameters"] if p["name"] == "lookback")
         assert lookback["applies_to"] == ["breakout"]
+
+
+def _account(**overrides: object) -> AccountRow:
+    fields: dict[str, object] = {
+        "login": "25804244",
+        "server": "VantageMarkets-Demo",
+        "currency": "USD",
+        "trade_mode": "demo",
+        "leverage": 100,
+        "balance": Decimal("108805.15"),
+        "equity": Decimal("108647.25"),
+        "margin_used": Decimal("3412.00"),
+        "margin_free": Decimal("105235.25"),
+        "margin_level": Decimal("3184.7"),
+        "floating_pnl": Decimal("-157.90"),
+        "open_tickets": 1,
+        "updated_at": NOW,
+    }
+    fields.update(overrides)
+    return AccountRow(**fields)  # type: ignore[arg-type]
+
+
+class TestTheBrokerAccount:
+    """The account panel's data - the broker's claim, not the engine's book.
+
+    The two are separate on purpose and the endpoint keeps them separate: this
+    reports what the venue says is there, and nothing here is derived from the
+    equity curve the engine writes.
+    """
+
+    def test_a_run_with_no_broker_account_reports_none_not_zeros(
+        self, client: TestClient
+    ) -> None:
+        """A backtest, a replay and a paper run have no account behind them.
+        Zeros would render as a real account that happens to be empty, which
+        is a different and false statement."""
+        response = client.get("/account", headers=_auth())
+        assert response.status_code == 200
+        assert response.json() is None
+
+    def test_it_reports_what_the_broker_said(
+        self, client: TestClient, store: StateStore
+    ) -> None:
+        store.record_account(_account())
+        body = client.get("/account", headers=_auth()).json()
+        assert body["login"] == "25804244"
+        assert body["server"] == "VantageMarkets-Demo"
+        assert body["trade_mode"] == "demo"
+        assert body["open_tickets"] == 1
+
+    def test_every_money_field_is_a_string(
+        self, client: TestClient, store: StateStore
+    ) -> None:
+        """Same rule as every other endpoint: a Decimal that passes through a
+        JSON number has passed through a float."""
+        store.record_account(_account())
+        body = client.get("/account", headers=_auth()).json()
+        for field in (
+            "balance",
+            "equity",
+            "margin_used",
+            "margin_free",
+            "margin_level",
+            "floating_pnl",
+        ):
+            assert isinstance(body[field], str), field
+
+    def test_a_flat_account_reports_a_null_margin_level(
+        self, client: TestClient, store: StateStore
+    ) -> None:
+        store.record_account(_account(margin_level=None, open_tickets=0))
+        assert client.get("/account", headers=_auth()).json()["margin_level"] is None
+
+    def test_it_is_a_snapshot_so_the_newest_write_wins(
+        self, client: TestClient, store: StateStore
+    ) -> None:
+        """A snapshot, not a log - the question is what the account looks like
+        now, and the equity table already keeps the historical half."""
+        store.record_account(_account())
+        store.record_account(_account(balance=Decimal("99000.00")))
+        assert client.get("/account", headers=_auth()).json()["balance"] == "99000.00"
+
+    def test_it_needs_a_token_like_everything_else(self, client: TestClient) -> None:
+        assert client.get("/account").status_code == 401

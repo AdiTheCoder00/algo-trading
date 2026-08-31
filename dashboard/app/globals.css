@@ -205,6 +205,19 @@ td.down {
   color: var(--clay);
 }
 
+/* Severity on a figure that is not a gain or a loss - margin level, where low
+   is the dangerous end. Same three colours as the chips so one palette means
+   one thing across the page. */
+.stat dd.good {
+  color: var(--sage);
+}
+.stat dd.warn {
+  color: var(--brass);
+}
+.stat dd.bad {
+  color: var(--clay);
+}
+
 .stats-tight {
   margin-top: 0;
 }

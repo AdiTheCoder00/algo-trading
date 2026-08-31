@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,7 +31,28 @@ def live_mt5(
     trail_activation_pct: str = typer.Option("2", help="Profit % at which the trail arms"),
     trail_pct: str = typer.Option("0", help="Trail distance, % behind peak. 0 disables"),
     lots: int = typer.Option(100, help="Ounces per trade (1 lot = 1 oz = 0.01 MT5 lots)"),
-    equity: str = typer.Option("100000", help="Starting equity for the paper book"),
+    equity: str = typer.Option(
+        "",
+        help=(
+            "Starting equity for the engine's book. Default: 100000 on --broker "
+            "paper, the account's real balance on --broker live"
+        ),
+    ),
+    broker_kind: str = typer.Option(
+        "paper",
+        "--broker",
+        help="paper | live. 'live' sends real orders to the logged-in account",
+    ),
+    allow_real_money: bool = typer.Option(
+        False,
+        "--allow-real-money",
+        help="Permit --broker live on an account that is not a demo",
+    ),
+    ledger_path: Path = typer.Option(
+        Path("state/mt5_ledger.json"),
+        "--ledger",
+        help="Where --broker live persists our order-id -> MT5 ticket mapping",
+    ),
     passes: int = typer.Option(1, help="Poll this many times, then stop"),
     poll_interval_s: float = typer.Option(30.0, help="Seconds between polls"),
     state: Path = typer.Option(
@@ -45,12 +67,17 @@ def live_mt5(
         help="Creating this file asks the loop to stop after the current bar",
     ),
 ) -> None:
-    """Run a CFD strategy on live MT5 bars against the **paper** broker.
+    """Run a CFD strategy on live MT5 bars, against paper or the real account.
 
-    Real bars from a running terminal; fills simulated by the same
-    `FillSimulator` the backtest uses. No order reaches the broker - see
-    `algo/live/mt5_runner.py` for why the first live order is not something to
-    place from inside an unattended loop.
+    `--broker paper` (the default) takes real bars from a running terminal and
+    simulates every fill with the same `FillSimulator` the backtest uses. No
+    order reaches the broker.
+
+    `--broker live` sends market orders through `Mt5Broker` to whatever account
+    the terminal is logged into. **It is refused on a non-demo account** unless
+    `--allow-real-money` is also passed - see `_require_tradeable_account`. The
+    engine's book still starts from the account's real balance so the two
+    numbers on the dashboard are comparable rather than one being a fiction.
 
     `--passes` is required to terminate: a trading loop with no stopping
     condition keeps trading after whoever was watching it has gone home.
@@ -70,13 +97,19 @@ def live_mt5(
     from algo.costs.spread import FixedTickSpread
     from algo.data.mt5_feed import Mt5BarFeed, measure_server_offset
     from algo.exchange.forex_calendar import ForexCalendar
+    from algo.execution.broker import Broker
     from algo.execution.fills import FillSimulator
+    from algo.execution.mt5_broker import Mt5Broker
     from algo.execution.paper import PaperBroker
     from algo.live.alerts import build_alerter
     from algo.live.mt5_runner import XAUUSD_SPREAD_TICKS, build_mt5_paper_loop, strategy_for
     from algo.live.shutdown import StopFile, graceful_shutdown
     from algo.persistence.journal import OrderJournal
     from algo.persistence.state import StateStore
+
+    live = broker_kind.strip().lower() == "live"
+    if broker_kind.strip().lower() not in ("paper", "live"):
+        raise typer.BadParameter(f"--broker is paper or live, not {broker_kind!r}")
 
     if not mt5.initialize():
         typer.echo(f"MT5 will not initialize: {mt5.last_error()}")
@@ -90,7 +123,14 @@ def live_mt5(
             raise typer.Exit(code=1)
         typer.echo(f"account       {account.login} on {account.server}")
         typer.echo(f"balance       {account.balance} {account.currency}")
-        typer.echo("broker        PAPER - no order reaches this account")
+        if live:
+            _require_tradeable_account(account, allow_real_money=allow_real_money)
+            typer.echo(
+                f"broker        LIVE - orders go to account {account.login} "
+                f"({_TRADE_MODE_NAMES.get(int(getattr(account, 'trade_mode', -1)), 'unknown')})"
+            )
+        else:
+            typer.echo("broker        PAPER - no order reaches this account")
 
         clock = SystemClock()
         calendar = ForexCalendar()
@@ -117,18 +157,33 @@ def live_mt5(
         typer.echo(f"bars          {len(seed)} closed, latest {iso(seed[-1].ts)}")
 
         store = StateStore(state)
-        broker = PaperBroker(
-            simulator=FillSimulator(
-                spread=FixedTickSpread(XAUUSD_SPREAD_TICKS),
-                slippage=NoSlippage(),
-                charges=CfdChargeModel.vantage_standard(),
-            ),
-            specs=ContractSpecStore.default(),
-            quote=lambda key: seed[-1].close if key == instrument.key else None,
-            clock=clock,
-            starting_cash=_D(equity),
-            exchange=Exchange.OTC,
-        )
+        # The book starts from what the account actually holds on a live run.
+        # Charting a synthetic 100000 beside a real balance would put two
+        # unrelated numbers on one screen and invite reading them as one.
+        book_equity = equity or (str(account.balance) if live else "100000")
+
+        broker: Broker
+        if live:
+            broker = Mt5Broker(terminal=mt5, symbol=symbol, clock=clock)
+            # MT5 overwrites the order comment, so our client-order-ids live in
+            # this file and nowhere else. Restoring it before the first
+            # reconcile is what stops a restart from disowning its own open
+            # orders - see algo/execution/mt5_broker.py's module docstring.
+            broker.restore(ledger_path)
+            typer.echo(f"ledger        {ledger_path}")
+        else:
+            broker = PaperBroker(
+                simulator=FillSimulator(
+                    spread=FixedTickSpread(XAUUSD_SPREAD_TICKS),
+                    slippage=NoSlippage(),
+                    charges=CfdChargeModel.vantage_standard(),
+                ),
+                specs=ContractSpecStore.default(),
+                quote=lambda key: seed[-1].close if key == instrument.key else None,
+                clock=clock,
+                starting_cash=_D(book_equity),
+                exchange=Exchange.OTC,
+            )
         broker.connect()
 
         with OrderJournal(journal_path) as journal:
@@ -148,10 +203,12 @@ def live_mt5(
                 timeframe=timeframe,
                 journal=journal,
                 seed_bars=seed,
-                starting_equity=_D(equity),
+                starting_equity=_D(book_equity),
                 lots=lots,
                 max_lots=lots,
                 state=store,
+                mode="live" if live else "paper",
+                broker_label="mt5" if live else "paper",
             )
             typer.echo(
                 f"strategy      {strategy_name} on {timeframe.label}, {lots} oz, "
@@ -170,12 +227,31 @@ def live_mt5(
                 "              either one finishes the current bar first\n"
             )
 
+            # `mt5-replay` has always recorded these; the live loop never did,
+            # so its runs rendered a dollar-settled book behind a rupee sign -
+            # the exact confusion `money()` in the dashboard exists to prevent.
+            # The currency comes from the account rather than a constant,
+            # because the account is the thing that settles.
+            for key, value in {
+                "venue": f"MT5 / {account.server}",
+                "symbol": symbol,
+                "currency": str(account.currency),
+                "strategy": f"{strategy_name} {timeframe.label}",
+            }.items():
+                store.set_health(key, value, at=clock.now())
+
             alerter.info(
                 "live-mt5 started",
-                f"{strategy_name} on {timeframe.label}, {lots} oz, paper broker. "
+                f"{strategy_name} on {timeframe.label}, {lots} oz, "
+                f"{'LIVE - real orders' if live else 'paper broker'}. "
                 f"Account {account.login} ({account.server}).",
                 at=clock.now(),
             )
+            # Written before the first pass so the dashboard has the account the
+            # moment the run starts, rather than after the first bar closes -
+            # which on a 60m timeframe is up to an hour of a blank panel.
+            if live:
+                _record_account(store, broker, at=clock.now())
 
             def announce(count: int, name: str) -> None:
                 typer.echo(
@@ -196,6 +272,13 @@ def live_mt5(
                 ):
                     typer.echo(f"  {iso(result.ts)}  {result.summary()}")
                     _alert_on(alerter, result)
+                    if live:
+                        # After the pass, so an order placed during it is in the
+                        # file before the next one can be. A crash between
+                        # `order_send` and here still leaves the intent in the
+                        # order journal, which is what reconcile reads first.
+                        broker.save(ledger_path)
+                        _record_account(store, broker, at=result.ts)
 
                 # Recorded either way, so a restart can tell "asked to stop and
                 # did" from "died mid-bar" - the two states a journal left in
@@ -209,6 +292,9 @@ def live_mt5(
                 # Cleared on the way out so it cannot stop the next run for a
                 # reason the operator has already dealt with.
                 sentinel.clear()
+                if live:
+                    broker.save(ledger_path)
+                    _record_account(store, broker, at=clock.now())
                 store.record_note(clock.now(), ended)
                 store.set_health("engine", "stopped", at=clock.now())
                 # A loop that stops is worth knowing about even when the reason
@@ -223,6 +309,73 @@ def live_mt5(
             store.close()
     finally:
         mt5.shutdown()
+
+
+#: MT5's `account_info().trade_mode`, for the echo. The gate below reads the
+#: broker's own `is_demo` rather than this map - one place decides what counts
+#: as play money, and it is not the CLI.
+_TRADE_MODE_NAMES = {0: "demo", 1: "contest", 2: "real"}
+
+
+def _require_tradeable_account(account: object, *, allow_real_money: bool) -> None:
+    """Refuse `--broker live` on a real-money account unless told otherwise.
+
+    The check is deliberately one-directional: anything not positively
+    identified as demo or contest is treated as real. An unrecognised
+    `trade_mode` from a future terminal build should stop the run, not be
+    waved through because it did not match the string we expected.
+
+    `trade_allowed` is checked here too rather than only in `Mt5Broker.connect`,
+    so "Algo Trading is switched off in the terminal" is reported before the
+    run prints a strategy line and looks like it is about to work.
+    """
+    mode = int(getattr(account, "trade_mode", -1))
+    if mode not in (0, 1) and not allow_real_money:
+        raise typer.BadParameter(
+            f"--broker live refused: account {getattr(account, 'login', '?')} is "
+            f"{_TRADE_MODE_NAMES.get(mode, f'trade_mode {mode}')}, not a demo. "
+            "This sends market orders with real money. If that is genuinely the "
+            "intent, pass --allow-real-money as well."
+        )
+    if not getattr(account, "trade_allowed", False):
+        raise typer.BadParameter(
+            "the terminal reports trading is not allowed on this account. "
+            "Switch on Algo Trading in the MT5 terminal, then start again."
+        )
+
+
+def _record_account(store: object, broker: object, *, at: datetime) -> None:
+    """Snapshot the broker's account into the state file for the dashboard.
+
+    Never raises. `alerts.py` states the rule this follows: a panel that cannot
+    be drawn is not a reason to stop trading, and `account_info` returning
+    nothing on one poll is a blip, not a halt. The stale snapshot stays, which
+    is why the row carries `updated_at` - a number that has stopped moving is
+    visible as one.
+    """
+    from algo.persistence.state import AccountRow
+
+    try:
+        snapshot = broker.account()  # type: ignore[attr-defined]
+        store.record_account(  # type: ignore[attr-defined]
+            AccountRow(
+                login=snapshot.login,
+                server=snapshot.server,
+                currency=snapshot.currency,
+                trade_mode=snapshot.trade_mode,
+                leverage=snapshot.leverage,
+                balance=snapshot.balance,
+                equity=snapshot.equity,
+                margin_used=snapshot.margin_used,
+                margin_free=snapshot.margin_free,
+                margin_level=snapshot.margin_level,
+                floating_pnl=snapshot.floating_pnl,
+                open_tickets=snapshot.open_tickets,
+                updated_at=at,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        typer.echo(f"  ! account snapshot skipped: {exc}")
 
 
 def _alert_on(alerter: Alerter, result: PassResult) -> None:

@@ -186,6 +186,82 @@ class TestTheLiveGatesRefuseBeforeTouchingAnything:
         assert result.exit_code != 0
 
 
+class TestTheLiveMt5AccountGate:
+    """`live-mt5 --broker live` sends real market orders.
+
+    The gate is tested as a function rather than through the CLI because
+    reaching it through the CLI needs a running MT5 terminal, and a test suite
+    that requires a logged-in broker is a test suite nobody can run. The gate
+    itself is the whole safety property, so it is exercised directly.
+    """
+
+    def test_a_demo_account_is_allowed_through(self) -> None:
+        from algo.cli.cmd_mt5 import _require_tradeable_account
+
+        _require_tradeable_account(
+            _Account(trade_mode=0, trade_allowed=True), allow_real_money=False
+        )
+
+    def test_a_contest_account_is_allowed_through(self) -> None:
+        from algo.cli.cmd_mt5 import _require_tradeable_account
+
+        _require_tradeable_account(
+            _Account(trade_mode=1, trade_allowed=True), allow_real_money=False
+        )
+
+    def test_a_real_account_is_refused(self) -> None:
+        from algo.cli.cmd_mt5 import _require_tradeable_account
+
+        with pytest.raises(Exception, match="not a demo"):
+            _require_tradeable_account(
+                _Account(trade_mode=2, trade_allowed=True), allow_real_money=False
+            )
+
+    def test_an_unrecognised_trade_mode_is_refused_too(self) -> None:
+        """One-directional: anything not positively identified as play money is
+        treated as real. A mode a future terminal invents should stop the run."""
+        from algo.cli.cmd_mt5 import _require_tradeable_account
+
+        with pytest.raises(Exception, match="not a demo"):
+            _require_tradeable_account(
+                _Account(trade_mode=9, trade_allowed=True), allow_real_money=False
+            )
+
+    def test_a_real_account_passes_once_that_is_said_explicitly(self) -> None:
+        from algo.cli.cmd_mt5 import _require_tradeable_account
+
+        _require_tradeable_account(
+            _Account(trade_mode=2, trade_allowed=True), allow_real_money=True
+        )
+
+    def test_algo_trading_switched_off_is_reported_before_anything_starts(self) -> None:
+        """Reported here rather than only inside the broker, so it surfaces
+        before the run prints a strategy line and looks about to work."""
+        from algo.cli.cmd_mt5 import _require_tradeable_account
+
+        with pytest.raises(Exception, match="trading is not allowed"):
+            _require_tradeable_account(
+                _Account(trade_mode=0, trade_allowed=False), allow_real_money=False
+            )
+
+    def test_the_override_does_not_also_wave_through_a_disabled_terminal(self) -> None:
+        from algo.cli.cmd_mt5 import _require_tradeable_account
+
+        with pytest.raises(Exception, match="trading is not allowed"):
+            _require_tradeable_account(
+                _Account(trade_mode=2, trade_allowed=False), allow_real_money=True
+            )
+
+
+class _Account:
+    """The two fields of MT5's `account_info()` the gate reads."""
+
+    def __init__(self, *, trade_mode: int, trade_allowed: bool) -> None:
+        self.login = 25804244
+        self.trade_mode = trade_mode
+        self.trade_allowed = trade_allowed
+
+
 class TestBhavcopyCommandsFailHonestlyOnBadInput:
     def test_a_missing_directory_is_reported(self) -> None:
         result = _run("backtest-bhavcopy", "does/not/exist")

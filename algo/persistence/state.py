@@ -103,6 +103,19 @@ CREATE TABLE IF NOT EXISTS chain_snapshot (
     payload  TEXT NOT NULL
 );
 
+-- What the *broker* says about the account, as opposed to what the engine's own
+-- book believes. A snapshot for the same reason `chain_snapshot` is one: the
+-- question is "what does the account look like right now", and the engine's
+-- `equity` curve already answers the historical half for the book it keeps.
+--
+-- These two disagreeing is not a bug to be hidden - it is the single most
+-- useful thing on the dashboard when it happens, because the gap between the
+-- book and the broker is exactly what reconciliation exists to close.
+CREATE TABLE IF NOT EXISTS account_snapshot (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    payload  TEXT NOT NULL
+);
+
 --- A strategy's own state, so a restart does not silently lose it. One row per
 --- strategy. `params_hash` is a guard, not a label: state saved under a
 --- different parameter set is never handed back (D-110).
@@ -164,6 +177,36 @@ class NoteRow(BaseModel):
 
     ts: datetime
     message: str
+
+
+class AccountRow(BaseModel):
+    """The broker's own view of the account.
+
+    Every money field is `Decimal`, stored as TEXT like everything else here.
+    `margin_level` is `None` rather than 0 when nothing is at risk: MT5 reports
+    0 for a flat account, and 0% margin level renders as "margin call" to anyone
+    who knows what the number usually means.
+
+    `trade_mode` is carried because it is the difference between a demo account
+    and a real one, and that is not a distinction to leave to the operator's
+    memory of which terminal is logged in.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    login: str
+    server: str
+    currency: str
+    trade_mode: str
+    leverage: int
+    balance: Decimal
+    equity: Decimal
+    margin_used: Decimal
+    margin_free: Decimal
+    margin_level: Decimal | None
+    floating_pnl: Decimal
+    open_tickets: int
+    updated_at: datetime
 
 
 class KillSwitchRequest(BaseModel):
@@ -268,6 +311,15 @@ class StateStore:
                 "INSERT INTO chain_snapshot (id, payload) VALUES (1, ?) "
                 "ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
                 (json.dumps(payload, sort_keys=True, default=str),),
+            )
+
+    def record_account(self, row: AccountRow) -> None:
+        """Replace the broker's account snapshot. One row, same as the chain."""
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO account_snapshot (id, payload) VALUES (1, ?) "
+                "ON CONFLICT(id) DO UPDATE SET payload = excluded.payload",
+                (row.model_dump_json(),),
             )
 
     def record_strategy_state(
@@ -389,6 +441,15 @@ class StateStore:
         ) as cursor:
             row = cursor.fetchone()
             return json.loads(row["payload"]) if row else None
+
+    def account_snapshot(self) -> AccountRow | None:
+        """What the broker last said about the account, or `None` for a run that
+        never had one - every backtest, replay and paper run."""
+        with closing(
+            self._conn.execute("SELECT payload FROM account_snapshot WHERE id = 1")
+        ) as cursor:
+            row = cursor.fetchone()
+            return AccountRow.model_validate_json(row["payload"]) if row else None
 
     def signals(self, limit: int = 50) -> list[SignalRow]:
         with closing(

@@ -19,6 +19,7 @@ const API_TOKEN = process.env.ALGO_API_TOKEN ?? "";
 /** Every path the dashboard is permitted to reach, and nothing else. */
 const READABLE = new Set([
   "health",
+  "account",
   "equity",
   "positions",
   "trades",

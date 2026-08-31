@@ -48,6 +48,33 @@ export interface Signal {
   context: Record<string, string>;
 }
 
+/**
+ * The broker's own view of the account, which is a different claim from the
+ * engine's book and is displayed as one.
+ *
+ * `null` from the API for every run with no broker account behind it - a
+ * backtest, a replay, a paper run - rather than zeros, because an account
+ * showing $0.00 and no account at all are not the same statement.
+ *
+ * `margin_level` is `null` on a flat account rather than "0": MT5 reports 0
+ * when nothing is at risk, and 0% is what a margin call looks like.
+ */
+export interface Account {
+  login: string;
+  server: string;
+  currency: string;
+  trade_mode: string;
+  leverage: number;
+  balance: string;
+  equity: string;
+  margin_used: string;
+  margin_free: string;
+  margin_level: string | null;
+  floating_pnl: string;
+  open_tickets: number;
+  updated_at: string;
+}
+
 export interface Note {
   ts: string;
   message: string;
@@ -357,6 +384,7 @@ async function get<T>(path: string): Promise<T> {
 
 export const api = {
   health: () => get<Health>("health"),
+  account: () => get<Account | null>("account"),
   equity: (limit = 500) => get<EquityPoint[]>(`equity?limit=${limit}`),
   positions: () => get<Position[]>("positions"),
   signals: (limit = 20) => get<Signal[]>(`signals?limit=${limit}`),

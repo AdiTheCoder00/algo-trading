@@ -97,6 +97,39 @@ class Funds(BaseModel):
     margin_available: Decimal = Decimal("0")
 
 
+class AccountSnapshot(BaseModel):
+    """The venue's own view of the account, richer than `Funds`.
+
+    `Funds` is what the *router* needs to decide whether an order can be paid
+    for. This is what a *person* needs to decide whether the thing is behaving,
+    and the two are not the same set of numbers - a margin level of 140% is not
+    a routing input, it is the reason to go and look.
+
+    `is_demo` is a field rather than something the caller infers from
+    `trade_mode`, because "is this real money" is the one question about an
+    account that should never be answered by string comparison at a call site.
+    """
+
+    model_config = _FROZEN
+
+    login: str
+    server: str
+    currency: str
+    trade_mode: str
+    is_demo: bool
+    leverage: int
+    balance: Decimal
+    equity: Decimal
+    margin_used: Decimal
+    margin_free: Decimal
+    #: `None`, not 0, on a flat account. MT5 reports 0 when nothing is at risk,
+    #: and 0% is what a margin call looks like to anyone reading the number.
+    margin_level: Decimal | None
+    floating_pnl: Decimal
+    open_tickets: int
+    trade_allowed: bool
+
+
 class BrokerHealth(BaseModel):
     model_config = _FROZEN
 

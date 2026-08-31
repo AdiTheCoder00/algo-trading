@@ -57,6 +57,31 @@ class HealthResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class AccountResponse(BaseModel):
+    """What the broker says about the account, as opposed to the engine's book.
+
+    Money is `str` here for the same reason it is everywhere else on this API:
+    the engine stores `Decimal` as TEXT precisely so it never passes through a
+    float, and serialising it as a JSON number would undo that at the last step.
+    """
+
+    model_config = _FROZEN
+
+    login: str
+    server: str
+    currency: str
+    trade_mode: str
+    leverage: int
+    balance: str
+    equity: str
+    margin_used: str
+    margin_free: str
+    margin_level: str | None
+    floating_pnl: str
+    open_tickets: int
+    updated_at: str
+
+
 class KillSwitchBody(BaseModel):
     model_config = _FROZEN
 
@@ -199,6 +224,33 @@ def create_app(
         `None` when the run has no chain wired in (the M3 falsification and
         anything trading the underlying directly) or has not reached a bar yet."""
         return state.chain_snapshot()
+
+    @app.get("/account", response_model=AccountResponse | None)
+    def account(state: StateStore = Store, _: None = Guarded) -> AccountResponse | None:
+        """The broker's own numbers for the logged-in account.
+
+        `None` for every run that has no broker account behind it - backtests,
+        replays, and paper runs - rather than zeros, which would render as a
+        real account that happens to be empty.
+        """
+        row = state.account_snapshot()
+        if row is None:
+            return None
+        return AccountResponse(
+            login=row.login,
+            server=row.server,
+            currency=row.currency,
+            trade_mode=row.trade_mode,
+            leverage=row.leverage,
+            balance=str(row.balance),
+            equity=str(row.equity),
+            margin_used=str(row.margin_used),
+            margin_free=str(row.margin_free),
+            margin_level=str(row.margin_level) if row.margin_level is not None else None,
+            floating_pnl=str(row.floating_pnl),
+            open_tickets=row.open_tickets,
+            updated_at=row.updated_at.isoformat(),
+        )
 
     @app.get("/trades")
     def trades(

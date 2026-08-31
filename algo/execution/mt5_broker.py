@@ -58,6 +58,7 @@ from algo.core.instrument import CfdId
 from algo.core.order import BrokerOrderRef, Order
 from algo.core.timeutil import ensure_utc, iso
 from algo.execution.broker import (
+    AccountSnapshot,
     BrokerFillSnapshot,
     BrokerHealth,
     BrokerOrderSnapshot,
@@ -88,6 +89,11 @@ _TYPE_SELL = 1
 
 _RETCODE_DONE = 10009
 _RETCODE_PLACED = 10008
+
+#: MT5 `account_info().trade_mode`. The only one of these that is not play money
+#: is REAL, which is why `account()` reports the distinction rather than leaving
+#: it to whoever remembers which terminal is logged in.
+_TRADE_MODES = {0: "demo", 1: "contest", 2: "real"}
 
 
 @runtime_checkable
@@ -445,6 +451,48 @@ class Mt5Broker:
             cash=Decimal(str(account.balance)),
             margin_used=Decimal(str(account.margin)),
             margin_available=Decimal(str(account.margin_free)),
+        )
+
+    def account(self) -> AccountSnapshot:
+        """Everything the terminal knows about the account, for the dashboard.
+
+        Separate from `funds()` on purpose: `funds()` is the router's question
+        ("can this order be paid for") and is deliberately three numbers wide.
+        This is the operator's question, and answering it with the router's
+        model would mean either starving the dashboard or widening a type the
+        routing path has to keep simple.
+
+        `open_tickets` counts the whole account, not just this adapter's symbol.
+        A margin level is an account-wide fact, and a panel that reported "0
+        open" beside a margin level of 300% would be describing two different
+        accounts.
+        """
+        self._require_connection("read the account")
+        account = self._terminal.account_info()
+        if account is None:
+            raise RetryableBrokerError(
+                f"MT5 returned no account info: {self._terminal.last_error()}"
+            )
+        level = Decimal(str(getattr(account, "margin_level", 0) or 0))
+        mode = int(getattr(account, "trade_mode", -1))
+        return AccountSnapshot(
+            login=str(getattr(account, "login", "")),
+            server=str(getattr(account, "server", "")),
+            currency=str(getattr(account, "currency", "")),
+            trade_mode=_TRADE_MODES.get(mode, f"unknown({mode})"),
+            # Anything we cannot positively identify as demo is treated as not
+            # demo. The failure that matters here is one-directional: calling a
+            # real account a demo is how play money becomes real money.
+            is_demo=mode in (0, 1),
+            leverage=int(getattr(account, "leverage", 0) or 0),
+            balance=Decimal(str(account.balance)),
+            equity=Decimal(str(account.equity)),
+            margin_used=Decimal(str(account.margin)),
+            margin_free=Decimal(str(account.margin_free)),
+            margin_level=level if level > 0 else None,
+            floating_pnl=Decimal(str(getattr(account, "profit", 0) or 0)),
+            open_tickets=len(self._terminal.positions_get() or ()),
+            trade_allowed=bool(getattr(account, "trade_allowed", False)),
         )
 
     # ------------------------------------------------------------------ guts
