@@ -160,6 +160,22 @@ class SwapModel:
         self._point_value = point_value
         self._triple_weekday = triple_weekday
 
+    @classmethod
+    def vantage_xauusd(cls) -> SwapModel:
+        """The rates measured on the Vantage demo account, 2026-08-28.
+
+        A classmethod rather than a literal repeated at each call site: the
+        backtest runner, the walk-forward and the live loop must charge the
+        *same* financing, and two copies of a constant are two things that can
+        drift apart. `point_value` is 0.01 because one MT5 point is $1 on a
+        100-ounce broker lot, and an engine lot is one ounce.
+        """
+        return cls(
+            long_points=Decimal("-80.54"),
+            short_points=Decimal("32.67"),
+            point_value=Decimal("0.01"),
+        )
+
     @property
     def is_verified(self) -> bool:
         """Always False. See the module docstring: MT5 publishes no historical

@@ -31,6 +31,13 @@ class Charges(BaseModel):
     model_config = _FROZEN
 
     brokerage: Decimal = Decimal("0")
+    #: Overnight financing on a CFD held across a session roll. Zero on MCX,
+    #: where margin is blocked rather than borrowed, and genuinely zero there
+    #: rather than unmodelled. **This is the one component that can be
+    #: negative**: a short position receives financing rather than paying it,
+    #: and reporting that as a cost of minus-something is truer than dropping
+    #: a credit the account actually got. See `algo/costs/cfd.py`.
+    swap: Decimal = Decimal("0")
     ctt: Decimal = Decimal("0")
     exchange_txn: Decimal = Decimal("0")
     sebi_fee: Decimal = Decimal("0")
@@ -41,6 +48,7 @@ class Charges(BaseModel):
     def total(self) -> Decimal:
         return (
             self.brokerage
+            + self.swap
             + self.ctt
             + self.exchange_txn
             + self.sebi_fee
@@ -51,6 +59,7 @@ class Charges(BaseModel):
     def __add__(self, other: Charges) -> Charges:
         return Charges(
             brokerage=self.brokerage + other.brokerage,
+            swap=self.swap + other.swap,
             ctt=self.ctt + other.ctt,
             exchange_txn=self.exchange_txn + other.exchange_txn,
             sebi_fee=self.sebi_fee + other.sebi_fee,

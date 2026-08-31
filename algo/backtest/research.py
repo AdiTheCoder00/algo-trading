@@ -30,6 +30,7 @@ acceptable trade, and the cap is far above any study these strategies need.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
@@ -40,12 +41,25 @@ from algo.core.bar import Bar, Timeframe
 from algo.core.errors import DataError
 from algo.core.instrument import CfdId
 from algo.data.mt5_history import TIMEFRAME_CONSTANTS, fetch_history, resolve_server_offset
+from algo.exchange.specs import ContractSpecStore
 from algo.live.mt5_runner import strategy_for
+from algo.reporting.significance import (
+    DEFAULT_CONFIDENCE_PCT,
+    DEFAULT_RESAMPLES,
+    permutation_result,
+    permuted_bars,
+    stationary_bootstrap,
+)
 
 #: The most bars one request may pull. Well past what any study here needs
 #: (D-124's fair-window comparison used 25,000) and far short of tying up the
 #: process for minutes.
 MAX_BARS = 50_000
+
+#: Permutations for the significance study. 1,000 puts the finest p-value it
+#: can report at 0.001, which is well past the 0.05 anything here is judged
+#: against, and costs a few minutes rather than an hour.
+DEFAULT_PERMUTATIONS = 1_000
 
 #: Timeframes offered to the console. A subset of what MT5 exposes: these are
 #: the ones this project has actually measured against (D-123/D-124).
@@ -609,3 +623,181 @@ def _caveats(result: object, span: timedelta) -> list[str]:
             "direction happened to dominate them."
         )
     return notes
+
+
+def run_significance_study(
+    terminal: object,
+    *,
+    strategy: str,
+    timeframe_minutes: int,
+    symbol: str = "XAUUSD",
+    params: dict[str, Any] | None = None,
+    permutations: int = DEFAULT_PERMUTATIONS,
+    resamples: int = DEFAULT_RESAMPLES,
+    confidence_pct: Decimal = DEFAULT_CONFIDENCE_PCT,
+    seed: int = 0,
+    progress: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
+    """Is this strategy's result on real bars distinguishable from luck?
+
+    Two answers, because they are two questions (`algo/reporting/significance.py`
+    sets out why conflating them is the usual mistake).
+
+    The **bootstrap** resamples the realised trade sequence and reports a
+    confidence interval around the net P&L that was actually earned. It says how
+    firm the number is; it cannot say whether the strategy has edge, because it
+    only ever sees trades the strategy already chose to take.
+
+    The **permutation test** rebuilds the price series from the same returns in a
+    shuffled order and re-runs the whole backtest on it, once per permutation.
+    Those series have the market's volatility and none of its structure, so what
+    the strategy earns on them is what it earns from no edge at all. The observed
+    result is then located in that distribution.
+
+    Costs are charged on every permutation exactly as on the real run - spread,
+    commission and financing. A null built from cost-free runs would be a null
+    the real result beats for the wrong reason.
+    """
+    supplied = params or {}
+    # Cheap checks before the terminal is touched, same ordering as `run_study`.
+    if strategy not in {s["id"] for s in STRATEGIES}:
+        raise DataError(
+            f"unknown strategy {strategy!r}; available: "
+            f"{', '.join(s['id'] for s in STRATEGIES)}"
+        )
+    if timeframe_minutes not in TIMEFRAME_CONSTANTS:
+        raise DataError(
+            f"no {timeframe_minutes}-minute timeframe; available: "
+            f"{sorted(TIMEFRAME_CONSTANTS)}"
+        )
+    if permutations < 1:
+        raise DataError(f"permutations must be positive, got {permutations}")
+
+    lookback = _int("lookback", supplied.get("lookback", _spec("lookback").default))
+    lots = _int("lots", supplied.get("lots", _spec("lots").default))
+    count = _int("bars", supplied.get("bars", _spec("bars").default))
+    stop_loss_pct = _decimal(
+        "stop_loss_pct", supplied.get("stop_loss_pct", _spec("stop_loss_pct").default)
+    )
+    trail_activation_pct = _decimal(
+        "trail_activation_pct",
+        supplied.get("trail_activation_pct", _spec("trail_activation_pct").default),
+    )
+    trail_pct = _decimal("trail_pct", supplied.get("trail_pct", _spec("trail_pct").default))
+
+    timeframe = Timeframe(minutes=timeframe_minutes)
+    instrument = CfdId(symbol=symbol)
+
+    resolved = resolve_server_offset(terminal, symbol)  # type: ignore[arg-type]
+    bars = fetch_history(
+        terminal,  # type: ignore[arg-type]
+        symbol=symbol,
+        timeframe=timeframe,
+        count=count,
+        offset=resolved.offset,
+    )
+    if len(bars) < 3:
+        raise DataError(f"only {len(bars)} bar(s) available - not enough to permute")
+
+    def backtest(series: list[Bar]) -> Any:
+        return run_cfd_backtest(
+            series,
+            instrument=instrument,
+            timeframe=timeframe,
+            strategy_factory=lambda: strategy_for(
+                strategy,
+                instrument=instrument,
+                stop_loss_pct=stop_loss_pct,
+                trail_activation_pct=trail_activation_pct,
+                trail_pct=trail_pct,
+                lookback=lookback,
+            ),
+            stop_loss_pct=stop_loss_pct,
+            trail_activation_pct=trail_activation_pct,
+            trail_pct=trail_pct,
+            lots=lots,
+        )
+
+    real = backtest(bars)
+    if not real.trades:
+        raise DataError(
+            "the strategy took no trades on this window, so there is no result "
+            "to test. Widen the history or loosen the parameters."
+        )
+
+    # The venue's own tick, not a constant: quantising a permuted series to the
+    # wrong grid would let it hold prices the real one never could.
+    tick = ContractSpecStore.default().spec_for(
+        symbol, instrument.exchange, bars[-1].ts.date()
+    ).tick_size
+
+    null: list[Decimal] = []
+    for index in range(permutations):
+        shuffled = permuted_bars(bars, seed=seed * 1_000_003 + index, tick=tick)
+        null.append(backtest(shuffled).net_pnl)
+        if progress is not None:
+            progress(index + 1, permutations)
+
+    bootstrap = stationary_bootstrap(
+        [trade.net_pnl for trade in real.trades],
+        resamples=resamples,
+        confidence_pct=confidence_pct,
+        seed=seed,
+    )
+    permutation = permutation_result(real.net_pnl, null)
+
+    return {
+        "strategy": strategy,
+        "symbol": symbol,
+        "timeframe_label": timeframe.label,
+        "bars": len(bars),
+        "window_start": bars[0].ts.isoformat(),
+        "window_end": bars[-1].ts.isoformat(),
+        "params": {
+            "lookback": lookback,
+            "lots": lots,
+            "stop_loss_pct": str(stop_loss_pct),
+            "trail_activation_pct": str(trail_activation_pct),
+            "trail_pct": str(trail_pct),
+        },
+        "observed": {
+            "net_pnl": str(real.net_pnl),
+            "gross_pnl": str(real.gross_pnl),
+            "swap_paid": str(real.swap_paid),
+            "spread_paid": str(real.spread_paid),
+            "trades": len(real.trades),
+        },
+        "bootstrap": {
+            "observed": str(bootstrap.observed),
+            "lower": str(bootstrap.lower),
+            "upper": str(bootstrap.upper),
+            "confidence_pct": str(bootstrap.confidence_pct),
+            "excludes_zero": bootstrap.excludes_zero,
+            "loss_probability_pct": str(bootstrap.loss_probability_pct),
+            "resamples": bootstrap.resamples,
+            "mean_block": str(bootstrap.mean_block),
+            "summary": bootstrap.summary(),
+        },
+        "permutation": {
+            "observed": str(permutation.observed),
+            "p_value": str(permutation.p_value),
+            "is_significant": permutation.is_significant,
+            "permutations": permutation.permutations,
+            "at_or_above_observed": permutation.at_or_above_observed,
+            "null_mean": str(permutation.null_mean),
+            "null_median": str(permutation.null_median),
+            "null_p95": str(permutation.null_p95),
+            "null_best": str(permutation.null_best),
+            "summary": permutation.summary(),
+        },
+        "caveats": [
+            "Neither test corrects for parameter search. A p-value on a "
+            "parameter set chosen by looking at this same history is an "
+            "optimistic bound, not the p-value of the procedure that found it.",
+            "The permutation null destroys serial structure only. A strategy "
+            "that profits from something else in the data - the drift, the "
+            "volatility clustering - is not tested against that here.",
+            f"One symbol ({symbol}), one timeframe ({timeframe.label}), one "
+            "history. Significance here is not significance elsewhere.",
+        ],
+    }

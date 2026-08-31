@@ -48,6 +48,7 @@ from algo.core.order import Order
 from algo.core.signal import PriceIntent, Signal, SignalLeg
 from algo.core.timeutil import iso, ist_date
 from algo.core.trade import Trade
+from algo.costs.cfd import SwapModel
 from algo.costs.margin import MarginModel
 from algo.exchange.calendar import SessionCalendar
 from algo.exchange.expiries import ExpiryCalendar, ExpirySet
@@ -169,6 +170,7 @@ class BacktestEngine:
         "_instrument",
         "_is_option",
         "_kill_switch",
+        "_last_financed_session",
         "_levels",
         "_margin",
         "_mode",
@@ -185,6 +187,7 @@ class BacktestEngine:
         "_state",
         "_stop_viability_threshold",
         "_strategy",
+        "_swap",
         "_timeframe",
         "_trade_builder",
     )
@@ -203,6 +206,7 @@ class BacktestEngine:
         timeframe: Timeframe,
         is_option: bool = False,
         session_day_for: Callable[[datetime], date] = ist_date,
+        swap: SwapModel | None = None,
         config_hash: str = "",
         exchange: Exchange = Exchange.MCX,
         price_source: PriceSource | None = None,
@@ -253,6 +257,8 @@ class BacktestEngine:
         self._signal_meta: dict[str, tuple[str, dict[str, str]]] = {}
         self._pending_exit_reason = ""
         self._session_started: set[date] = set()
+        self._swap = swap
+        self._last_financed_session: date | None = None
 
     # ------------------------------------------------------------------- live
     def append_bar(self, bar: Bar) -> int:
@@ -372,6 +378,12 @@ class BacktestEngine:
             self._session_started.add(session_day)
             self._kill_switch.start_session(session_day, self._portfolio.equity(marks))
 
+        # Charged *after* the session's opening equity is recorded, so a daily
+        # loss limit counts the financing against the day it is booked. A risk
+        # limit that silently excludes a known, certain cost is the weaker of
+        # the two readings.
+        self._charge_financing(session_day)
+
         # ---- the risk layer acts before the strategy is consulted
         exit_orders, exit_event = self._risk_exits(bar, session_day, marks)
         if exit_event is not None:
@@ -408,6 +420,41 @@ class BacktestEngine:
         )
 
     # -------------------------------------------------------------------- run
+    def _charge_financing(self, session_day: date) -> None:
+        """Book one night's financing on anything held into a new session.
+
+        Placed in `decide` rather than in `run` so the backtest and the live
+        loop charge it on the identical path - the whole point of `decide`
+        being shared. Without this the live loop reported a P&L that ignored
+        the largest cost of holding a CFD overnight, which for a strategy that
+        carries positions for days is not a rounding item (D-121: a long pays
+        about 6.6% of notional a year).
+
+        Two things this deliberately does not attempt. It charges whatever is
+        held when the first bar of the new session arrives, so a position
+        opened on that same bar is charged one night it did not strictly hold -
+        the same one-bar boundary `cfd_runner.py` has always had, and an error
+        bounded by a single night. And there is no historical rate series to
+        apply (see `SwapModel.is_verified`), so today's rate is charged to the
+        whole backtest; the model says so rather than implying precision it has
+        no source for.
+        """
+        previous = self._last_financed_session
+        self._last_financed_session = session_day
+        if self._swap is None or previous is None or session_day == previous:
+            return
+        for position in self._portfolio.open_positions():
+            if position.qty == 0:
+                continue
+            side = Side.BUY if position.qty > 0 else Side.SELL
+            # `carry_for` returns a signed P&L contribution; `apply_financing`
+            # takes a cost. The sign flips once, here.
+            self._portfolio.apply_financing(
+                -self._swap.carry_for(
+                    side=side, lots=abs(int(position.lots)), on=session_day
+                )
+            )
+
     def run(self) -> BacktestResult:
         pending: list[Order] = []
         fills: list[Fill] = []

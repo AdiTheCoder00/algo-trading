@@ -133,6 +133,23 @@ class Portfolio:
         self._positions[key] = updated
 
     # ------------------------------------------------------------------ mark
+    def apply_financing(self, amount: Decimal) -> None:
+        """Book overnight financing against cash. Not a fill - nothing trades.
+
+        The position is untouched; only cash moves. `amount` is a **cost**:
+        positive for a long paying financing, negative for a short receiving it
+        (`SwapModel.carry_for` returns the opposite sign, and that flip happens
+        once, at the caller, so it is never ambiguous which convention is in
+        force here).
+
+        Booked into `charges` rather than taken quietly out of cash, for two
+        reasons: `check_identity` still balances, and the figure surfaces
+        wherever costs are already reported instead of appearing as equity that
+        drifted for no stated reason.
+        """
+        self._cash -= amount
+        self._charges = self._charges + Charges(swap=amount)
+
     def market_value(self, marks: dict[str, Decimal]) -> Decimal:
         total = Decimal("0")
         for key, position in self._positions.items():

@@ -23,6 +23,7 @@ from algo.cli.cmd_killswitch import kill_switch
 from algo.cli.cmd_live import live
 from algo.cli.cmd_mt5 import live_mt5, mt5_replay
 from algo.cli.cmd_serve import serve
+from algo.cli.cmd_significance import significance
 from algo.cli.cmd_stop import stop
 from algo.cli.cmd_telegram import telegram_check
 from algo.cli.cmd_verify import verify
@@ -38,6 +39,7 @@ app.command("verify")(verify)
 app.command("config")(show_config)
 app.command("backtest")(backtest)
 app.command("live")(live)
+app.command("significance")(significance)
 app.command("walkforward")(walk_forward_feasibility)
 app.command("serve")(serve)
 app.command("killswitch")(kill_switch)

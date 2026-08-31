@@ -39,12 +39,15 @@ kill switch's *daily* loss limit therefore also resets on the venue's own
 rollover here rather than at IST midnight, which is the correct boundary for it
 rather than an accident of the default.
 
-**Swap is not charged.** `SwapModel` exists and is tested (D-121) but is wired
-into no engine path (D-128 flagged this). A position held overnight in this loop
-pays spread but not financing, so P&L here is optimistic for anything carried
-past the rollover, in exactly the direction `cfd.py`'s own docstring warns
-about. The measurement script models it; this loop does not, and says so rather
-than letting a flattering number pass as the whole cost.
+**Swap is charged.** It was not, for as long as this file existed: `SwapModel`
+was tested and wired into no engine path (D-128 flagged it), so a position held
+overnight paid spread but not financing and reported a P&L flattering by exactly
+the cost of holding it. `BacktestEngine` now books it on the shared `decide`
+path, which means the live loop and the backtest charge the identical carry
+rather than two paths disagreeing about what an overnight position costs. The
+rate is a snapshot and `SwapModel.is_verified` stays False - MT5 publishes no
+historical series - so today's rate is applied to the whole history and the
+model reports that rather than burying it.
 """
 
 from __future__ import annotations
@@ -60,7 +63,7 @@ from algo.core.clock import Clock
 from algo.core.enums import Exchange
 from algo.core.errors import DataError
 from algo.core.instrument import CfdId
-from algo.costs.cfd import CfdChargeModel
+from algo.costs.cfd import CfdChargeModel, SwapModel
 from algo.costs.slippage import NoSlippage
 from algo.costs.spread import FixedTickSpread
 from algo.exchange.forex_calendar import ForexCalendar
@@ -215,6 +218,12 @@ def build_mt5_paper_loop(
         state=state,
         mode=mode,
         broker=broker_label,
+        # Financing, charged on the same shared `decide` path the backtest
+        # uses. Until this was wired the loop paid spread but not carry, so a
+        # position held past the 21:00 rollover reported a P&L flattering by
+        # exactly the cost of holding it - see the module docstring, which said
+        # so and now no longer has to.
+        swap=SwapModel.vantage_xauusd(),
     )
 
     router = OrderRouter(broker=broker, journal=journal, clock=clock)

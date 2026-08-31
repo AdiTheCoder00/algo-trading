@@ -152,13 +152,7 @@ class CfdCosts:
     #: London/New York overlap. `None` keeps the constant, which is what every
     #: run before tick sampling existed used.
     half_spread_at: Callable[[datetime], Decimal] | None = None
-    swap: SwapModel = field(
-        default_factory=lambda: SwapModel(
-            long_points=Decimal("-80.54"),
-            short_points=Decimal("32.67"),
-            point_value=Decimal("0.01"),
-        )
-    )
+    swap: SwapModel = field(default_factory=SwapModel.vantage_xauusd)
     commission: CfdChargeModel = field(default_factory=CfdChargeModel.vantage_standard)
 
 
