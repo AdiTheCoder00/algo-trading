@@ -14,10 +14,12 @@
  */
 
 import type { TradeStats as TradeStatsData } from "@/lib/api";
-import { inr } from "@/lib/api";
+import { money } from "@/lib/api";
 
 interface Props {
   stats: TradeStatsData | null;
+  /** The venue's settlement currency, from `health.detail`. */
+  currency?: string;
 }
 
 function pct(value: string | null): string {
@@ -32,7 +34,7 @@ function rMultiple(value: string | null): string {
   return value !== null ? `${Number(value) >= 0 ? "+" : ""}${Number(value).toFixed(2)}R` : "—";
 }
 
-export function TradeStats({ stats }: Props) {
+export function TradeStats({ stats, currency }: Props) {
   if (!stats || stats.trades === 0) {
     return <p className="empty">Not enough completed trades yet.</p>;
   }
@@ -51,13 +53,21 @@ export function TradeStats({ stats }: Props) {
         </div>
         <div className="stat">
           <dt>Profit factor</dt>
-          <dd className={stats.profit_factor !== null && Number(stats.profit_factor) >= 1 ? "up" : "down"}>
+          <dd
+            className={
+              stats.profit_factor === null ? "" : Number(stats.profit_factor) >= 1 ? "up" : "down"
+            }
+          >
             {ratio(stats.profit_factor)}
           </dd>
         </div>
         <div className="stat">
           <dt>Expectancy</dt>
-          <dd className={stats.expectancy_r !== null && Number(stats.expectancy_r) >= 0 ? "up" : "down"}>
+          <dd
+            className={
+              stats.expectancy_r === null ? "" : Number(stats.expectancy_r) >= 0 ? "up" : "down"
+            }
+          >
             {rMultiple(stats.expectancy_r)}
           </dd>
         </div>
@@ -67,11 +77,11 @@ export function TradeStats({ stats }: Props) {
         </div>
         <div className="stat">
           <dt>Gross profit</dt>
-          <dd className="up">{inr(stats.gross_profit)}</dd>
+          <dd className="up">{money(stats.gross_profit, currency)}</dd>
         </div>
         <div className="stat">
           <dt>Gross loss</dt>
-          <dd className="down">{inr(stats.gross_loss)}</dd>
+          <dd className="down">{money(stats.gross_loss, currency)}</dd>
         </div>
       </dl>
 

@@ -201,6 +201,20 @@ class RetriesExhausted(RuntimeError):
     """Raised when an operation failed on every attempt."""
 
 
+_TELEGRAM_TOKEN_IN_URL = re.compile(r"/bot\d+:[A-Za-z0-9_-]+")
+
+
+def _redact_telegram_token(text: str) -> str:
+    """Telegram's own API embeds the bot token in the URL path
+    (`https://api.telegram.org/bot<TOKEN>/sendMessage`). A `requests`
+    exception's own `str()` includes the full request URL on a network-level
+    failure (connection error, timeout, ...), so logging one verbatim - as
+    every retry/failure path here does - would write the live token to disk
+    in plaintext on any transient network hiccup. Applied at every site that
+    logs an exception from a Telegram call, not just the send path."""
+    return _TELEGRAM_TOKEN_IN_URL.sub("/bot<redacted>", text)
+
+
 def with_retries(
     operation: Callable[[], T],
     *,
@@ -224,7 +238,7 @@ def with_retries(
                 what,
                 attempt,
                 attempts,
-                exc,
+                _redact_telegram_token(str(exc)),
                 delay,
             )
         except retry_on as exc:
@@ -235,7 +249,7 @@ def with_retries(
                 what,
                 attempt,
                 attempts,
-                exc,
+                _redact_telegram_token(str(exc)),
                 delay,
             )
         if attempt < attempts:
@@ -921,7 +935,7 @@ class CommandPanel:
             )
             data = response.json()
         except (requests.RequestException, ValueError) as exc:
-            LOG.warning("Command panel: getUpdates failed: %s", exc)
+            LOG.warning("Command panel: getUpdates failed: %s", _redact_telegram_token(str(exc)))
             time.sleep(5)
             return
 

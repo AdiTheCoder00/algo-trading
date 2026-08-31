@@ -27,15 +27,29 @@ const READABLE = new Set([
   "notes",
   "kill-switch",
   "chain",
+  "research/catalogue",
+  "research/walk-forward",
+  "research/sweep",
+  // Nullipotent: reads history, computes, returns numbers. A GET upstream too,
+  // so the API's "exactly one write endpoint" guard stays literally true.
+  "research/backtest",
 ]);
 
-/** The only path that may be written to. */
+/** The only path that may be written to. Still exactly one. */
 const WRITABLE = new Set(["kill-switch"]);
 
+/** Joined and re-checked against the allow-list, so a `..` segment or an extra
+ * path element can never widen what this proxy fronts. */
+function joined(path: string[]): string | null {
+  const key = path.join("/");
+  if (path.length > 2 || path.some((segment) => !/^[a-z-]+$/.test(segment))) return null;
+  return key;
+}
+
 function target(path: string[], search: string): string | null {
-  const head = path[0];
-  if (path.length !== 1 || !head || !READABLE.has(head)) return null;
-  return `${API_URL}/${head}${search}`;
+  const key = joined(path);
+  if (!key || !READABLE.has(key)) return null;
+  return `${API_URL}/${key}${search}`;
 }
 
 function missingToken(): NextResponse {
@@ -89,13 +103,13 @@ export async function POST(
   if (!API_TOKEN) return missingToken();
 
   const { path } = await context.params;
-  const head = path[0];
-  if (path.length !== 1 || !head || !WRITABLE.has(head)) {
+  const key = joined(path);
+  if (!key || !WRITABLE.has(key)) {
     return NextResponse.json({ error: `not a writable endpoint: ${path.join("/")}` }, { status: 405 });
   }
 
   try {
-    const upstream = await fetch(`${API_URL}/${head}`, {
+    const upstream = await fetch(`${API_URL}/${key}`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${API_TOKEN}`,

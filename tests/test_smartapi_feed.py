@@ -9,7 +9,7 @@ they were born here.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -50,8 +50,10 @@ class FakeDataTransport:
 
     def __init__(self) -> None:
         self.candle_rows: list[list[Any]] = []
+        self.last_params: dict[str, Any] | None = None
 
     def candles(self, params: dict[str, Any]) -> dict[str, Any]:
+        self.last_params = params
         return {"status": True, "data": list(self.candle_rows)}
 
 
@@ -100,6 +102,41 @@ class TestBarFeed:
         assert bars[0].open == Decimal("156000")
         assert bars[0].close == Decimal("156400")
         assert bars[1].volume == 8
+
+    def test_the_request_window_is_sent_in_ist_not_raw_utc(
+        self, master: InstrumentMaster, clock: BacktestClock, session: SessionWindow
+    ) -> None:
+        """`since`/`until` are UTC (the engine's own convention); the candle
+        API's request window, like its response rows, is IST wall time.
+        Formatting the UTC numbers directly would silently ask for the wrong
+        5.5-hour window - this asserts the request actually sent matches what
+        `SessionWindow` computed, converted to IST wall clock."""
+        from algo.core.timeutil import to_ist
+
+        transport = FakeDataTransport()
+        feed = SmartApiBarFeed(
+            transport=transport,
+            master=master,
+            instrument=FUTURE,
+            timeframe=M30,
+            clock=clock,
+            session=session,
+        )
+        list(feed)
+
+        assert transport.last_params is not None
+        day = session.day_for(clock.now())
+        expected_since = session.open_at(day)
+        expected_until = min(clock.now() - timedelta(minutes=M30.minutes), session.close_at(day))
+        assert transport.last_params["fromdate"] == to_ist(expected_since).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        assert transport.last_params["todate"] == to_ist(expected_until).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        # Sanity check against the bug this guards: the naive (wrong) request
+        # would have formatted the UTC instant directly, 5.5h off IST.
+        assert transport.last_params["fromdate"] != expected_since.strftime("%Y-%m-%d %H:%M")
 
     def test_drops_in_progress_candle(
         self, master: InstrumentMaster, clock: BacktestClock, session: SessionWindow

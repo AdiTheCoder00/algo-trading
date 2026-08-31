@@ -120,6 +120,20 @@ class TestFloatMoneyRejection:
         )
         assert load_config(path, env={}).risk.starting_equity == Decimal("1000000.00")
 
+    def test_an_empty_entry_bars_ist_is_refused(self, tmp_path: Path) -> None:
+        """`algo/cli/main.py`'s `config` command reads `entry_bars_ist[0]` to
+        show what a run would actually use - an empty list must fail here, as
+        an actionable ConfigError, rather than surface as a raw IndexError."""
+        path = tmp_path / "no_entry_bars.yaml"
+        path.write_text(
+            "mode: backtest\n"
+            "instruments:\n  - underlying: GOLDM\n"
+            "strategy:\n  entry_bars_ist: []\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ConfigError, match="entry_bars_ist"):
+            load_config(path, env={})
+
 
 class TestOverrides:
     def test_env_overrides_yaml(self) -> None:
@@ -143,6 +157,30 @@ class TestOverrides:
         )
         with pytest.raises(ConfigError):
             load_config(path, env={})
+
+    def test_the_api_bearer_token_is_not_swept_into_the_config(self) -> None:
+        """`.env.example` documents `ALGO_API_TOKEN` for `algo/api/app.py`'s own
+        bearer-token check - it is read directly, never part of `AppConfig`. Any
+        `ALGO_*` var not excluded here gets swept into the schema and rejected
+        as an unknown key (`extra="forbid"`), which would otherwise break every
+        CLI command for anyone who follows the documented `.env` setup."""
+        config = load_config(REFERENCE_CONFIG, env={"ALGO_API_TOKEN": "some-bearer-token"})
+
+        assert config.model_dump().get("api_token") is None
+
+    def test_smartapi_and_kotak_credential_namespaces_are_not_swept_in_either(self) -> None:
+        """Same reasoning as the bearer token above, for the two credential
+        namespaces `credentials_from_env` reads directly - injecting them into
+        the resolved config would both leak secrets into the hashed config and
+        get refused as unknown keys."""
+        config = load_config(
+            REFERENCE_CONFIG,
+            env={"ALGO_SMARTAPI_API_KEY": "secret", "ALGO_KOTAK_CONSUMER_KEY": "secret"},
+        )
+
+        dumped = config.model_dump()
+        assert "smartapi_api_key" not in dumped
+        assert "kotak_consumer_key" not in dumped
 
 
 class TestConfigHash:

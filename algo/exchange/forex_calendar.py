@@ -50,7 +50,9 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
 
+from algo.core.bar import Timeframe
 from algo.core.errors import CalendarError
+from algo.exchange.calendar import BarBoundary, session_bar_boundaries
 
 _SATURDAY = 5
 _SUNDAY = 6
@@ -129,6 +131,40 @@ class ForexCalendar:
 
     def session_minutes(self, on: date) -> int:
         return int((self.session_close(on) - self.session_open(on)).total_seconds() // 60)
+
+    def session_day_for(self, instant: datetime) -> date:
+        """Which session `instant` belongs to, named by that session's close.
+
+        The FX counterpart to `ist_date`, and not interchangeable with it: a bar
+        at 20:00 UTC on Friday is IST *Saturday*, a day this venue has no
+        session on at all. Grouping FX work by IST date therefore does not merely
+        shift a boundary - it asks the calendar about a day that does not exist
+        and raises. Engines take this as `session_day_for` for that reason.
+        """
+        if instant.tzinfo is None:
+            raise CalendarError("session_day_for needs a timezone-aware instant")
+        instant = instant.astimezone(UTC)
+        # The session is named by its closing date, so anything at or past the
+        # 22:00 open belongs to the *next* date's session.
+        candidate = (
+            instant.date() + timedelta(days=1)
+            if instant.timetz().replace(tzinfo=None) >= self._open
+            else instant.date()
+        )
+        # A weekend or holiday instant belongs to the session that opens next.
+        return self.next_trading_day(candidate, inclusive=True)
+
+    def bar_boundaries(self, on: date, timeframe: Timeframe) -> tuple[BarBoundary, ...]:
+        """Every bar slot in `on`'s session, anchored at the 22:00 open.
+
+        Same shape and same truncation rule as `MarketCalendar.bar_boundaries`,
+        and shared with it rather than re-derived: a 23-hour session divides
+        into whole 30-minute bars exactly, so unlike MCX's 895-minute day
+        nothing here is normally partial - but the rule still holds for a
+        timeframe that does not divide evenly, and saying so in one place beats
+        two implementations that could disagree about the stub.
+        """
+        return session_bar_boundaries(self.session_open(on), self.session_close(on), timeframe)
 
     def is_open(self, instant: datetime) -> bool:
         """Whether the market is quoting at `instant`.

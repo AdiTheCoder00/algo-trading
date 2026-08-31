@@ -30,12 +30,27 @@ WEDNESDAY = date(2026, 8, 26)
 FRIDAY = date(2026, 8, 28)
 
 
-def _swap(**kwargs: object) -> SwapModel:
-    return SwapModel(  # type: ignore[arg-type]
-        long_points=kwargs.get("long_points", LONG_POINTS),
-        short_points=kwargs.get("short_points", SHORT_POINTS),
-        point_value=kwargs.get("point_value", POINT_VALUE),
-        **{k: v for k, v in kwargs.items() if k == "triple_weekday"},
+def _swap(
+    *,
+    long_points: Decimal = LONG_POINTS,
+    short_points: Decimal = SHORT_POINTS,
+    point_value: Decimal = POINT_VALUE,
+    **triple_weekday: int | None,
+) -> SwapModel:
+    """A `SwapModel` on the measured Vantage rates, with any one term overridden.
+
+    `triple_weekday` is forwarded as `**kwargs` rather than declared as a named
+    parameter with a default, because `SwapModel` distinguishes "not specified"
+    (its own Wednesday default) from an explicit `None` ("this broker does not
+    triple at all") - and a single named default here could only express one of
+    those two. `_swap()` must therefore inherit Wednesday, not silently switch
+    tripling off.
+    """
+    return SwapModel(
+        long_points=long_points,
+        short_points=short_points,
+        point_value=point_value,
+        **triple_weekday,
     )
 
 

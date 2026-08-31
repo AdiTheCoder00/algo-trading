@@ -66,6 +66,7 @@ class FakeTerminal:
         retcode: int = 10009,
         trade_allowed: bool = True,
         account: bool = True,
+        tick: bool = True,
     ) -> None:
         self.sent: list[dict[str, object]] = []
         self.positions: list[Row] = []
@@ -75,6 +76,7 @@ class FakeTerminal:
         self._retcode = retcode
         self._trade_allowed = trade_allowed
         self._account = account
+        self._tick = tick
 
     def initialize(self, *args: object, **kwargs: object) -> bool:
         return True
@@ -84,7 +86,7 @@ class FakeTerminal:
     def last_error(self) -> tuple[int, str]:
         return (-1, "fake")
 
-    def account_info(self):
+    def account_info(self) -> Row | None:
         if not self._account:
             return None
         return Row(
@@ -96,32 +98,34 @@ class FakeTerminal:
             trade_allowed=self._trade_allowed,
         )
 
-    def symbol_info(self, symbol: str):
+    def symbol_info(self, symbol: str) -> Row:
         return Row(filling_mode=self._filling_mask)
 
-    def symbol_info_tick(self, symbol: str):
+    def symbol_info_tick(self, symbol: str) -> Row | None:
+        if not self._tick:
+            return None
         return Row(bid=4458.82, ask=4459.10, time=int(NOW.timestamp()))
 
     def symbol_select(self, symbol: str, enable: bool) -> bool:
         return True
 
-    def order_send(self, request: dict[str, object]):
+    def order_send(self, request: dict[str, object]) -> Row:
         self.sent.append(request)
         return Row(retcode=self._retcode, order=987654, price=4459.10, comment="Done")
 
-    def positions_get(self, **kwargs: object):
+    def positions_get(self, **kwargs: object) -> tuple[Row, ...]:
         return tuple(self.positions)
 
-    def orders_get(self, **kwargs: object):
+    def orders_get(self, **kwargs: object) -> tuple[Row, ...]:
         return tuple(self.orders)
 
-    def history_deals_get(self, *args: object, **kwargs: object):
+    def history_deals_get(self, *args: object, **kwargs: object) -> tuple[Row, ...]:
         return tuple(self.deals)
 
 
 def _broker(terminal: FakeTerminal | None = None) -> Mt5Broker:
     broker = Mt5Broker(
-        terminal=terminal or FakeTerminal(),  # type: ignore[arg-type]
+        terminal=terminal or FakeTerminal(),
         symbol="XAUUSD",
         clock=FrozenClock(),
     )
@@ -411,7 +415,7 @@ class TestConnectionAndFunds:
 
     def test_reading_before_attaching_is_refused(self) -> None:
         broker = Mt5Broker(
-            terminal=FakeTerminal(),  # type: ignore[arg-type]
+            terminal=FakeTerminal(),
             symbol="XAUUSD",
             clock=FrozenClock(),
         )
@@ -421,7 +425,7 @@ class TestConnectionAndFunds:
 
     def test_a_terminal_with_no_account_is_refused(self) -> None:
         broker = Mt5Broker(
-            terminal=FakeTerminal(account=False),  # type: ignore[arg-type]
+            terminal=FakeTerminal(account=False),
             symbol="XAUUSD",
             clock=FrozenClock(),
         )
@@ -432,7 +436,7 @@ class TestConnectionAndFunds:
     def test_algo_trading_switched_off_is_refused_at_connect(self) -> None:
         """Better than discovering it when the first order is rejected."""
         broker = Mt5Broker(
-            terminal=FakeTerminal(trade_allowed=False),  # type: ignore[arg-type]
+            terminal=FakeTerminal(trade_allowed=False),
             symbol="XAUUSD",
             clock=FrozenClock(),
         )
@@ -457,9 +461,11 @@ class TestCancelIsHonestAboutBeingImpossible:
 
 class TestNoQuote:
     def test_placing_without_a_tick_is_retryable_not_fatal(self) -> None:
-        terminal = FakeTerminal()
-        terminal.symbol_info_tick = lambda symbol: None  # type: ignore[assignment]
-        broker = _broker(terminal)
+        # A constructor flag rather than a monkeypatched lambda, the same shape
+        # as `account` above and as `tests/test_mt5_feed.py`'s own fake - so the
+        # fake keeps satisfying `Mt5Trader` instead of being reassigned into a
+        # shape the protocol does not describe.
+        broker = _broker(FakeTerminal(tick=False))
 
         with pytest.raises(RetryableBrokerError, match="no quote"):
             broker.place(_order())

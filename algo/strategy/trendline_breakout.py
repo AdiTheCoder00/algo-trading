@@ -76,13 +76,7 @@ from algo.core.signal import PriceIntent, Signal, SignalLeg
 from algo.core.timeutil import iso
 from algo.strategy.base import Strategy
 from algo.strategy.context import BarContext
-from algo.strategy.price_stop import stop_touched
-from algo.strategy.trailing_profit_stop import (
-    TrailState,
-    advance_trail,
-    start_trail,
-    trail_touched,
-)
+from algo.strategy.protective_exits import ExitKind, ProtectiveExits
 
 
 class TrendlineBreakout(Strategy):
@@ -103,21 +97,14 @@ class TrendlineBreakout(Strategy):
         super().__init__()
         if lookback < 2:
             raise DomainError(f"lookback must be at least 2, got {lookback}")
-        if stop_loss_pct < 0:
-            raise DomainError(f"stop_loss_pct cannot be negative, got {stop_loss_pct}")
-        if trail_activation_pct < 0:
-            raise DomainError(
-                f"trail_activation_pct cannot be negative, got {trail_activation_pct}"
-            )
-        if trail_pct < 0:
-            raise DomainError(f"trail_pct cannot be negative, got {trail_pct}")
         self._instrument = instrument
         self._lookback = lookback
-        self._stop_loss_pct = stop_loss_pct
-        self._trail_activation_pct = trail_activation_pct
-        self._trail_pct = trail_pct
         self._config_hash = config_hash
-        self._trail: TrailState | None = None
+        self._exits = ProtectiveExits(
+            stop_loss_pct=stop_loss_pct,
+            trail_activation_pct=trail_activation_pct,
+            trail_pct=trail_pct,
+        )
 
     def warmup_bars(self) -> int:
         return self._lookback + 1
@@ -126,83 +113,32 @@ class TrendlineBreakout(Strategy):
         return {
             "instrument": self._instrument.key,
             "lookback": str(self._lookback),
-            "stop_loss_pct": str(self._stop_loss_pct),
-            "trail_activation_pct": str(self._trail_activation_pct),
-            "trail_pct": str(self._trail_pct),
+            **self._exits.params(),
         }
 
     # ------------------------------------------------------------ persistence
     def state(self) -> dict[str, str]:
         """Only the trailing stop's running peak, when one is enabled and
         armed - the channel itself needs nothing (see the module docstring)."""
-        if self._trail is None:
-            return {}
-        return {
-            "trail_side": self._trail.side.value,
-            "trail_entry": str(self._trail.entry_price),
-            "trail_peak": str(self._trail.peak),
-        }
+        return self._exits.state()
 
     def restore(self, state: Mapping[str, str]) -> None:
-        raw_trail_side = state.get("trail_side", "").strip()
-        if not raw_trail_side:
-            return
-        try:
-            self._trail = TrailState(
-                side=Side(raw_trail_side),
-                entry_price=Decimal(state["trail_entry"]),
-                peak=Decimal(state["trail_peak"]),
-            )
-        except (KeyError, ValueError) as exc:
-            raise DomainError(
-                f"cannot restore trailing-stop state from {dict(state)!r}: {exc}. "
-                "Refusing to run with a partially-restored trail."
-            ) from exc
+        self._exits.restore(state)
 
     # ------------------------------------------------------------------ logic
     def on_bar(self, ctx: BarContext) -> list[Signal]:
         # Checked before the warmup gate - a held position must never go
         # unprotected because the channel has not been recomputed yet.
         held = ctx.positions().get(self._instrument)
-        if held is not None and not held.is_flat:
-            side = Side.BUY if held.qty > 0 else Side.SELL
-            if self._trail is None or self._trail.side is not side:
-                self._trail = start_trail(held.average_price, side)
-            self._trail = advance_trail(self._trail, ctx.bar)
-        else:
-            self._trail = None
-
-        if held is not None and not held.is_flat and stop_touched(
-            ctx.bar, held, self._stop_loss_pct
-        ):
-            closing_side = Side.SELL if held.qty > 0 else Side.BUY
+        exit_decision = self._exits.check(ctx.bar, held)
+        if exit_decision is not None:
             return [
                 self._signal(
                     ctx,
                     SignalAction.CLOSE,
-                    closing_side,
-                    f"stop loss: {self._stop_loss_pct}% move against a "
-                    f"{held.side} position of {held.lots} lot(s), entry "
-                    f"{held.average_price:.2f}",
-                )
-            ]
-
-        if (
-            held is not None
-            and not held.is_flat
-            and self._trail is not None
-            and trail_touched(self._trail, ctx.bar, self._trail_activation_pct, self._trail_pct)
-        ):
-            closing_side = Side.SELL if held.qty > 0 else Side.BUY
-            return [
-                self._signal(
-                    ctx,
-                    SignalAction.CLOSE,
-                    closing_side,
-                    f"trailing stop: {self._trail_pct}% pullback from a peak of "
-                    f"{self._trail.peak:.2f} (armed at {self._trail_activation_pct}% "
-                    f"profit) on a {held.side} position of {held.lots} lot(s), "
-                    f"entry {held.average_price:.2f}",
+                    exit_decision.side,
+                    exit_decision.reason,
+                    exit_kind=exit_decision.kind,
                 )
             ]
 
@@ -233,8 +169,12 @@ class TrendlineBreakout(Strategy):
                     ctx,
                     SignalAction.CLOSE,
                     closing_side,
+                    # Named from the break that actually fired, not derived from
+                    # the closing side. A short is closed by a fresh *high*
+                    # (`broke_up`) and its closing side is BUY, so keying the
+                    # label off the side inverted it on both directions.
                     f"trendline breakout: fresh {self._lookback}-bar "
-                    f"{'low' if closing_side is Side.BUY else 'high'}, flattening a "
+                    f"{'high' if broke_up else 'low'}, flattening a "
                     f"{held.side} position of {held.lots} lot(s) "
                     f"(close {close:.2f} vs channel [{channel_low:.2f}, {channel_high:.2f}])",
                 )
@@ -259,9 +199,21 @@ class TrendlineBreakout(Strategy):
         return []
 
     def _signal(
-        self, ctx: BarContext, action: SignalAction, side: Side, reason: str
+        self,
+        ctx: BarContext,
+        action: SignalAction,
+        side: Side,
+        reason: str,
+        *,
+        exit_kind: ExitKind | None = None,
     ) -> Signal:
         leg_key = f"{self._instrument.key}:{side}"
+        context = {"close": str(ctx.bar.close), "lookback": str(self._lookback)}
+        if exit_kind is not None:
+            # Structured, so a consumer never has to parse `reason` to learn
+            # which exit fired - see `ExitKind`'s own docstring. Absent from
+            # `signal_id`, which is derived from params/action/legs only.
+            context["exit"] = exit_kind
         return Signal(
             signal_id=signal_id(
                 strategy_id=self.strategy_id,
@@ -280,5 +232,5 @@ class TrendlineBreakout(Strategy):
                 ),
             ),
             reason=reason,
-            context={"close": str(ctx.bar.close), "lookback": str(self._lookback)},
+            context=context,
         )

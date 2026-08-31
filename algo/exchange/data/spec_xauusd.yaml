@@ -6,6 +6,12 @@
 # account 25804244 (VantageMarkets-Demo). The `source` line below is
 # reproducible: run `algo mt5` and the same numbers come back.
 #
+# Re-verified 2026-08-30 against account 26017545 on the same server: contract
+# size 100, volume step 0.01, digits 2, point 0.01 - identical. Nothing here is
+# account-specific, only server-and-symbol specific, and this confirms that.
+# (Commission is a different matter and did not carry over as *measured* - see
+# `CfdChargeModel.vantage_standard`.)
+#
 # ============================================================================
 # THE UNIT DECISION. READ THIS BEFORE CHANGING ANY NUMBER HERE.
 # ============================================================================

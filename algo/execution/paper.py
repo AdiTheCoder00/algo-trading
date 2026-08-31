@@ -321,8 +321,10 @@ class PaperBroker:
 
 
 def _instrument_from(payload: dict[str, object]) -> InstrumentId:
-    from algo.core.instrument import FutureId
+    from algo.core.instrument import CfdId, FutureId
 
     if payload.get("kind") == "option":
         return OptionId.model_validate(payload)
+    if payload.get("kind") == "cfd":
+        return CfdId.model_validate(payload)
     return FutureId.model_validate(payload)

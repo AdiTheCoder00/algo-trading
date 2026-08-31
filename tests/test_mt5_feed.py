@@ -19,6 +19,7 @@ from decimal import Decimal
 
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 from algo.core.bar import Timeframe
 from algo.core.errors import DataError
@@ -64,12 +65,14 @@ class FakeTerminal:
     def last_error(self) -> tuple[int, str]:
         return (-1, "fake")
 
-    def symbol_info_tick(self, symbol: str):
+    def symbol_info_tick(self, symbol: str) -> FakeTick | None:
         if not self._tick:
             return None
         return FakeTick(NOW + self.offset)
 
-    def copy_rates_from_pos(self, symbol: str, timeframe: int, start_pos: int, count: int):
+    def copy_rates_from_pos(
+        self, symbol: str, timeframe: int, start_pos: int, count: int
+    ) -> NDArray[np.void] | None:
         self.requested.append(count)
         if self._bars == 0:
             return None

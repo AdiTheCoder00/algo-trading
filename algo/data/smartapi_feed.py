@@ -31,7 +31,7 @@ from algo.core.clock import Clock
 from algo.core.enums import Exchange
 from algo.core.errors import DataError, RetryableBrokerError
 from algo.core.instrument import InstrumentId
-from algo.core.timeutil import IST
+from algo.core.timeutil import IST, to_ist
 from algo.core.tls import trust_the_os_certificate_store
 from algo.data.live import SessionWindow
 from algo.exchange.master import InstrumentMaster
@@ -253,8 +253,13 @@ def fetch_bar_history(
                 "exchange": exchange.value,
                 "symboltoken": row.symboltoken,
                 "interval": f"{timeframe.minutes}_MINUTE",
-                "fromdate": since.strftime("%Y-%m-%d %H:%M"),
-                "todate": until.strftime("%Y-%m-%d %H:%M"),
+                # `since`/`until` are UTC (the engine's convention throughout);
+                # the candle API's request window, like its response rows
+                # (`_bar_from_candle` below), is IST wall time. Formatting the
+                # UTC numbers directly would silently ask for the wrong
+                # 5.5-hour window on every call.
+                "fromdate": to_ist(since).strftime("%Y-%m-%d %H:%M"),
+                "todate": to_ist(until).strftime("%Y-%m-%d %H:%M"),
             }
         )
     except Exception as exc:

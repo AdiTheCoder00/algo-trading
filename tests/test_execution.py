@@ -25,7 +25,7 @@ import pytest
 from algo.core.clock import BacktestClock
 from algo.core.enums import Exchange, OrderState, OrderType, Right, Side
 from algo.core.errors import DomainError, FatalBrokerError, RetryableBrokerError
-from algo.core.instrument import FutureId, InstrumentSpec, OptionId
+from algo.core.instrument import CfdId, FutureId, InstrumentSpec, OptionId
 from algo.core.order import Order
 from algo.core.timeutil import utc
 from algo.costs.charges import FlatChargeModel
@@ -499,3 +499,37 @@ class TestPaperBrokerBehaviour:
         broker.place(_order("0", side=Side.SELL))
         broker.place(_order("1", side=Side.BUY))
         assert broker.positions() == []
+
+
+class TestPaperBrokerInstrumentRestore:
+    """`restore()` rebuilds every instrument from its saved JSON kind. A gap
+    here does not surface as a wrong number - it surfaces as a crash on the
+    next restart, exactly when a position most needs recovering."""
+
+    def test_a_future_round_trips(self) -> None:
+        from algo.execution.paper import _instrument_from
+
+        restored = _instrument_from(GOLDM_FUT.model_dump())
+
+        assert restored == GOLDM_FUT
+
+    def test_an_option_round_trips(self) -> None:
+        from algo.execution.paper import _instrument_from
+
+        restored = _instrument_from(CALL.model_dump())
+
+        assert restored == CALL
+
+    def test_a_cfd_round_trips(self) -> None:
+        """The gap this closes: `InstrumentId` is a 3-way union
+        (`FutureId | OptionId | CfdId`), and a CFD payload has neither
+        `FutureId`'s `underlying`/`expiry` nor `OptionId`'s strike/right - it
+        used to silently fall through to `FutureId.model_validate` and raise
+        a pydantic `ValidationError` instead of recovering."""
+        from algo.execution.paper import _instrument_from
+
+        xauusd = CfdId(symbol="XAUUSD")
+
+        restored = _instrument_from(xauusd.model_dump())
+
+        assert restored == xauusd

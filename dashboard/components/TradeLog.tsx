@@ -12,16 +12,18 @@
  */
 
 import { parseLegs, type Trade } from "@/lib/api";
-import { inr, shortTime } from "@/lib/api";
+import { money, shortTime } from "@/lib/api";
 
 interface Props {
   trades: Trade[];
   /** trade_ids that arrived since the previous poll - flashed once so a new
    * entry is noticed without depending on the reader having watched it land. */
   newIds?: Set<string>;
+  /** The venue's settlement currency, from `health.detail`. */
+  currency?: string;
 }
 
-export function TradeLog({ trades, newIds }: Props) {
+export function TradeLog({ trades, newIds, currency }: Props) {
   if (trades.length === 0) {
     return <p className="empty">No completed trades yet.</p>;
   }
@@ -60,7 +62,7 @@ export function TradeLog({ trades, newIds }: Props) {
                   </div>
                 </td>
                 <td className={`num mono ${net > 0 ? "up" : net < 0 ? "down" : ""}`}>
-                  {inr(trade.net_pnl)}
+                  {money(trade.net_pnl, currency)}
                 </td>
                 <td className={`num mono ${r !== null && r > 0 ? "up" : r !== null && r < 0 ? "down" : ""}`}>
                   {r !== null ? `${r.toFixed(2)}R` : "—"}

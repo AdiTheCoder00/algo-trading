@@ -14,10 +14,12 @@
  */
 
 import type { EquityPoint } from "@/lib/api";
-import { inr } from "@/lib/api";
+import { money } from "@/lib/api";
 
 interface Props {
   points: EquityPoint[];
+  /** The venue's settlement currency, from `health.detail`. */
+  currency?: string;
 }
 
 const WIDTH = 900;
@@ -25,7 +27,7 @@ const HEIGHT = 200;
 const UNDERWATER = 70;
 const PAD = 8;
 
-export function EquityChart({ points }: Props) {
+export function EquityChart({ points, currency }: Props) {
   if (points.length < 2) {
     return <p className="empty">Not enough points yet to draw a curve.</p>;
   }
@@ -101,8 +103,8 @@ export function EquityChart({ points }: Props) {
       </svg>
 
       <div className="panel-bar" style={{ borderTop: "1px solid var(--line)" }}>
-        <span className="mono">{first ? inr(first.equity) : ""} at open</span>
-        <span className="mono">{last ? inr(last.equity) : ""} now</span>
+        <span className="mono">{first ? money(first.equity, currency) : ""} at open</span>
+        <span className="mono">{last ? money(last.equity, currency) : ""} now</span>
       </div>
     </div>
   );

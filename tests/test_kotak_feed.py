@@ -142,6 +142,65 @@ class TestChainFeed:
         assert call.priced_from == "MID"
         assert call.quote.open_interest == 2000
 
+    def test_the_options_underlying_future_carries_the_futures_own_expiry(
+        self, clock: BacktestClock, session: SessionWindow
+    ) -> None:
+        """`algo/core/instrument.py` warns explicitly that `option_expiry` and
+        `underlying_future.expiry` are different dates - the option expires
+        first - and conflating them "is precisely the error that walks a
+        short leg into devolvement." This master deliberately gives the
+        futures contract a *later* expiry than the option chain, so a bug
+        that reused `option_expiry` for both cannot hide behind coincidental
+        matching dates the way `MASTER_ROWS` above would let it."""
+        futures_expiry = date(2026, 10, 30)
+        option_expiry = date(2026, 9, 25)
+        master = InstrumentMaster(
+            [
+                MasterRow(
+                    symboltoken="1",
+                    tradingsymbol="GOLDM30OCT26FUT",
+                    exch_seg="MCX",
+                    name="GOLDM",
+                    instrumenttype="FUTCOM",
+                    expiry=futures_expiry,
+                    lot_size=Decimal("100"),
+                    tick_size=Decimal("50"),
+                ),
+                MasterRow(
+                    symboltoken="2",
+                    tradingsymbol="GOLDM25SEP26148500CE",
+                    exch_seg="MCX",
+                    name="GOLDM",
+                    instrumenttype="OPTFUT",
+                    expiry=option_expiry,
+                    strike=Decimal("148500"),
+                    lot_size=Decimal("100"),
+                    tick_size=Decimal("50"),
+                ),
+            ],
+            fetched_at=NOW,
+        )
+        transport = FakeQuotesTransport()
+        transport.quote_payloads = {
+            "1": _quote("MCX|1", ltp="148500", bid="148450", ask="148550"),
+            "2": _quote("MCX|2", ltp="756", bid="750", ask="762"),
+        }
+        feed = KotakChainFeed(
+            transport=transport,
+            master=master,
+            underlying="GOLDM",
+            clock=clock,
+            session=session,
+            poll_interval_s=0.0,
+        )
+
+        snapshot = next(islice(feed.snapshots(option_expiry), 1))
+
+        call = snapshot.by_strike(Decimal("148500"), Right.CE)
+        assert call is not None
+        assert call.option.option_expiry == option_expiry
+        assert call.option.underlying_future.expiry == futures_expiry
+
     def test_missing_underlying_quote_is_retryable(
         self, master: InstrumentMaster, clock: BacktestClock, session: SessionWindow
     ) -> None:

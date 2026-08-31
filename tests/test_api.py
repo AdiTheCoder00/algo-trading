@@ -410,3 +410,59 @@ class TestKillSwitchIsARequest:
         client.post("/kill-switch", headers=_auth(), json={"reason": "second"})
         history = client.get("/kill-switch", headers=_auth()).json()
         assert [h["reason"] for h in history] == ["second", "first"]
+
+
+class TestResearchDoesNotWeakenTheReadOnlyRule:
+    """A backtest console reads history and returns numbers. It must not become
+    the crack in the one property this module is built around.
+
+    `TestReadOnly.test_exactly_one_write_endpoint_exists` above is the guard;
+    these assert the research surface stays on the correct side of it rather
+    than the guard being widened to accommodate it.
+    """
+
+    def test_the_backtest_endpoint_is_a_get(self, client: TestClient) -> None:
+        """Nullipotent operations are GETs. Making this a POST to carry
+        parameters would have cost the 'exactly one write endpoint' guarantee
+        for nothing but request-shape convenience."""
+        routes = {
+            (route.path, method)
+            for route in client.app.routes  # type: ignore[attr-defined]
+            for method in getattr(route, "methods", set())
+        }
+
+        assert ("/research/backtest", "GET") in routes
+        assert ("/research/backtest", "POST") not in routes
+
+    def test_the_catalogue_needs_a_token_like_everything_else(
+        self, client: TestClient
+    ) -> None:
+        assert client.get("/research/catalogue").status_code == 401
+
+    def test_the_backtest_needs_a_token_like_everything_else(
+        self, client: TestClient
+    ) -> None:
+        response = client.get(
+            "/research/backtest", params={"strategy": "breakout", "timeframe_minutes": 30}
+        )
+
+        assert response.status_code == 401
+
+    def test_the_catalogue_describes_what_the_engine_actually_offers(
+        self, client: TestClient
+    ) -> None:
+        """Served from the engine's own definitions so the console cannot offer
+        a parameter no strategy has, or default one differently."""
+        response = client.get(
+            "/research/catalogue", headers={"Authorization": f"Bearer {TOKEN}"}
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert {s["id"] for s in body["strategies"]} == {"breakout", "macd"}
+        names = {p["name"] for p in body["parameters"]}
+        assert {"stop_loss_pct", "trail_pct", "trail_activation_pct", "lots"} <= names
+        # `lookback` is a Donchian channel length; MACD has no such knob, and the
+        # console must not render one for it.
+        lookback = next(p for p in body["parameters"] if p["name"] == "lookback")
+        assert lookback["applies_to"] == ["breakout"]

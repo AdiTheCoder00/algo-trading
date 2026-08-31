@@ -305,6 +305,202 @@ def create_app(
             for request in state.kill_switch_requests()
         ]
 
+    # ------------------------------------------------------------- research
+    # Reads history, returns numbers, touches no live state. The read-only rule
+    # at the top of this module is about *trading* state; see
+    # `algo/backtest/research.py` for the full argument.
+    @app.get("/research/catalogue")
+    def research_catalogue(_: None = Guarded) -> dict[str, Any]:
+        """Strategies, timeframes and parameter ranges the console may offer.
+
+        Served from the engine's own definitions so the UI cannot present a
+        parameter the strategy does not have, or default one differently from
+        its constructor.
+        """
+        from algo.backtest.research import catalogue
+
+        return catalogue()
+
+    @app.get("/research/backtest")
+    def research_backtest(
+        strategy: str,
+        timeframe_minutes: int,
+        symbol: str = "XAUUSD",
+        lookback: str = "20",
+        stop_loss_pct: str = "0",
+        trail_activation_pct: str = "2",
+        trail_pct: str = "0",
+        lots: str = "100",
+        bars: str = "5000",
+        _: None = Guarded,
+    ) -> dict[str, Any]:
+        """Run one backtest over MT5 history and return its result.
+
+        **A GET, deliberately.** `TestReadOnly.test_exactly_one_write_endpoint_
+        exists` guards this module's central promise - "the guard that survives
+        someone adding a 'close position' button later" - and a study has no
+        business weakening it. The operation is nullipotent: it reads history,
+        computes, and returns numbers, holding no portfolio, router or broker
+        and writing to no state file. That is precisely what GET is for, so the
+        invariant stays literally true rather than explained away.
+
+        Errors come back as 400 with the engine's own message rather than a
+        500: "Stop loss % must be between 0 and 25" is actionable in the
+        console, and a stack trace is not.
+        """
+        import MetaTrader5 as mt5
+
+        from algo.backtest.research import run_study
+        from algo.core.errors import AlgoError
+
+        if not mt5.initialize():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    f"cannot attach to the MT5 terminal: {mt5.last_error()}. "
+                    "Is it running and logged in?"
+                ),
+            )
+        try:
+            return run_study(
+                mt5,
+                strategy=strategy,
+                timeframe_minutes=timeframe_minutes,
+                symbol=symbol,
+                params={
+                    "lookback": lookback,
+                    "stop_loss_pct": stop_loss_pct,
+                    "trail_activation_pct": trail_activation_pct,
+                    "trail_pct": trail_pct,
+                    "lots": lots,
+                    "bars": bars,
+                },
+            )
+        except AlgoError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        finally:
+            mt5.shutdown()
+
+    @app.get("/research/walk-forward")
+    def research_walk_forward(
+        strategy: str,
+        timeframe_minutes: int,
+        symbol: str = "XAUUSD",
+        axis: str = "lookback",
+        second_axis: str = "",
+        in_sample_days: int = 90,
+        out_of_sample_days: int = 30,
+        lookback: str = "20",
+        stop_loss_pct: str = "0",
+        trail_activation_pct: str = "2",
+        trail_pct: str = "0",
+        lots: str = "100",
+        bars: str = "5000",
+        _: None = Guarded,
+    ) -> dict[str, Any]:
+        """Walk-forward: optimise on each window, report what was never fitted.
+
+        A GET for the same reason `/research/backtest` is one - nullipotent, and
+        the "exactly one write endpoint" guard is worth more than request-shape
+        convenience.
+        """
+        import MetaTrader5 as mt5
+
+        from algo.backtest.research import run_walk_forward_study
+        from algo.core.errors import AlgoError
+
+        if not mt5.initialize():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    f"cannot attach to the MT5 terminal: {mt5.last_error()}. "
+                    "Is it running and logged in?"
+                ),
+            )
+        try:
+            return run_walk_forward_study(
+                mt5,
+                strategy=strategy,
+                timeframe_minutes=timeframe_minutes,
+                symbol=symbol,
+                axis=axis,
+                second_axis=second_axis,
+                in_sample_days=in_sample_days,
+                out_of_sample_days=out_of_sample_days,
+                params={
+                    "lookback": lookback,
+                    "stop_loss_pct": stop_loss_pct,
+                    "trail_activation_pct": trail_activation_pct,
+                    "trail_pct": trail_pct,
+                    "lots": lots,
+                    "bars": bars,
+                },
+            )
+        except AlgoError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        finally:
+            mt5.shutdown()
+
+    @app.get("/research/sweep")
+    def research_sweep(
+        strategy: str,
+        timeframe_minutes: int = 60,
+        symbol: str = "XAUUSD",
+        row_axis: str = "timeframe",
+        column_axis: str = "stop_loss_pct",
+        lookback: str = "20",
+        stop_loss_pct: str = "0",
+        trail_activation_pct: str = "2",
+        trail_pct: str = "0",
+        lots: str = "100",
+        bars: str = "5000",
+        _: None = Guarded,
+    ) -> dict[str, Any]:
+        """A two-axis grid of backtests, scored for whether its peak is real.
+
+        A GET, for the reason `/research/backtest` is one.
+        """
+        import MetaTrader5 as mt5
+
+        from algo.backtest.research import run_sweep_study
+        from algo.core.errors import AlgoError
+
+        if not mt5.initialize():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    f"cannot attach to the MT5 terminal: {mt5.last_error()}. "
+                    "Is it running and logged in?"
+                ),
+            )
+        try:
+            return run_sweep_study(
+                mt5,
+                strategy=strategy,
+                timeframe_minutes=timeframe_minutes,
+                symbol=symbol,
+                row_axis=row_axis,
+                column_axis=column_axis,
+                params={
+                    "lookback": lookback,
+                    "stop_loss_pct": stop_loss_pct,
+                    "trail_activation_pct": trail_activation_pct,
+                    "trail_pct": trail_pct,
+                    "lots": lots,
+                    "bars": bars,
+                },
+            )
+        except AlgoError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        finally:
+            mt5.shutdown()
+
     # ------------------------------------------------- the only write endpoint
     @app.post("/kill-switch", response_model=KillSwitchResponse, status_code=202)
     def request_kill_switch(

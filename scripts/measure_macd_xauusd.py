@@ -17,6 +17,14 @@ honestly as a shape test rather than dressed up as a production backtest.
 Position sizing is fixed at one MT5 lot (100 engine lots / ounces) per trade -
 not risk-scaled, matching the project's own stated position on fixed-lot sizing
 (D-089): the implied risk is reported, not hidden, never auto-scaled.
+
+
+NOTE: the per-bar backtest core this script grew now lives in
+`algo/backtest/cfd_runner.py`, so the dashboard's research console and this
+script compute costs the same way rather than as two copies that could drift
+(D-130). This file keeps its own `run()` for now - it carries the multi-
+timeframe fair-window comparison (D-124) that the console does not - but any
+change to how a trade is priced belongs in the module, not here.
 """
 
 from __future__ import annotations

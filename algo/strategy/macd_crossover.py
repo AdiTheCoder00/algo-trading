@@ -89,13 +89,7 @@ from algo.core.timeutil import iso
 from algo.pricing.indicators import warmup_bars
 from algo.strategy.base import Strategy
 from algo.strategy.context import BarContext
-from algo.strategy.price_stop import stop_touched
-from algo.strategy.trailing_profit_stop import (
-    TrailState,
-    advance_trail,
-    start_trail,
-    trail_touched,
-)
+from algo.strategy.protective_exits import ExitKind, ProtectiveExits
 
 
 def _ema_step(close: float, previous: float | None, alpha: float) -> float:
@@ -125,28 +119,21 @@ class MacdCrossover(Strategy):
             raise DomainError(
                 f"the fast period must be shorter than the slow one, got {fast} and {slow}"
             )
-        if stop_loss_pct < 0:
-            raise DomainError(f"stop_loss_pct cannot be negative, got {stop_loss_pct}")
-        if trail_activation_pct < 0:
-            raise DomainError(
-                f"trail_activation_pct cannot be negative, got {trail_activation_pct}"
-            )
-        if trail_pct < 0:
-            raise DomainError(f"trail_pct cannot be negative, got {trail_pct}")
         self._instrument = instrument
         self._fast = fast
         self._slow = slow
         self._signal_period = signal_period
-        self._stop_loss_pct = stop_loss_pct
-        self._trail_activation_pct = trail_activation_pct
-        self._trail_pct = trail_pct
         self._config_hash = config_hash
+        self._exits = ProtectiveExits(
+            stop_loss_pct=stop_loss_pct,
+            trail_activation_pct=trail_activation_pct,
+            trail_pct=trail_pct,
+        )
         self._fast_ema: float | None = None
         self._slow_ema: float | None = None
         self._signal_ema: float | None = None
         self._prev_histogram: float | None = None
         self._bars_seen = 0
-        self._trail: TrailState | None = None
 
     def warmup_bars(self) -> int:
         return warmup_bars(slow=self._slow, signal=self._signal_period)
@@ -157,9 +144,7 @@ class MacdCrossover(Strategy):
             "fast": str(self._fast),
             "slow": str(self._slow),
             "signal": str(self._signal_period),
-            "stop_loss_pct": str(self._stop_loss_pct),
-            "trail_activation_pct": str(self._trail_activation_pct),
-            "trail_pct": str(self._trail_pct),
+            **self._exits.params(),
         }
 
     # ------------------------------------------------------------ persistence
@@ -173,7 +158,7 @@ class MacdCrossover(Strategy):
         """
         if self._fast_ema is None:
             return {}
-        out = {
+        return {
             "fast_ema": repr(self._fast_ema),
             "slow_ema": repr(self._slow_ema),
             "signal_ema": repr(self._signal_ema),
@@ -181,12 +166,8 @@ class MacdCrossover(Strategy):
                 repr(self._prev_histogram) if self._prev_histogram is not None else ""
             ),
             "bars_seen": str(self._bars_seen),
+            **self._exits.state(),
         }
-        if self._trail is not None:
-            out["trail_side"] = self._trail.side.value
-            out["trail_entry"] = str(self._trail.entry_price)
-            out["trail_peak"] = str(self._trail.peak)
-        return out
 
     def restore(self, state: Mapping[str, str]) -> None:
         raw_fast = state.get("fast_ema", "").strip()
@@ -199,16 +180,6 @@ class MacdCrossover(Strategy):
             raw_hist = state.get("prev_histogram", "").strip()
             self._prev_histogram = float(raw_hist) if raw_hist else None
             self._bars_seen = int(state.get("bars_seen", "0"))
-            raw_trail_side = state.get("trail_side", "").strip()
-            self._trail = (
-                TrailState(
-                    side=Side(raw_trail_side),
-                    entry_price=Decimal(state["trail_entry"]),
-                    peak=Decimal(state["trail_peak"]),
-                )
-                if raw_trail_side
-                else None
-            )
         except (KeyError, ValueError) as exc:
             # A half-restored indicator is worse than a cold one: it would
             # compute a histogram value that looks legitimate but is not
@@ -217,6 +188,11 @@ class MacdCrossover(Strategy):
                 f"cannot restore MACD state from {dict(state)!r}: {exc}. Refusing "
                 "to run with a partially-restored indicator."
             ) from exc
+        # After the indicator, and only once it restored cleanly - a trail
+        # without its EMAs would arm against a position the strategy could not
+        # yet reason about. Raises on its own terms (`ProtectiveExits.restore`),
+        # naming the trail rather than the indicator.
+        self._exits.restore(state)
 
     # ------------------------------------------------------------------ logic
     def _update(self, close: float) -> float:
@@ -244,45 +220,15 @@ class MacdCrossover(Strategy):
         # position must never go unprotected because the indicator that would
         # have closed it opposingly has not converged yet.
         held = ctx.positions().get(self._instrument)
-        if held is not None and not held.is_flat:
-            side = Side.BUY if held.qty > 0 else Side.SELL
-            if self._trail is None or self._trail.side is not side:
-                self._trail = start_trail(held.average_price, side)
-            self._trail = advance_trail(self._trail, ctx.bar)
-        else:
-            self._trail = None
-
-        if held is not None and not held.is_flat and stop_touched(
-            ctx.bar, held, self._stop_loss_pct
-        ):
-            closing_side = Side.SELL if held.qty > 0 else Side.BUY
+        exit_decision = self._exits.check(ctx.bar, held)
+        if exit_decision is not None:
             return [
                 self._signal(
                     ctx,
                     SignalAction.CLOSE,
-                    closing_side,
-                    f"stop loss: {self._stop_loss_pct}% move against a "
-                    f"{held.side} position of {held.lots} lot(s), entry "
-                    f"{held.average_price:.2f}",
-                )
-            ]
-
-        if (
-            held is not None
-            and not held.is_flat
-            and self._trail is not None
-            and trail_touched(self._trail, ctx.bar, self._trail_activation_pct, self._trail_pct)
-        ):
-            closing_side = Side.SELL if held.qty > 0 else Side.BUY
-            return [
-                self._signal(
-                    ctx,
-                    SignalAction.CLOSE,
-                    closing_side,
-                    f"trailing stop: {self._trail_pct}% pullback from a peak of "
-                    f"{self._trail.peak:.2f} (armed at {self._trail_activation_pct}% "
-                    f"profit) on a {held.side} position of {held.lots} lot(s), "
-                    f"entry {held.average_price:.2f}",
+                    exit_decision.side,
+                    exit_decision.reason,
+                    exit_kind=exit_decision.kind,
                 )
             ]
 
@@ -338,9 +284,21 @@ class MacdCrossover(Strategy):
         return []
 
     def _signal(
-        self, ctx: BarContext, action: SignalAction, side: Side, reason: str
+        self,
+        ctx: BarContext,
+        action: SignalAction,
+        side: Side,
+        reason: str,
+        *,
+        exit_kind: ExitKind | None = None,
     ) -> Signal:
         leg_key = f"{self._instrument.key}:{side}"
+        context = {"close": str(ctx.bar.close), "bars_seen": str(self._bars_seen)}
+        if exit_kind is not None:
+            # Structured, so a consumer never has to parse `reason` to learn
+            # which exit fired - see `ExitKind`'s own docstring. Absent from
+            # `signal_id`, which is derived from params/action/legs only.
+            context["exit"] = exit_kind
         return Signal(
             signal_id=signal_id(
                 strategy_id=self.strategy_id,
@@ -359,5 +317,5 @@ class MacdCrossover(Strategy):
                 ),
             ),
             reason=reason,
-            context={"close": str(ctx.bar.close), "bars_seen": str(self._bars_seen)},
+            context=context,
         )

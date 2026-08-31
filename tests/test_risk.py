@@ -389,7 +389,9 @@ class TestKillSwitch:
 class TestRiskEngineCaps:
     """The caps that go beyond lot counts: the margin cap and the entry intent."""
 
-    def _open_signal(self, goldm_future: FutureId, *, limit: Decimal | None = None) -> Signal:
+    def _open_signal(
+        self, goldm_future: FutureId, *, limit: Decimal | None = None, ratio: int = 1
+    ) -> Signal:
         from algo.core.enums import Side, SignalAction
         from algo.core.signal import PriceIntent, SignalLeg
 
@@ -399,7 +401,9 @@ class TestRiskEngineCaps:
             strategy_id="test",
             ts=utc(2026, 8, 19, 6, 0),
             action=SignalAction.OPEN,
-            legs=(SignalLeg(instrument=goldm_future, direction=Side.SELL, entry=entry),),
+            legs=(
+                SignalLeg(instrument=goldm_future, direction=Side.SELL, entry=entry, ratio=ratio),
+            ),
             reason="margin-cap test",
         )
 
@@ -454,6 +458,36 @@ class TestRiskEngineCaps:
         decision = self._evaluate(
             self._open_signal(goldm_future), goldm_spec, proposed_margin=Decimal("50000")
         )
+        assert isinstance(decision, Accepted)
+
+    def test_the_lots_cap_accounts_for_a_legs_ratio(
+        self, goldm_spec: InstrumentSpec, goldm_future: FutureId
+    ) -> None:
+        """`FixedLotSizer(1)` sizes 1 lot; `max_lots_per_underlying=10`
+        (`_evaluate`'s own setup). A leg with `ratio=15` actually places
+        `1 * 15 = 15` lots (`RiskEngine.evaluate` scales every order by
+        `leg.ratio`, same as `backtest/engine.py`'s margin notional) - well
+        past the cap the un-scaled `lots=1` alone would have passed."""
+        from algo.risk.engine import Rejected
+
+        decision = self._evaluate(
+            self._open_signal(goldm_future, ratio=15), goldm_spec, proposed_margin=Decimal("0")
+        )
+
+        assert isinstance(decision, Rejected)
+        assert decision.reason is RejectReason.ABOVE_MAX_LOTS
+
+    def test_a_ratio_that_still_fits_under_the_cap_is_accepted(
+        self, goldm_spec: InstrumentSpec, goldm_future: FutureId
+    ) -> None:
+        """The other direction: a ratio of 2 makes 2 lots, still under the cap
+        of 10 - the fix must not reject every ratio > 1 leg outright."""
+        from algo.risk.engine import Accepted
+
+        decision = self._evaluate(
+            self._open_signal(goldm_future, ratio=2), goldm_spec, proposed_margin=Decimal("50000")
+        )
+
         assert isinstance(decision, Accepted)
 
     def test_margin_already_blocked_counts_towards_the_cap(

@@ -215,6 +215,11 @@ class TestPositionIsReadFromContextNeverFromMemory:
         assert closes
         assert closes[0].legs[0].direction is Side.BUY
         assert "stop loss" not in closes[0].reason
+        # A short is closed by a fresh HIGH. Naming it "low" would describe the
+        # opposite event, and the reason string is what answers "why did this
+        # fire" six weeks later - it has to name the break that actually fired.
+        assert "-bar high" in closes[0].reason
+        assert "-bar low" not in closes[0].reason
 
     def test_a_long_is_closed_by_a_downside_breakout(self) -> None:
         strategy = TrendlineBreakout(
@@ -227,7 +232,9 @@ class TestPositionIsReadFromContextNeverFromMemory:
 
         assert closes
         assert closes[0].legs[0].direction is Side.SELL
-        assert "stop loss" not in closes[0].reason
+        # The mirror of the short case: a long is closed by a fresh LOW.
+        assert "-bar low" in closes[0].reason
+        assert "-bar high" not in closes[0].reason
 
     def test_a_long_survives_a_breakout_in_its_own_direction(self) -> None:
         """The held direction agreeing with the market is not itself an event

@@ -31,6 +31,7 @@ The portfolio identity is re-checked after every fill and every mark.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -48,7 +49,7 @@ from algo.core.signal import PriceIntent, Signal, SignalLeg
 from algo.core.timeutil import iso, ist_date
 from algo.core.trade import Trade
 from algo.costs.margin import MarginModel
-from algo.exchange.calendar import MarketCalendar
+from algo.exchange.calendar import SessionCalendar
 from algo.exchange.expiries import ExpiryCalendar, ExpirySet
 from algo.exchange.specs import ContractSpecStore
 from algo.execution.fills import FillSimulator
@@ -176,6 +177,7 @@ class BacktestEngine:
         "_portfolio",
         "_prices",
         "_risk",
+        "_session_day",
         "_session_started",
         "_signal_meta",
         "_sim",
@@ -191,7 +193,7 @@ class BacktestEngine:
         self,
         *,
         bars: list[Bar],
-        calendar: MarketCalendar,
+        calendar: SessionCalendar,
         specs: ContractSpecStore,
         strategy: Strategy,
         risk: RiskEngine,
@@ -200,6 +202,7 @@ class BacktestEngine:
         instrument: InstrumentId,
         timeframe: Timeframe,
         is_option: bool = False,
+        session_day_for: Callable[[datetime], date] = ist_date,
         config_hash: str = "",
         exchange: Exchange = Exchange.MCX,
         price_source: PriceSource | None = None,
@@ -227,6 +230,7 @@ class BacktestEngine:
         self._instrument = instrument
         self._is_option = is_option
         self._timeframe = timeframe
+        self._session_day = session_day_for
         self._config_hash = config_hash
         self._exchange = exchange
         self._prices = price_source or BarPriceSource(instrument, bars)
@@ -360,7 +364,7 @@ class BacktestEngine:
         The strategy is still consulted and its notes still recorded, because
         "what would it have done" is worth keeping.
         """
-        session_day = ist_date(bar.ts)
+        session_day = self._session_day(bar.ts)
         marks = self._marks(bar)
         self._portfolio.check_identity(marks)
 
@@ -416,7 +420,7 @@ class BacktestEngine:
         self._begin_health()
 
         for index, bar in enumerate(self._bars):
-            session_day = ist_date(bar.ts)
+            session_day = self._session_day(bar.ts)
             was_open = not self._portfolio.is_flat
 
             # ---- 0. the dashboard's halt requests act on the next bar
@@ -738,12 +742,12 @@ class BacktestEngine:
                 signal,
                 RiskSnapshot(
                     now=bar.ts,
-                    session_day=ist_date(bar.ts),
+                    session_day=self._session_day(bar.ts),
                     equity=self._portfolio.starting_equity,
                     open_position_count=0,
                     lots_held=0,
                 ),
-                spec=self._spec_for(position.instrument, ist_date(bar.ts)),
+                spec=self._spec_for(position.instrument, self._session_day(bar.ts)),
             )
             if isinstance(decision, Accepted):
                 orders.extend(
@@ -908,13 +912,13 @@ class BacktestEngine:
         }
         final_equity = self._portfolio.equity(final_marks)
 
-        spec = self._spec_for(self._instrument, ist_date(self._bars[0].ts))
+        spec = self._spec_for(self._instrument, self._session_day(self._bars[0].ts))
         spread_predicted, charges_predicted = self._sim.predicted_round_trip_cost(
             price=self._bars[0].close,
             lots=1,
             spec=spec,
             is_option=self._is_option,
-            on=ist_date(self._bars[0].ts),
+            on=self._session_day(self._bars[0].ts),
         )
 
         warnings: list[str] = []
@@ -1093,7 +1097,7 @@ class BacktestEngine:
             return
         underlying = self._instrument.underlying
         try:
-            cycle = self._expiries.nearest_expiry_on_or_after(underlying, ist_date(bar.ts))
+            cycle = self._expiries.nearest_expiry_on_or_after(underlying, self._session_day(bar.ts))
         except CalendarError:
             return
         snapshot = self._chain_provider.chain_at(underlying, cycle.option_expiry, bar.ts)
@@ -1105,7 +1109,7 @@ class BacktestEngine:
             for position in self._portfolio.open_positions()
             if isinstance(position.instrument, OptionId)
         }
-        session_day = ist_date(bar.ts)
+        session_day = self._session_day(bar.ts)
         self._state.record_chain_snapshot(
             {
                 "ts": iso(snapshot.ts),

@@ -70,7 +70,12 @@ class Macd:
         if len(self.histogram) < 2:
             return False
         current = self.histogram[index]
-        previous = self.histogram[index - 1] if index != 0 else None
+        # `index == 0` and `index == -len(self.histogram)` both name the first
+        # element - either form must return False rather than wrapping to
+        # `histogram[-1]` (a same-index "previous") or raising `IndexError` on
+        # the negative form, which `index != 0` alone let through.
+        is_first = index % len(self.histogram) == 0
+        previous = self.histogram[index - 1] if not is_first else None
         if previous is None:
             return False
         if up:

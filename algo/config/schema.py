@@ -303,6 +303,16 @@ class StrategyConfig(BaseModel):
             raise ValueError(f"strike_multiple must be positive, got {v}")
         return v
 
+    @field_validator("entry_bars_ist")
+    @classmethod
+    def _at_least_one_entry_bar(cls, v: tuple[time, ...]) -> tuple[time, ...]:
+        # `algo/cli/main.py`'s `config` command reads `entry_bars_ist[0]` to
+        # show what a run would actually use - an empty tuple would surface as
+        # a raw IndexError there instead of an actionable ConfigError here.
+        if not v:
+            raise ValueError("at least one entry_bars_ist time must be configured")
+        return v
+
 
 class PersistenceConfig(BaseModel):
     model_config = _FROZEN

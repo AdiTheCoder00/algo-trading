@@ -174,11 +174,16 @@ class RiskEngine:
                     f"cap is {self._max_concurrent}"
                 ),
             )
-        if is_opening and snapshot.lots_held + lots > self._max_lots_per_underlying:
+        # A leg's `ratio` scales its actual order size below (`lots * leg.ratio`,
+        # same as `backtest/engine.py`'s margin notional) - the cap must be
+        # checked against that same scaled quantity, or a ratio > 1 leg places
+        # more lots than the cap ever saw.
+        max_leg_lots = lots * max((leg.ratio for leg in signal.legs), default=1)
+        if is_opening and snapshot.lots_held + max_leg_lots > self._max_lots_per_underlying:
             return Rejected(
                 reason=RejectReason.ABOVE_MAX_LOTS,
                 detail=(
-                    f"{snapshot.lots_held} lots held plus {lots} exceeds "
+                    f"{snapshot.lots_held} lots held plus {max_leg_lots} exceeds "
                     f"the cap of {self._max_lots_per_underlying}"
                 ),
             )

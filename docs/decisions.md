@@ -2059,6 +2059,414 @@ it - beats either alone is a real, different question this run does not
 answer, and is the natural next measurement rather than a conclusion to draw
 from extrapolation.
 
+### D-128 - A whole-project audit, run as three parallel scans, eight real fixes
+"Scan the project and make improvements" - not scoped to XAUUSD/CFD work, so
+this covered every directory under `algo/` and the standalone alert tool. Three
+independent audits ran in parallel (core/risk/execution/costs/pricing;
+backtest/exchange/data/portfolio; api/cli/config/live/persistence/reporting),
+each told the codebase already passes `ruff check .` and `mypy --strict`
+cleanly - so nothing reported here is something either tool would have caught,
+and each finding needed to survive being checked against the file's own
+docstring before counting (this codebase explains a lot of its own unusual
+decisions in prose; "looks wrong" is not "is wrong" here).
+
+A second Claude Code session was independently active on this same working
+tree at the same time. Coordinated by message rather than by guessing: it
+confirmed an uncommitted `ProtectiveExits` refactor and a round of mypy-strict
+test fixes already in the tree were neither its work nor this session's,
+almost certainly done directly by the person running both sessions - left
+untouched throughout, along with `pyproject.toml` and everything under
+`scripts/`. A `git show` on a fixed commit SHA reportedly returning different
+content on two reads was checked immediately (`git fsck --full`: clean;
+repeated reads: identical) and not chased further once it stopped reproducing.
+
+**Eight verified, fixed, and tested; several more flagged rather than
+blind-fixed.** Every fix below followed the same discipline as this session's
+own stop-loss and trailing-stop work: reproduce the exact failure first
+(a live `load_config` call, a real `requests` exception, a constructed
+`Signal` with a non-default field), write the regression test, and for the
+ones with real teeth - the SmartAPI request window, the Kotak expiry
+conflation, the MACD index guard - deliberately revert the fix and confirm the
+new test actually fails before restoring it, the same sign-flip discipline
+D-125 used on the stop-loss primitives.
+
+    algo/config/loader.py      ALGO_API_TOKEN (the API server's own bearer
+                                token, documented in .env.example) was not
+                                excluded from the env-to-config sweep, so
+                                setting it exactly as documented broke every
+                                CLI command with "api_token - Extra inputs are
+                                not permitted". Reproduced directly; fixed by
+                                adding it to a new exact-match exclusion set
+                                alongside the existing namespace-prefix one
+                                (which itself had no test coverage before now).
+
+    algo/config/schema.py      entry_bars_ist: [] loaded successfully and then
+                                crashed `algo config` with a raw IndexError
+                                instead of an actionable ConfigError. Added the
+                                same at-least-one validator `instruments`
+                                already has.
+
+    algo/risk/engine.py        The max_lots_per_underlying cap compared
+                                lots_held against the sizer's raw lot count,
+                                but the order actually placed scales every leg
+                                by SignalLeg.ratio (validated to allow >= 1,
+                                consumed the same way by backtest/engine.py's
+                                margin notional). No strategy in the codebase
+                                emits ratio != 1 today, so this was latent, not
+                                exploited - but a real landmine for whichever
+                                multi-leg strategy is next. Fixed to check
+                                against the worst-case scaled leg.
+
+    algo/execution/paper.py    PaperBroker.restore()'s instrument-kind
+                                dispatch handled "future" and "option" only;
+                                InstrumentId is now a three-way union
+                                (CfdId, added this session for XAUUSD). A
+                                restart with a CFD position open would have
+                                raised a pydantic ValidationError instead of
+                                recovering - the crash-recovery path failing
+                                exactly when a real position most needs it
+                                recovered. Added the missing branch.
+
+    algo/data/smartapi_feed.py fetch_bar_history's request window formatted
+                                UTC datetimes directly as the candle API's
+                                fromdate/todate - which the same file's own
+                                _bar_from_candle already documents as IST wall
+                                time. Every live poll and every backtest fetch
+                                was asking for a window shifted 5.5 hours from
+                                the one actually wanted. Fixed with the
+                                project's own to_ist() helper; reverting it
+                                made the new regression test fail exactly as
+                                predicted (03:30 leaking through where 09:00
+                                was expected).
+
+    algo/data/kotak_feed.py    _option_id built every OptionId's
+                                underlying_future using the *option's own*
+                                expiry, not the real futures contract's -
+                                precisely the conflation algo/core/instrument.py
+                                warns "walks a short leg into devolvement".
+                                Every other OptionId construction site in the
+                                codebase already resolves the real futures
+                                expiry; this was the one live (not
+                                synthetic/historical) chain path that didn't.
+                                Threaded the already-available futures row's
+                                own expiry through instead.
+
+    algo/cli/main.py           _run_paper_loop - the function behind `algo
+                                live --passes N` - built its BacktestEngine
+                                without flatten_on_trip, stop_viability_threshold
+                                or on_stop_viability_breach, silently falling
+                                back to the engine's own defaults (no flatten,
+                                no viability guard) regardless of what the
+                                config said. The sibling backtest_bhavcopy and
+                                backtest_smartapi commands already wire all
+                                three correctly - this was the one command that
+                                actually runs live/paper trading, missing them.
+                                The same "one settings object, not fifteen
+                                hand-copied reads" bug class D-117 already
+                                named and fixed once (RunSettings) recurring at
+                                the one call site never migrated to it. Fixed
+                                by reading the same three config paths inline,
+                                matching the existing style of that function
+                                rather than pulling in RunSettings wholesale.
+                                Verified by direct comparison against
+                                BacktestEngine's real constructor signature and
+                                a clean mypy --strict pass; not integration-
+                                tested end-to-end - built a fake feed/chain
+                                harness for that would be a separate,
+                                larger undertaking than this fix warranted.
+
+    tools/macd_telegram_alert  The bot token lives in the request URL
+    /macd_alert.py             (Telegram's own API shape). A network-level
+                                requests exception's str() includes the full
+                                URL, and every retry/failure path logged the
+                                exception verbatim - a transient connection
+                                blip during a send or a command-panel poll
+                                wrote the live token to disk in plaintext.
+                                Reproduced with a real ConnectTimeoutError
+                                against a fake token. Fixed with a small
+                                regex redaction applied at all three logging
+                                sites; verified directly since this
+                                standalone tool has no existing test suite to
+                                extend.
+
+    algo/pricing/indicators.py Macd._crossed's warmup guard checked
+                                `index != 0` to detect "the first element,
+                                no predecessor" - true for the positive form
+                                but not for index == -len(histogram), the
+                                equivalent negative form, which fell through
+                                to histogram[-len(histogram) - 1] and raised
+                                IndexError. Currently unreachable in
+                                production (macd_crossover.py reimplements
+                                the same comparison inline rather than
+                                calling these methods - itself flagged below,
+                                not fixed), but a real defect in code that is
+                                still a public method on a dataclass nothing
+                                stops a future caller from using at that
+                                boundary. Fixed by normalizing both forms
+                                with a single modulo check.
+
+**Flagged, not fixed - each is a design call, not a one-line correction, and
+guessing at the right one would be exactly the kind of unrequested feature
+work this project's own prime directive (correctness over features) argues
+against.** `algo/costs/cfd.py`'s `SwapModel` is fully built and tested but
+never called from `BacktestEngine` or the execution layer - almost certainly
+deliberate staging given this session's own precedent (the MT5 measurement
+work runs through a standalone script specifically because the engine's
+`ist_date`-everywhere shape doesn't fit a continuous FX session), not
+re-litigated here. `algo/execution/reconcile.py`'s docstring claims state
+differences are "reported," but an ordinary SENT->FILLED catch-up produces no
+`Drift` and `DriftKind.STATE_MISMATCH` is never constructed anywhere - could be
+an intentional "only *unexpected* differences count" reading, could be a
+dropped path; needs a decision about what counts as reportable, not a guess.
+`algo/backtest/engine.py`'s margin model treats "is an `OptionId`" as a proxy
+for "is short" (accurate only because `DeltaStrangle` never buys an option
+today) and its `lots_held` for options always resolves to the futures
+instrument's position, currently masked because every CLI wiring hardcodes
+`max_concurrent_positions=2` for a strangle regardless of what config says -
+the same hardcoding the risk-engine.py fix above depends on for its own safety
+margin, so loosening it without also fixing these two would be a regression,
+not an improvement. Recorded here so the connection isn't lost if any one of
+these is picked up in isolation later.
+
+### D-129 - The MT5 path finally runs, on paper, and session-day had to become pluggable
+Asked to "set up and trigger this algo to start trading" on a Vantage demo
+account. Four things stood in the way, and only one of them was a switch:
+`trade_allowed` is False in the terminal (the operator's own toggle), the market
+was shut (Saturday), the measured evidence for these strategies is weak
+(D-124/D-126/D-127), and - the real blocker - **there was no runnable MT5 path
+at all**. `Mt5Broker` was referenced nowhere outside its own tests, and neither
+CFD strategy appeared in `algo/cli/` or `algo/live/`. `algo live` is MCX-only
+by construction (SmartAPI bars, Kotak chain, `DeltaStrangle`, `mcx_calendar`).
+
+**Paper fills on live data, chosen deliberately over demo orders.**
+`algo/live/mt5_runner.py` wires `Mt5BarFeed` -> strategy -> `RiskEngine` ->
+`OrderRouter` -> `PaperBroker`, with `StateStore` so the dashboard sees it.
+Real bars, simulated fills, `Mt5Broker.place` not in the loop at all. That
+method has never been called against a live endpoint; an unattended loop is the
+wrong place to find out what it does, and a demo fill was an approximation
+anyway. `build_mt5_paper_loop` takes a `Broker` it does not construct, so
+swapping in `Mt5Broker` later is a caller's decision with a caller's eyes on
+it, not a flag this module flips.
+
+**`ist_date` session grouping was not an approximation for FX - it was a
+crash.** D-121/D-123 recorded that `BacktestEngine` groups every unit of work by
+`ist_date(bar.ts)`, correct for MCX and the reason the measurement script
+bypassed the engine. The `mt5_runner` docstring initially repeated that as a
+soft caveat: "the daily loss limit resets at IST midnight rather than the 21:00
+rollover." The first end-to-end test showed that was wrong and too generous. A
+bar closing 20:00 UTC on a **Friday** is IST *Saturday*; `ForexCalendar` has no
+Saturday session and raises `CalendarError`. Roughly half the bars in a normal
+week land that way, so the loop could not complete a single pass. Fixed by
+giving `BacktestEngine` and `LiveLoop` a `session_day_for` callable defaulting
+to `ist_date` - every MCX path byte-identical, nothing to re-verify there - and
+passing `ForexCalendar.session_day_for` on the CFD path, which names a session
+by its 21:00 close, the same instant financing is charged. The docstring was
+corrected rather than left describing the gentler bug. Supporting changes:
+`ForexCalendar.bar_boundaries` (the engine needs it and only `MarketCalendar`
+had it - the truncation rule now lives once, in `session_bar_boundaries`, rather
+than as two copies that could disagree about the stub), and a `SessionCalendar`
+Protocol so a CFD run types cleanly without pretending a 24/5 venue is an
+exchange.
+
+**A second wiring bug the tests caught.** The loop was first seeded with
+`seed_bars[:1]`, copied from `_run_paper_loop`, where the chain rather than bar
+history drives `DeltaStrangle`. For a rolling-window strategy that starves it:
+a 20-bar Donchian channel sits in warmup forever and silently never trades -
+the failure mode that looks like "the market was quiet." Now seeded with all but
+the newest bar, since `LiveLoop` appends that one itself and `append_bar`
+refuses anything not strictly after the last.
+
+`tests/test_mt5_runner.py` drives the real feed, router, journal and paper
+broker against a scripted terminal and asserts the things that actually matter:
+a breakout reaches the broker as a fill, the same bar polled twice does not
+double the position, a flat market places nothing, and the broker in the loop is
+the paper one. `algo live-mt5` reports the account, states "PAPER - no order
+reaches this account", measures the server clock rather than assuming it, and
+exits cleanly when the venue is shut instead of looping on a stale tick -
+verified against the real terminal (account 25804244, VantageMarkets-Demo).
+
+**Still true and still stated: this loop does not charge swap.** `SwapModel` is
+tested but wired into no engine path (D-128 flagged it). A position carried past
+the rollover pays spread but not financing, so P&L here is optimistic in exactly
+the direction `cfd.py` warns about.
+
+### D-130 - A research console in the dashboard, without weakening the read-only rule
+Asked for "advanced and most wanted features... so I can customize anything,
+backtest there, change my strategies and timeframe". That collides with a
+decision written down in four places - brief Q21, `api/app.py`, `page.tsx` and
+the dashboard footer - that live parameters are deliberately **not** editable
+from the UI: "every live parameter traces to a committed file rather than to
+something someone typed into a browser once."
+
+**The split that resolves it.** A backtest touches no live state: it reads
+history, runs a strategy instance built for that one request, and returns
+numbers, holding no `Portfolio`, no `OrderRouter`, no broker, and writing to no
+`StateStore` the engine reads. Choosing a timeframe for a *study* is
+exploration; changing what the running loop trades is a deployment. So the
+console got everything - strategy, timeframe, channel length, stop, trail,
+size, history depth - and there is deliberately **no "apply to the live loop"
+button**. Q21 stands untouched.
+
+**The guard caught the first attempt, and the guard was right.** `/research/
+backtest` was written as a POST, because it takes parameters. That tripped
+`TestReadOnly.test_exactly_one_write_endpoint_exists` - "the guard that
+survives someone adding a 'close position' button later." The fix was not to
+widen the test. A backtest is nullipotent, so it became a GET with query
+parameters: semantically correct, and the invariant stays *literally* true
+rather than explained away. New tests assert the endpoint is a GET and that no
+POST variant exists, so the next person to reach for a POST here trips the same
+wire.
+
+**One implementation of what a trade costs.** The per-bar CFD backtest existed
+only inside `scripts/measure_macd_xauusd.py`, where D-123 through D-127 grew it.
+Extracted to `algo/backtest/cfd_runner.py` so the console and the script price a
+trade identically - the same argument `strategy_for` already makes for strategy
+lookup. Stop and trail exits still fill at their own level or the bar's open on
+a gap, never at `bar.close +/- spread`.
+
+**The offset cache, and why it is safe here but not in the live loop.**
+`measure_server_offset` refuses a stale tick, which is correct for trading and
+wrong for research: the weekend is exactly when you want to run a study, and it
+is exactly when the newest tick is hours old. `algo/data/mt5_history.py`
+measures whenever a fresh tick allows, caches to disk, and reuses otherwise -
+reporting a cached offset *as* cached, never as a live reading. `CACHE_MAX_AGE`
+(21 days) bounds it, comfortably shorter than the gap between DST transitions
+and longer than any weekend, so the case it exists for always works and the case
+it must not get wrong cannot happen silently. The live loop still measures every
+start and does not use this.
+
+Seeding the first cache entry was itself a measurement, not an assumption: the
+last tick read 2026-08-28 23:56:59 as-if-UTC, and of the two EET candidates only
++3h places it inside the trading week - 3 minutes before the Friday 21:00 UTC
+close (D-121's measured structure). +2h would put it 57 minutes *after* the
+market shut, which is impossible. `measured_at` was stamped with the tick's real
+time, not with now.
+
+**Building the console found a real bug in `TrendlineBreakout`.** Its exit
+reason named the break direction off `closing_side`, which inverts it: a short
+is closed by a fresh *high* and its closing side is BUY, so every close was
+labelled backwards. Visible immediately once trades rendered in the browser -
+"fresh 20-bar low" against `close 4470.20 vs channel [4428.80, 4469.28]`, a
+close plainly *above* the channel high. Cosmetic in that it moves no money, and
+not cosmetic at all in a codebase whose trade log exists to answer "why did this
+fire six weeks later." No test asserted the label, which is why it survived;
+two now do, and reverting the fix makes both fail on exactly the inverted text.
+The label is now taken from `broke_up` directly, so it cannot invert again.
+
+A second, smaller finding from the same pass: `run_study` validated the strategy
+name only after attaching to MT5 and pulling bars, so a misspelling cost seconds
+and reported the wrong problem first. Cheap checks now run before the terminal
+is touched.
+
+**Every result carries its caveats, and `caveats` is never empty.** The
+tearsheet already refuses to print a ratio without its sample size and the
+stats panel renders `null` rather than a flattering zero; a console returning a
+big green number with nothing qualifying it would undo both at the last step.
+Trade counts under 30 and windows under 180 days say so explicitly. Worth
+noting what the console immediately demonstrated: breakout/M30 over the last
+154 days returns **-$6,681**, against the **+$102,207** D-124 measured for the
+same strategy and timeframe over 2.11 years. Same code, same costs, different
+window, opposite conclusion - which is the caveat, stated by the tool itself.
+
+### D-131 - Walk-forward reaches the dashboard, and says the optimisation is fitting noise
+`algo/backtest/walkforward.py` has held the honest machinery since Milestone 5 -
+rolling windows, per-parameter stability, the fixed-parameter baseline, and a
+`Feasibility` gate that refuses a confident headline on thin data. Nothing had
+ever driven it with real bars; a repo-wide grep found zero references from the
+API or the dashboard, and the only CLI entry point was the *synthetic*
+feasibility calculator. It was the most valuable thing already built and
+entirely unreachable.
+
+Wired now: `algo/backtest/cfd_walkforward.py` drives it over MT5 history using
+the same `run_cfd_backtest` the console uses, adapting the CFD equity curve to
+what `metrics.compute` reads. `CfdResult.equity_curve` gained a third field -
+positions open on that bar - so exposure is *measured* rather than defaulted;
+without it every run would report 0% or 100% alike.
+
+**The first real run is the finding, and it is not flattering.** Breakout on
+H1, optimising channel length, 13 windows, 89 out-of-sample trades - past
+`MIN_OOS_TRADES`, so `ADEQUATE`: this is a conclusion the data can support.
+
+    in sample (fitted)            $471,555.87
+    out of sample                  $31,287.82
+    fixed params, out of sample    $91,074.74
+    optimisation beat doing nothing:  False
+    lookback: UNSTABLE  40 -> 20 -> 20 -> 20 -> 40 -> 10 -> 20 -> 20
+                        -> 10 -> 10 -> 80 -> 80 -> 20
+
+In-sample P&L is **fifteen times** the out-of-sample figure, and choosing the
+channel length per window did roughly **a third** as well as never touching it.
+The chosen value wanders across the whole grid. That is the textbook signature
+of curve fitting, produced by the project's own tooling on the project's own
+strategy - and it is exactly what every single-window backtest here (D-124,
+D-127, D-130) could not have told us. The panel renders "optimising did not
+beat doing nothing" as a verdict rather than a number, because it is the most
+informative line on the page and the easiest one to skim past.
+
+**Design choices worth naming.** The grid is capped at `MAX_GRID` (24) and
+refuses rather than truncates - silently searching a smaller grid than asked
+for would report a study the caller did not run, and a wider grid fits the
+in-sample window better without producing more evidence. `MIN_IS_TRADES` makes
+a candidate ineligible below 5 in-sample trades, so the optimiser cannot pick
+whichever parameter set took two lucky trades. The objective is net P&L rather
+than Sharpe: over a 90-day window the ratio is dominated by how few trades it
+took, which is the same reason `metrics.py` refuses to print one without its
+sample size. Optimising `lookback` on MACD is refused outright - MACD has no
+channel length, so the grid would be identical runs and the stability verdict
+would describe noise that never varied.
+
+Endpoint is a `GET`, for the reason D-130 established: nullipotent, and the
+"exactly one write endpoint" guard is worth more than request-shape
+convenience. The catalogue is now memoised at module scope in `lib/api.ts` so
+the two research panels share one fetch and cannot disagree about which
+strategies or axes exist.
+
+### D-132 - A parameter sweep that argues with its own best cell
+D-125 through D-127 were this done by hand: run the strategy across timeframes
+and stop settings, tabulate nine cells, read the pattern. `algo/backtest/
+sweep.py` does it in one request, with a heatmap panel.
+
+**The design problem, and the whole reason this entry exists.** A heatmap
+invites reading off the greenest square and adopting those parameters. D-131
+had just finished demonstrating that doing exactly that is how you fit noise -
+and a sweep is a *weaker* procedure than that walk-forward, not a stronger one,
+because it has no out-of-sample step at all. Shipping a grid of pretty colours
+with a bright maximum would have handed the reader the precise mistake the
+previous panel exists to catch.
+
+So every sweep is scored for **robustness** before its maximum is reported:
+
+    PLATEAU        the best cell's neighbours perform similarly - what a real
+                   effect looks like
+    ISOLATED PEAK  neighbours average below PLATEAU_RATIO (0.5) of the best -
+                   a spike in a rough surface, fitted to whichever trades fell
+                   inside this window
+    NOTHING WORKS  no cell is profitable; there is no setting to pick here
+
+The verdict renders **above** the grid, not below it, and the best cell is
+*outlined* rather than filled brightest so the eye finds the shape of the
+surface before the maximum. Colour is diverging and anchored at **zero**, never
+at the grid's own minimum - otherwise a grid where every setting loses money
+would render as a pleasant gradient with a "best" green corner. The positive-
+cell fraction is reported next to the maximum, because a grid where three of
+sixteen cells make money is better read as "this does not work" than as "one
+setting works". Every result carries the note that a sweep has no out-of-sample
+step and the walk-forward panel should be run before trusting any cell.
+
+**Bounded, and refusing rather than truncating.** `MAX_CELLS` (64) caps the
+grid; past it the request is refused, because silently searching a smaller grid
+would report a study the caller did not run - the same rule `build_grid` and
+the config loader already follow. Bars are fetched once per *timeframe* rather
+than once per cell, so a 4x4 grid varying timeframe pulls four histories, not
+sixteen. Sweeping channel length on MACD is refused outright: MACD has no such
+knob, so the grid would be identical columns and the verdict would describe
+noise that never varied.
+
+Two bugs in my own tests, caught by running them: `"ab c".split()` is
+`['ab', 'c']`, so the fixtures built 2x3 grids while asserting against 9 cells;
+and `run_sweep_study` had no default timeframe, which a sweep varying timeframe
+as an axis does not need to supply. Both fixed rather than worked around.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting

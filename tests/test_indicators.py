@@ -17,7 +17,7 @@ import random
 import pytest
 
 from algo.core.errors import DomainError
-from algo.pricing.indicators import ema, macd, warmup_bars
+from algo.pricing.indicators import Macd, ema, macd, warmup_bars
 
 pd = pytest.importorskip("pandas")
 
@@ -137,9 +137,7 @@ class TestCrossovers:
     `< 0` is bearish. `<=`/`>=` on the *previous* bar, not the current one — a
     histogram sitting exactly at zero and then rising must count."""
 
-    def _macd_from_histogram(self, histogram: list[float]) -> object:
-        from algo.pricing.indicators import Macd
-
+    def _macd_from_histogram(self, histogram: list[float]) -> Macd:
         return Macd(macd=histogram, signal=[0.0] * len(histogram), histogram=histogram)
 
     def test_a_clean_upward_cross_is_detected(self) -> None:
@@ -186,6 +184,19 @@ class TestCrossovers:
 
         assert result.crossed_up(0) is False
         assert result.crossed_down(0) is False
+
+    def test_the_first_point_has_no_predecessor_via_its_negative_index_either(
+        self,
+    ) -> None:
+        """`-len(histogram)` names the same first element `0` does. Without
+        normalizing both forms the same way, this used to evaluate
+        `histogram[-len(histogram) - 1]` - out of range - and raise
+        `IndexError` instead of returning `False` the way `crossed_up(0)`
+        does for an equivalent index."""
+        result = self._macd_from_histogram([1.0, 2.0, 3.0])
+
+        assert result.crossed_up(-3) is False
+        assert result.crossed_down(-3) is False
 
 
 class TestWarmup:

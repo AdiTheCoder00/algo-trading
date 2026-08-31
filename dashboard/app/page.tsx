@@ -15,17 +15,20 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { BacktestConsole } from "@/components/BacktestConsole";
 import { EquityChart } from "@/components/EquityChart";
+import { Heatmap } from "@/components/Heatmap";
 import { KillSwitch } from "@/components/KillSwitch";
 import { KillSwitchHistory } from "@/components/KillSwitchHistory";
 import { MarginUtilisation } from "@/components/MarginUtilisation";
 import { OptionChain } from "@/components/OptionChain";
 import { TradeLog } from "@/components/TradeLog";
 import { TradeStats } from "@/components/TradeStats";
+import { WalkForward } from "@/components/WalkForward";
 import { useAnimatedNumber } from "@/lib/useAnimatedNumber";
 import {
   api,
-  inr,
+  money,
   shortTime,
   type ChainSnapshot,
   type EquityPoint,
@@ -140,6 +143,10 @@ export default function Page() {
   // not just normal jitter between ticks.
   const isStale = stalenessSeconds !== null && stalenessSeconds > (REFRESH_MS / 1000) * 3;
 
+  // The venue's own currency, so a CFD run in dollars is never rendered
+  // behind a rupee sign (or the reverse).
+  const currency = health?.detail.currency;
+
   const latest = equity.at(-1);
   const opening = equity.at(0);
   const change =
@@ -154,8 +161,8 @@ export default function Page() {
   const equityText =
     latest && animatedEquity !== null
       ? Math.abs(animatedEquity - Number(latest.equity)) < 0.005
-        ? inr(latest.equity)
-        : inr(animatedEquity.toFixed(2))
+        ? money(latest.equity, currency)
+        : money(animatedEquity.toFixed(2), currency)
       : "—";
 
   return (
@@ -210,16 +217,16 @@ export default function Page() {
         <div className="stat">
           <dt>Change</dt>
           <dd className={change > 0 ? "up" : change < 0 ? "down" : ""}>
-            {latest && opening ? inr(String(change.toFixed(2))) : "—"}
+            {latest && opening ? money(String(change.toFixed(2)), currency) : "—"}
           </dd>
         </div>
         <div className="stat">
           <dt>Unrealised</dt>
-          <dd>{latest ? inr(latest.unrealised) : "—"}</dd>
+          <dd>{latest ? money(latest.unrealised, currency) : "—"}</dd>
         </div>
         <div className="stat">
           <dt>Charges</dt>
-          <dd>{latest ? inr(latest.charges) : "—"}</dd>
+          <dd>{latest ? money(latest.charges, currency) : "—"}</dd>
         </div>
         <div className="stat">
           <dt>Open legs</dt>
@@ -264,7 +271,7 @@ export default function Page() {
           <span className="mono">{equity.length} bars</span>
         </div>
         <div className="panel-in">
-          <EquityChart points={equity} />
+          <EquityChart points={equity} currency={currency} />
         </div>
       </section>
 
@@ -295,7 +302,7 @@ export default function Page() {
                     <td className="num mono">{position.average_price}</td>
                     <td className="num mono">{position.mark ?? "—"}</td>
                     <td className="num mono">
-                      {position.unrealised ? inr(position.unrealised) : "—"}
+                      {position.unrealised ? money(position.unrealised, currency) : "—"}
                     </td>
                   </tr>
                 ))}
@@ -319,11 +326,41 @@ export default function Page() {
 
       <section className="panel">
         <div className="panel-bar">
+          <span>research — backtest console</span>
+          <span className="mono">reads history, changes nothing</span>
+        </div>
+        <div className="panel-in">
+          <BacktestConsole />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-bar">
+          <span>research — walk-forward</span>
+          <span className="mono">only what was never fitted</span>
+        </div>
+        <div className="panel-in">
+          <WalkForward />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-bar">
+          <span>research — parameter sweep</span>
+          <span className="mono">read the verdict before the colours</span>
+        </div>
+        <div className="panel-in">
+          <Heatmap />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-bar">
           <span>trade statistics</span>
           <span className="mono">{tradeStats?.trades ?? 0} completed</span>
         </div>
         <div className="panel-in">
-          <TradeStats stats={tradeStats} />
+          <TradeStats stats={tradeStats} currency={currency} />
         </div>
       </section>
 
@@ -333,7 +370,7 @@ export default function Page() {
           <span className="mono">{trades.length}</span>
         </div>
         <div className="panel-in">
-          <TradeLog trades={trades} newIds={newTradeIds} />
+          <TradeLog trades={trades} newIds={newTradeIds} currency={currency} />
         </div>
       </section>
 

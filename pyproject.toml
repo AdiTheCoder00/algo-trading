@@ -46,6 +46,14 @@ dev = [
     # its neighbour without installing a second copy of pandas/requests.
     "ccxt>=4.2.0",
 ]
+# Windows-only, and deliberately not in `dependencies` or `dev`: the wheel does
+# not exist for Linux, so putting it in either would break the CI install on
+# ubuntu-latest. `algo/` never imports it - the terminal is reached exclusively
+# through the `Mt5Trader`/`Mt5Terminal` Protocols (algo/execution/mt5_broker.py,
+# algo/data/mt5_feed.py), which is what lets the type and test gates run on a
+# machine with no MetaTrader5 at all. What actually needs this extra installed
+# is `scripts/measure_macd_xauusd.py` and a live run against Vantage.
+mt5 = ["MetaTrader5>=5.0.45"]
 
 [project.scripts]
 algo = "algo.cli.main:app"
@@ -84,11 +92,19 @@ module = ["pyarrow.*", "openpyxl.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-# The Angel One and Kotak Neo SDKs ship no usable type information (kotakneoapi
-# ships py.typed without stubs, which makes mypy analyze it and flag its lazy
-# exports at import sites); they are imported lazily behind our own typed
-# transport boundaries and are not worth stubbing.
-module = ["SmartApi.*", "neo_api_client.*", "logzero", "pyotp", "requests"]
+# The Angel One, Kotak Neo and MetaTrader5 SDKs ship no usable type information
+# (kotakneoapi ships py.typed without stubs, which makes mypy analyze it and
+# flag its lazy exports at import sites); they are imported lazily behind our
+# own typed transport boundaries (`Mt5Terminal` in algo/data/mt5_feed.py is the
+# MT5 one) and are not worth stubbing.
+module = [
+    "SmartApi.*",
+    "neo_api_client.*",
+    "MetaTrader5",
+    "logzero",
+    "pyotp",
+    "requests",
+]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------- ruff
@@ -129,4 +145,8 @@ ignore = [
 # pipe, not log output. T20 exists to keep print() out of the engine, where
 # every line must be timestamped and levelled; a report renderer is the one
 # place where stdout IS the product. Progress and errors there still log.
+# `measure_macd_xauusd.py` is the same kind of artifact for the same reason -
+# `_print_table` writes a comparison table for a human, and it is a standalone
+# measurement script that no engine code imports.
 "tools/macd_telegram_alert/macd_alert.py" = ["T201"]
+"scripts/measure_macd_xauusd.py" = ["T201"]

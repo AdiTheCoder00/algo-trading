@@ -46,6 +46,15 @@ ENV_PREFIX = "ALGO_"
 #: precisely so that such a leak fails loudly instead of silently.
 NON_CONFIG_ENV_PREFIXES = ("ALGO_SMARTAPI_", "ALGO_KOTAK_")
 
+#: Single env vars consumed outside the config schema, same reasoning as the
+#: prefixes above but not a namespace - `algo/api/app.py`'s own bearer token
+#: (`TOKEN_ENV`), documented in `.env.example` alongside every other var here.
+#: Without this exclusion, setting it the way `.env.example` instructs makes
+#: every CLI command that calls `load_config` fail with "api_token — Extra
+#: inputs are not permitted", since it is read directly and is not part of
+#: `AppConfig`.
+NON_CONFIG_ENV_VARS = ("ALGO_API_TOKEN",)
+
 
 def load_config(
     path: Path | None = None,
@@ -103,6 +112,8 @@ def _env_overrides(env: Mapping[str, str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in env.items():
         if not key.startswith(ENV_PREFIX):
+            continue
+        if key in NON_CONFIG_ENV_VARS:
             continue
         if any(key.startswith(namespace) for namespace in NON_CONFIG_ENV_PREFIXES):
             continue

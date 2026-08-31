@@ -88,8 +88,19 @@ class CfdChargeModel:
         `fee == 0.0`. That is the evidence `McxChargeModel` has been waiting for
         a contract note to supply, and here it already exists.
 
-        Scope of the claim: this account, this tier. A Vantage RAW/ECN account
-        charges commission and would need a different model.
+        Scope of the claim: **that** account, that tier. A Vantage RAW/ECN
+        account charges commission and would need a different model.
+
+        The scope line is not decoration, and it bit on 2026-08-30: the terminal
+        moved to account 26017545 (same server, same company, fresh $100,000
+        demo) and `history_deals_get` returns **zero** deals there. Everything
+        else re-read identically - contract size 100, 0.01 volume step, swap
+        -80.54/+32.67, `swap_rollover3days` 3 (Wednesday, matching this module's
+        Python-weekday 2) - so the terms plainly carry over, but "carries over
+        by strong inference" is not what `verified=True` claims. Until this
+        account has dealing history of its own, the commission figure is
+        inherited evidence, not measured evidence, and that distinction is the
+        whole reason this flag exists.
         """
         return cls(commission_per_lot=Decimal("0"), verified=True)
 

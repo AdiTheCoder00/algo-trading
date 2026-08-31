@@ -450,7 +450,9 @@ tbody tr:hover td {
   margin-bottom: 5px;
 }
 
-input[type="text"] {
+input[type="text"],
+input[type="number"],
+select {
   width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--line);
@@ -461,11 +463,15 @@ input[type="text"] {
   transition: border-color 0.15s ease;
 }
 
-input[type="text"]:hover {
+input[type="text"]:hover,
+input[type="number"]:hover,
+select:hover {
   border-color: var(--faint);
 }
 
 input[type="text"]:focus-visible,
+input[type="number"]:focus-visible,
+select:focus-visible,
 button:focus-visible {
   outline: 2px solid var(--ice);
   outline-offset: 2px;
@@ -755,4 +761,102 @@ td.chain-held {
     transition: none !important;
     animation: none !important;
   }
+}
+
+
+/* ------------------------------------------------------- research console
+   A study is exploration, not a deployment: this form deliberately has no
+   "apply to the live loop" control, and the run button is the neutral ice
+   tone rather than the clay reserved for the kill switch - the one control
+   on this page that can affect a real position. */
+.bt-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.bt-form .field {
+  flex: 1 1 150px;
+  min-width: 130px;
+}
+
+.bt-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding-bottom: 4px;
+}
+
+.bt-run {
+  padding: 9px 20px;
+  border: 1px solid var(--ice);
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--ice);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.bt-run:hover:not(:disabled) {
+  background: var(--ice);
+  color: var(--ground);
+}
+
+.bt-run:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bt-result {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+
+/* ------------------------------------------------------------- heatmap
+   Colour is diverging and anchored at zero (see Heatmap.tsx), so a grid
+   where everything loses cannot render as a pleasant gradient with a
+   "best" green corner. The best cell is outlined rather than filled
+   brightest: the eye should find the shape of the surface first. */
+table.heat {
+  border-collapse: separate;
+  border-spacing: 2px;
+}
+
+.heat th {
+  border-bottom: none;
+  padding: 0 8px 6px;
+}
+
+.heat-axis {
+  font-size: 11px;
+  color: var(--faint);
+  white-space: nowrap;
+  border-bottom: none;
+  padding-right: 12px;
+}
+
+.heat-cell {
+  border-bottom: none;
+  border-radius: var(--r);
+  padding: 9px 12px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.heat-best {
+  outline: 2px solid var(--ice);
+  outline-offset: -2px;
+}
+
+.heat-trades {
+  display: block;
+  font-size: 10px;
+  color: var(--faint);
+  margin-top: 2px;
 }

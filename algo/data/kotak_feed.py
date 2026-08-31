@@ -212,6 +212,7 @@ class KotakChainFeed:
     def _poll(
         self, underlying_row: MasterRow, option_rows: tuple[MasterRow, ...]
     ) -> OptionChainSnapshot:
+        assert underlying_row.expiry is not None
         ts = self._clock.now()
         rows: list[ChainRow] = []
         futures_price: Decimal | None = None
@@ -256,6 +257,7 @@ class KotakChainFeed:
                     ChainRow(
                         option=_option_id(
                             self._underlying,
+                            futures_expiry=underlying_row.expiry,
                             option_expiry=row.expiry,
                             strike=row.strike,
                             right=right,
@@ -313,10 +315,19 @@ def _payload_for(payloads: list[dict[str, Any]], token: str) -> dict[str, Any] |
 
 
 def _option_id(
-    underlying: str, *, option_expiry: date, strike: Decimal, right: Right
+    underlying: str,
+    *,
+    futures_expiry: date,
+    option_expiry: date,
+    strike: Decimal,
+    right: Right,
 ) -> OptionId:
+    # `futures_expiry` and `option_expiry` are deliberately separate dates -
+    # the option expires first - per `algo/core/instrument.py`'s own warning
+    # against conflating them; `futures_expiry` must come from the real
+    # futures contract row, never from the option's own expiry.
     return OptionId(
-        underlying_future=FutureId(underlying=underlying, expiry=option_expiry),
+        underlying_future=FutureId(underlying=underlying, expiry=futures_expiry),
         option_expiry=option_expiry,
         strike=strike,
         right=right,

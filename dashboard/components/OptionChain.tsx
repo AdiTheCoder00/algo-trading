@@ -186,7 +186,7 @@ export function OptionChain({ snapshot }: Props) {
                   {cell(ce, fmtPrice(ce?.ltp ?? null), { markHeld: true })}
                   {cell(ce, String(ce?.volume ?? ""))}
                   <td className="num mono chain-strike">{strike}</td>
-                  {cell(pe, fmtPrice(pe?.ltp ?? null))}
+                  {cell(pe, fmtPrice(pe?.ltp ?? null), { markHeld: true })}
                   {cell(pe, String(pe?.volume ?? ""))}
                   {cell(pe, fmtIv(pe?.iv ?? null))}
                   {cell(pe, fmtDelta(pe?.delta ?? null), { markHeld: true })}

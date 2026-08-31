@@ -45,7 +45,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Protocol, runtime_checkable
 
 from algo.backtest.engine import BacktestEngine, BarDecision
@@ -118,6 +118,7 @@ class LiveLoop:
         "_fills",
         "_last_bar_ts",
         "_place",
+        "_session_day",
         "_state",
     )
 
@@ -131,6 +132,7 @@ class LiveLoop:
         clock: Clock,
         state: StateStore | None = None,
         chain: Callable[[Bar], object] | None = None,
+        session_day_for: Callable[[datetime], date] = ist_date,
     ) -> None:
         self._engine = engine
         self._bars = bars
@@ -139,6 +141,7 @@ class LiveLoop:
         self._clock = clock
         self._state = state
         self._chain = chain
+        self._session_day = session_day_for
         self._last_bar_ts: datetime | None = None
 
     @property
@@ -160,7 +163,7 @@ class LiveLoop:
         #         actually held, not about what it asked for last pass.
         settled = tuple(self._fills.new_fills())
         for fill in settled:
-            self._engine.apply_fill(fill, session_day=ist_date(fill.ts))
+            self._engine.apply_fill(fill, session_day=self._session_day(fill.ts))
 
         closed = self._bars.closed_bars()
         if not closed:

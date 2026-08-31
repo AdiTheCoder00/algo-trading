@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
@@ -61,6 +62,49 @@ class BarBoundary(BaseModel):
     open_ts: datetime
     close_ts: datetime
     is_partial: bool
+
+
+@runtime_checkable
+class SessionCalendar(Protocol):
+    """What the engine actually asks a calendar for.
+
+    `MarketCalendar` (one session a day, MCX) and `ForexCalendar` (22:00-21:00
+    continuous, D-121) are different shapes on purpose and neither subclasses
+    the other. This names the three methods the engine needs from either, so a
+    CFD run can be typed without pretending a 24/5 venue is an exchange.
+    """
+
+    def session_close(self, on: date) -> datetime: ...
+    def is_us_dst_session(self, on: date) -> bool: ...
+    def bar_boundaries(self, on: date, timeframe: Timeframe) -> tuple[BarBoundary, ...]: ...
+
+
+def session_bar_boundaries(
+    opened: datetime, closes: datetime, timeframe: Timeframe
+) -> tuple[BarBoundary, ...]:
+    """Divide one session into bar slots, anchored at its open.
+
+    The final slot is truncated to the session close and flagged `is_partial`
+    when the session length is not a whole number of bars - 09:00-23:55 is 895
+    minutes, which is 29 thirty-minute bars plus a 25-minute stub.
+
+    A free function because `ForexCalendar` needs exactly this arithmetic over a
+    different session shape (D-121), and two copies of a truncation rule are two
+    chances to disagree about the stub.
+    """
+    step = timedelta(minutes=timeframe.minutes)
+    boundaries: list[BarBoundary] = []
+    cursor = opened
+    while cursor < closes:
+        nxt = cursor + step
+        if nxt >= closes:
+            boundaries.append(
+                BarBoundary(open_ts=cursor, close_ts=closes, is_partial=nxt > closes)
+            )
+            break
+        boundaries.append(BarBoundary(open_ts=cursor, close_ts=nxt, is_partial=False))
+        cursor = nxt
+    return tuple(boundaries)
 
 
 class MarketCalendar:
@@ -178,22 +222,9 @@ class MarketCalendar:
         when the session length is not a whole number of bars — 09:00–23:55 is
         895 minutes, which is 29 thirty-minute bars plus a 25-minute stub.
         """
-        opened = self.session_open(on)
-        closes = self.session_close(on)
-        step = timedelta(minutes=timeframe.minutes)
-
-        boundaries: list[BarBoundary] = []
-        cursor = opened
-        while cursor < closes:
-            nxt = cursor + step
-            if nxt >= closes:
-                boundaries.append(
-                    BarBoundary(open_ts=cursor, close_ts=closes, is_partial=nxt > closes)
-                )
-                break
-            boundaries.append(BarBoundary(open_ts=cursor, close_ts=nxt, is_partial=False))
-            cursor = nxt
-        return tuple(boundaries)
+        return session_bar_boundaries(
+            self.session_open(on), self.session_close(on), timeframe
+        )
 
     def is_us_dst_session(self, on: date) -> bool:
         """Exposed so a strategy can see which session-length regime it is in."""
