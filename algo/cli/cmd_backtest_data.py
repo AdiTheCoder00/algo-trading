@@ -10,7 +10,7 @@ import typer
 
 from algo.cli._helpers import calendar_for, strangle_from_config
 from algo.config.loader import load_config
-from algo.config.schema import RunSettings
+from algo.config.runsettings import RunSettings
 
 app = typer.Typer()
 
