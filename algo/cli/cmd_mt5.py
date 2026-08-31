@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
 from algo.exchange.specs import ContractSpecStore
 
+if TYPE_CHECKING:  # annotations only - the command bodies import lazily so
+    # `algo live-mt5 --help` does not drag in MetaTrader5.
+    from algo.live.alerts import Alerter
+    from algo.live.loop import PassResult
+
 app = typer.Typer()
+
+#: Alert bodies are multi-line; named so the joins below read cleanly.
+NEWLINE = "\n"
 
 
 @app.command("live-mt5")
@@ -58,7 +67,9 @@ def live_mt5(
     from algo.exchange.forex_calendar import ForexCalendar
     from algo.execution.fills import FillSimulator
     from algo.execution.paper import PaperBroker
+    from algo.live.alerts import build_alerter
     from algo.live.mt5_runner import XAUUSD_SPREAD_TICKS, build_mt5_paper_loop, strategy_for
+    from algo.live.shutdown import graceful_shutdown
     from algo.persistence.journal import OrderJournal
     from algo.persistence.state import StateStore
 
@@ -141,17 +152,91 @@ def live_mt5(
                 f"strategy      {strategy_name} on {timeframe.label}, {lots} oz, "
                 f"stop {stop_loss_pct}% / trail {trail_pct}% from {trail_activation_pct}%"
             )
-            typer.echo(f"polling       {passes} pass(es), {poll_interval_s}s apart\n")
+            alerter = build_alerter()
+            typer.echo(f"polling       {passes} pass(es), {poll_interval_s}s apart")
+            typer.echo(f"alerts        {alerter.channels} channel(s)")
+            typer.echo("stop          Ctrl-C finishes the current bar, then exits\n")
 
-            for result in run.loop.run(
-                max_passes=passes,
-                sleep=_time.sleep,
-                poll_interval_s=poll_interval_s,
-            ):
-                typer.echo(f"  {iso(result.ts)}  {result.summary()}")
+            alerter.info(
+                "live-mt5 started",
+                f"{strategy_name} on {timeframe.label}, {lots} oz, paper broker. "
+                f"Account {account.login} ({account.server}).",
+                at=clock.now(),
+            )
+
+            def announce(count: int, name: str) -> None:
+                typer.echo(
+                    f"\n  {name}: finishing the current bar, then stopping. "
+                    "Press again to force."
+                    if count == 1
+                    else f"\n  {name} again - forcing."
+                )
+
+            with graceful_shutdown(on_request=announce) as stopping:
+                for result in run.loop.run(
+                    max_passes=passes,
+                    sleep=_time.sleep,
+                    poll_interval_s=poll_interval_s,
+                    should_stop=lambda: stopping.requested,
+                ):
+                    typer.echo(f"  {iso(result.ts)}  {result.summary()}")
+                    _alert_on(alerter, result)
+
+                # Recorded either way, so a restart can tell "asked to stop and
+                # did" from "died mid-bar" - the two states a journal left in
+                # SENT cannot distinguish on its own.
+                ended = (
+                    f"live-mt5 stopped cleanly: {stopping.reason}"
+                    if stopping.requested
+                    else "live-mt5 finished its requested passes"
+                )
+                store.record_note(clock.now(), ended)
+                store.set_health("engine", "stopped", at=clock.now())
+                # A loop that stops is worth knowing about even when the reason
+                # is dull: "it is no longer trading" is the fact, and nobody
+                # should have to infer it from silence.
+                alerter.warning(
+                    "live-mt5 stopped",
+                    f"{ended}. {len(run.broker.positions())} position(s) open.",
+                    at=clock.now(),
+                )
+                typer.echo(f"\n{ended}")
             store.close()
     finally:
         mt5.shutdown()
+
+
+def _alert_on(alerter: Alerter, result: PassResult) -> None:
+    """Alert on what a person would want woken for, and nothing else.
+
+    A message per poll would be noise nobody reads, and an alerter people mute
+    is an alerter that is not there. So: routed orders and router refusals only.
+    A quiet pass - the overwhelming majority of them - says nothing.
+    """
+    if not result.routed:
+        return
+    from algo.execution.router import Outcome
+
+    placed = [r for r in result.routed if r.outcome is Outcome.PLACED]
+    refused = [r for r in result.routed if r.outcome is not Outcome.PLACED]
+
+    if placed:
+        alerter.info(
+            f"{len(placed)} order(s) placed",
+            NEWLINE.join(f"{r.client_order_id} -> {r.outcome.value}" for r in placed),
+            at=result.ts,
+        )
+    if refused:
+        # A refusal is the reconcile-before-send rule working as designed, but
+        # it also means intent and reality may now differ - which is exactly
+        # what deserves a person rather than a log line.
+        alerter.warning(
+            f"{len(refused)} order(s) not placed",
+            NEWLINE.join(
+                f"{r.client_order_id} -> {r.outcome.value}: {r.detail}" for r in refused
+            ),
+            at=result.ts,
+        )
 
 
 @app.command("mt5-replay")

@@ -4,8 +4,15 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
+
+if TYPE_CHECKING:  # annotations only - `_chain_payload`'s body never runs
+    # without its caller having already imported these lazily.
+    from datetime import datetime
+
+    from algo.core.chain import OptionChainSnapshot
 
 app = typer.Typer()
 
@@ -121,13 +128,13 @@ def inspect_chain(
     Rows that will not solve stay unpriced and untradeable rather than borrowing
     a neighbour's volatility (D-005).
     """
-    from datetime import datetime, time as _time
+    from datetime import time as _time
 
     from algo.core.enums import Right
     from algo.core.errors import DataError
     from algo.core.timeutil import ist_to_utc
     from algo.data.mcx_chain_excel import load_chain
-    from algo.pricing.chain_greeks import OptionChainSnapshot, atm_iv, enrich
+    from algo.pricing.chain_greeks import atm_iv, enrich
 
     try:
         snapshot = load_chain(
@@ -176,7 +183,7 @@ def inspect_chain(
         typer.echo(f"  recorded to {state}")
 
 
-def _chain_payload(chain: "OptionChainSnapshot", *, expires_at: "datetime") -> dict[str, object]:
+def _chain_payload(chain: OptionChainSnapshot, *, expires_at: datetime) -> dict[str, object]:
     """The dashboard's chain-panel payload, in the same shape the engine writes.
 
     Kept beside the command rather than shared with `BacktestEngine`: the engine

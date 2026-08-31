@@ -44,7 +44,7 @@ ENV_PREFIX = "ALGO_"
 #: by `credentials_from_env`, never injected into the resolved config. Injecting
 #: them would leak secrets into the hashed config, and the schema forbids extras
 #: precisely so that such a leak fails loudly instead of silently.
-NON_CONFIG_ENV_PREFIXES = ("ALGO_SMARTAPI_", "ALGO_KOTAK_")
+NON_CONFIG_ENV_PREFIXES = ("ALGO_SMARTAPI_", "ALGO_KOTAK_", "ALGO_TELEGRAM_")
 
 #: Single env vars consumed outside the config schema, same reasoning as the
 #: prefixes above but not a namespace - `algo/api/app.py`'s own bearer token

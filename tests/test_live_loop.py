@@ -519,3 +519,104 @@ class TestIterableBarFeed:
         visible.append(bars[1])
 
         assert len(feed.closed_bars()) == 2
+
+
+class TestItStopsGracefully:
+    """`should_stop` is polled between passes and while sleeping - never inside
+    a pass. See `algo/live/shutdown.py` for why that boundary is the safe one.
+    """
+
+    def test_a_stop_requested_up_front_runs_nothing(self, rig: Rig) -> None:
+        loop, feed, _fills, _placer, all_bars = rig
+        feed.visible = all_bars[:2]
+
+        results = loop.run(max_passes=5, should_stop=lambda: True)
+
+        assert results == []
+
+    def test_it_stops_at_the_next_boundary_after_the_request(self, rig: Rig) -> None:
+        loop, feed, _fills, _placer, all_bars = rig
+        feed.visible = all_bars[:2]
+        stop = {"asked": False}
+
+        def on_pass(_result: PassResult) -> None:
+            stop["asked"] = True
+
+        results = loop.run(
+            max_passes=5, on_pass=on_pass, should_stop=lambda: stop["asked"]
+        )
+
+        # Asked during the first pass; that pass still completed, and no
+        # second one began.
+        assert len(results) == 1
+
+    def test_pass_once_has_no_stop_hook_to_truncate_it_with(self) -> None:
+        """The safety property is structural, not behavioural, and this pins it
+        as such rather than pretending a runtime test proves it.
+
+        `run` never hands `should_stop` to `pass_once`, and `pass_once` takes no
+        such parameter - so there is no way to abandon a pass partway through,
+        which is the window where an order is sent and the journal has not yet
+        recorded what came back. If someone later threads a stop check into
+        `pass_once`, this fails and makes them argue for it.
+        """
+        import inspect
+
+        signature = inspect.signature(LiveLoop.pass_once)
+
+        assert list(signature.parameters) == ["self"], (
+            "pass_once grew a parameter; if it is a stop hook, it can truncate "
+            "a pass mid-route - see algo/live/shutdown.py"
+        )
+
+    def test_a_completed_pass_still_reached_a_decision(self, rig: Rig) -> None:
+        """The observable half: the pass that ran before the stop did the whole
+        job rather than stopping halfway through one."""
+        loop, feed, _fills, _placer, all_bars = rig
+        feed.visible = all_bars[:2]
+        completed: list[PassResult] = []
+
+        results = loop.run(
+            max_passes=5,
+            on_pass=completed.append,
+            should_stop=lambda: bool(completed),
+        )
+
+        assert len(results) == 1
+        assert results[0].decision is not None
+
+    def test_sleeping_is_interrupted_rather_than_waited_out(self, rig: Rig) -> None:
+        """A stop asked for one second into a sixty-second wait should be acted
+        on in about a second. A loop that ignored Ctrl-C for a whole poll
+        interval would simply get Ctrl-C pressed again."""
+        loop, feed, _fills, _placer, all_bars = rig
+        feed.visible = all_bars[:2]
+        slept: list[float] = []
+        stop = {"asked": False}
+
+        def fake_sleep(seconds: float) -> None:
+            slept.append(seconds)
+            # Asked partway through the wait.
+            if len(slept) == 2:
+                stop["asked"] = True
+
+        loop.run(
+            max_passes=5,
+            sleep=fake_sleep,
+            poll_interval_s=60.0,
+            should_stop=lambda: stop["asked"],
+        )
+
+        # Sliced, not one 60-second call - and abandoned as soon as it was asked.
+        assert all(seconds <= 0.5 for seconds in slept), slept
+        assert sum(slept) < 60.0
+
+    def test_without_a_stop_the_sleep_is_a_single_call(self, rig: Rig) -> None:
+        """No behaviour change for callers that never pass `should_stop`."""
+        loop, feed, _fills, _placer, all_bars = rig
+        feed.visible = all_bars[:2]
+        slept: list[float] = []
+
+        loop.run(max_passes=2, sleep=slept.append, poll_interval_s=30.0)
+
+        assert slept == [30.0]

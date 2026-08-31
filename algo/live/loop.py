@@ -227,17 +227,27 @@ class LiveLoop:
         on_pass: Callable[[PassResult], None] | None = None,
         sleep: Callable[[float], None] | None = None,
         poll_interval_s: float = 0.0,
+        should_stop: Callable[[], bool] | None = None,
     ) -> list[PassResult]:
         """Pass repeatedly until bounded out.
 
         `max_passes` is required and has no default. A trading loop's stopping
         condition is not a detail to be left to a caller who forgot.
+
+        `should_stop` is polled **between** passes and while sleeping, never
+        during one. A pass is the atomic unit - it settles fills, decides, and
+        routes - and stopping partway through it is exactly how an order ends up
+        sent with no journal record of what came back (`algo/live/shutdown.py`).
+        A request arriving mid-pass is therefore honoured at the next boundary,
+        which is the earliest moment it can be honoured safely.
         """
         if max_passes < 1:
             raise DomainError(f"max_passes must be at least 1, got {max_passes}")
 
         results: list[PassResult] = []
         for pass_number in range(max_passes):
+            if should_stop is not None and should_stop():
+                break
             if until is not None and self._clock.now() >= until:
                 break
             result = self.pass_once()
@@ -245,5 +255,26 @@ class LiveLoop:
             if on_pass is not None:
                 on_pass(result)
             if sleep is not None and poll_interval_s > 0 and pass_number < max_passes - 1:
-                sleep(poll_interval_s)
+                # Slept in slices so a stop asked for one second into a
+                # sixty-second wait is acted on in about a second, not a minute.
+                # A loop that ignores Ctrl-C for a whole poll interval gets
+                # Ctrl-C pressed again, which is the outcome this avoids.
+                self._sleep_interruptibly(sleep, poll_interval_s, should_stop)
         return results
+
+    @staticmethod
+    def _sleep_interruptibly(
+        sleep: Callable[[float], None],
+        total_s: float,
+        should_stop: Callable[[], bool] | None,
+        *,
+        slice_s: float = 0.5,
+    ) -> None:
+        if should_stop is None:
+            sleep(total_s)
+            return
+        remaining = total_s
+        while remaining > 0 and not should_stop():
+            step = min(slice_s, remaining)
+            sleep(step)
+            remaining -= step

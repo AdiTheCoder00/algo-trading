@@ -175,12 +175,21 @@ class TestOverrides:
         get refused as unknown keys."""
         config = load_config(
             REFERENCE_CONFIG,
-            env={"ALGO_SMARTAPI_API_KEY": "secret", "ALGO_KOTAK_CONSUMER_KEY": "secret"},
+            env={
+                "ALGO_SMARTAPI_API_KEY": "secret",
+                "ALGO_KOTAK_CONSUMER_KEY": "secret",
+                # The alerter's bot token is a credential like any other, and
+                # `config_hash` is stamped into every signal id and artefact.
+                "ALGO_TELEGRAM_BOT_TOKEN": "12345:secret-bot-token",
+                "ALGO_TELEGRAM_CHAT_ID": "-100123",
+            },
         )
 
         dumped = config.model_dump()
         assert "smartapi_api_key" not in dumped
         assert "kotak_consumer_key" not in dumped
+        assert "telegram_bot_token" not in dumped
+        assert "secret-bot-token" not in str(dumped)
 
 
 class TestConfigHash:

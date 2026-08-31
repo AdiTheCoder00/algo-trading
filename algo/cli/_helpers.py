@@ -13,6 +13,10 @@ from typing import TYPE_CHECKING
 from algo.config.loader import load_config
 from algo.exchange.calendar import synthetic_calendar
 
+#: Re-exported for the command modules. Named explicitly because mypy's
+#: strict mode treats a bare re-export as private.
+__all__ = ["calendar_for", "strangle_from_config", "synthetic_calendar"]
+
 if TYPE_CHECKING:
     from algo.config.schema import AppConfig
     from algo.exchange.calendar import MarketCalendar

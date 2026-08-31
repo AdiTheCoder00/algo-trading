@@ -140,7 +140,10 @@ ignore = [
 # The clock module is the ONE place allowed to read wall-clock time (D-015).
 "algo/core/clock.py" = ["DTZ003", "DTZ005"]
 # typer declares CLI arguments as call-valued defaults; that is its documented API.
-"algo/cli/main.py" = ["B008"]
+# Scoped to the whole package rather than to `main.py`: the commands were split
+# into per-command modules, and pinning the ignore to the old monolith left 24
+# B008 errors behind the moment they moved.
+"algo/cli/*.py" = ["B008"]
 # The backtest report is a document written to stdout for a human to read or
 # pipe, not log output. T20 exists to keep print() out of the engine, where
 # every line must be timestamped and levelled; a report renderer is the one

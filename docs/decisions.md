@@ -2467,6 +2467,129 @@ Two bugs in my own tests, caught by running them: `"ab c".split()` is
 and `run_sweep_study` had no default timeframe, which a sweep varying timeframe
 as an axis does not need to supply. Both fixed rather than worked around.
 
+### D-133 - Graceful shutdown, and repairing the CLI split that arrived with it
+Two things this entry covers, because they arrived together.
+
+**The CLI split landed from outside this session, and broke the tree.** An
+improvement plan named "CLI monolith - main.py is 2,141 lines" as its top
+priority; by the time it was read, `main.py` was 51 lines and the commands lived
+in `algo/cli/cmd_*.py`. The refactor was right and overdue. It also left:
+
+    algo backtest          crashed outright - `expiry=calendar.date(2026, 9, 4)`,
+                           a botched find-replace, with a comment left in
+                           admitting it ("calendar does not have .date()")
+    cmd_live.py            12 undefined names - AppConfig, InstrumentMaster,
+                           SystemClock, SmartConnectTransport used in
+                           annotations, imported only inside function bodies
+    ruff                   57 errors, 24 of them B008 because the per-file
+                           ignore was pinned to `algo/cli/main.py` and stopped
+                           covering the commands the moment they moved
+    mypy                   16 errors, incl. implicit re-exports strict rejects
+
+All repaired: a real `date` import, `TYPE_CHECKING` blocks for annotation-only
+names (the bodies import lazily on purpose - `algo live --help` should not drag
+in a broker SDK), `OptionChainSnapshot` imported from its canonical home
+`algo.core.chain` rather than through `chain_greeks`, `__all__` on `_helpers`,
+and the B008 ignore rescoped to `algo/cli/*.py`. Every command smoke-tested.
+
+**Graceful shutdown.** `LiveLoop.run` was bounded by `max_passes` and `until`,
+which stops a loop that runs to completion and does nothing for the case that
+actually happens: Ctrl-C at an arbitrary instant. Python's default SIGINT
+handler raises at the next bytecode boundary, and inside `pass_once` that
+boundary can fall between `router.place()` handing an order to the broker and
+the journal recording what came back - exactly the `SENT` state nobody wants to
+restart from.
+
+`algo/live/shutdown.py` installs handlers that **do not raise**. They set a
+flag; the in-flight pass finishes on its own terms; `run` stops at the boundary
+between passes, where the journal is consistent by construction. A second
+signal restores the default handler and re-raises, because an operator who
+presses Ctrl-C twice means it and a loop that cannot be stopped is not safer
+than one that stops messily. Handlers are restored on exit, and outside the
+main thread it degrades to "no handlers installed" rather than refusing to run.
+
+Same shape as the kill switch (D-012): a request the loop reads, not an action
+the handler takes. A signal handler runs at an arbitrary moment and the list of
+things it is safe to do there is very short.
+
+`run` also sleeps in 0.5s slices when a `should_stop` is supplied, so a stop
+asked for one second into a sixty-second poll is acted on in about a second. A
+loop that ignored Ctrl-C for a whole poll interval would simply get Ctrl-C
+pressed again, which is the outcome this avoids. Callers that pass no
+`should_stop` still get a single `sleep(interval)` call - no behaviour change.
+
+**A test that overclaimed, caught by trying to break it.** The first version
+included `test_a_pass_already_running_is_never_truncated`, and deliberately
+sabotaging the loop did **not** fail it - because non-truncation is a
+*structural* property (`run` never hands `should_stop` to `pass_once`, which
+takes no such parameter), not a behavioural one a runtime test can demonstrate.
+Replaced with an honest pair: one asserting `pass_once`'s signature has no stop
+hook, which fails the moment someone threads one in, and one asserting the
+observable half - the pass that ran before the stop reached a decision. Both
+verified by sabotage, as was the sleep-slicing test.
+
+`live-mt5` now records a note distinguishing "asked to stop and did" from
+"died mid-bar" - the two states a journal in `SENT` cannot tell apart on its
+own - and sets `engine: stopped` in health so the dashboard shows it.
+
+### D-134 - Alerting, built around the rule that it must never break trading
+The system had a kill switch and a dashboard, and both are *pull* - they answer
+a question someone thought to ask. A halt at 11pm was learned about whenever
+somebody next looked, which is the opposite of what a kill switch tripping
+means.
+
+**The rule the module is written around.** A notifier that can raise into the
+loop, block it, or halt it converts a Telegram outage into a *trading* outage -
+strictly worse than no alerter. So `Alerter.send` never raises: every failure is
+caught, logged and dropped, including a notifier that violates the protocol and
+throws. Sending is not retried either. `macd_alert.py` retries with backoff
+because delivering the alert *is* its job; here the job is trading, and a loop
+sleeping through a backoff is a loop not watching the market. Timeout is 5s for
+the same reason.
+
+The failure paths are what the tests actually cover - a notifier that throws, a
+network that times out, an endpoint that rejects - and both safety properties
+were verified by deliberate sabotage: letting exceptions escape failed two
+tests, and logging the raw exception instead of redacting it failed a third with
+the live token visible in the captured output.
+
+**D-128's lesson, applied at the design stage rather than found later.**
+Telegram puts the bot token in the URL path, so a `requests` exception's own
+`str()` carries it - which is how a live token got written to `macd_alert.log`
+in plaintext. Every log line here goes through `redact`, and a test asserts a
+token cannot survive one.
+
+**Credentials never touch config.** `ALGO_TELEGRAM_*` read straight from the
+environment and added to `NON_CONFIG_ENV_PREFIXES`, so they cannot be swept into
+`AppConfig` and therefore into `config_hash`, which is stamped into every signal
+id and artefact. `test_config.py` now asserts the token does not appear anywhere
+in a dumped config.
+
+**What actually fires.** Loop started, loop stopped (with the open-position
+count), orders placed, and orders the router refused. Nothing per-poll: a
+message every thirty seconds is noise nobody reads, and an alerter people mute
+is an alerter that is not there. A refusal is `BLOCKED_UNRECONCILED` doing its
+job, but it also means intent and reality may now differ - which is exactly what
+deserves a person rather than a log line.
+
+An unconfigured run gets a log-only alerter rather than an error. Refusing to
+start a trading loop because nobody set a Telegram token would be the tail
+wagging the dog.
+
+**A bug found by actually running it.** The first version marked severities with
+`•`, `⚠` and `■`. Printing a rendered alert on this machine raised
+`UnicodeEncodeError: 'charmap' codec can't encode character '\\u25a0'` - exactly
+what `TestTheCliSourceStaysAscii` already warns about ("Windows consoles default
+to a legacy code page... a rupee sign raises"), and `LogNotifier` writes to one.
+Replaced with `*`, `!`, `!!`, and a test now encodes every rendered severity as
+cp1252 so a decorative glyph cannot creep back in.
+
+**Also re-applied here: the graceful-shutdown CLI wiring from D-133**, which had
+been overwritten in `cmd_mt5.py` between sessions. The module and the
+`should_stop` support in `LiveLoop.run` had survived; only the command-level
+wiring was lost, and it was noticed because the file's mtime was later than the
+edit that wrote it.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting

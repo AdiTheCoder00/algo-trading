@@ -43,6 +43,7 @@ def backtest(
     defaults. `--state` feeds the monitoring dashboard; halt requests recorded
     there trip the kill switch on the next bar.
     """
+    from datetime import date
     from decimal import Decimal
 
     from algo.backtest.engine import BacktestEngine
@@ -65,7 +66,7 @@ def backtest(
 
     calendar = synthetic_calendar()
     tf = Timeframe(minutes=30)
-    instrument = FutureId(underlying="GOLDM", expiry=calendar.date(2026, 9, 4)) # need from datetime import date; calendar does not have .date()
+    instrument = FutureId(underlying="GOLDM", expiry=date(2026, 9, 4))
 
     flat = strategy == "coin_flip"
     source = (
