@@ -44,6 +44,7 @@ import signal
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
+from pathlib import Path
 from types import FrameType
 
 #: Signals worth catching, by name - looked up rather than referenced so this
@@ -136,3 +137,71 @@ def graceful_shutdown(
         for signum, previous in installed.items():
             with suppress(ValueError, OSError):
                 signal.signal(signum, previous)  # type: ignore[arg-type]
+
+
+class StopFile:
+    """A stop request made by creating a file, for loops nobody can Ctrl-C.
+
+    `graceful_shutdown` covers the operator at the keyboard. It does not cover
+    the loop started in the background, by a service manager, or from another
+    console - and on Windows a POSIX signal does not cross that boundary at all,
+    which is not a detail but the ordinary case for anything left running.
+
+    So there is a second way in, and it is the shape this codebase already uses
+    for the kill switch (D-012): a *request the loop reads*, not an action taken
+    against it. Creating the file asks; the loop notices at its next boundary,
+    finishes the pass in flight, and exits through exactly the same path a
+    Ctrl-C would have taken. Nothing signals, nothing interrupts, and the
+    journal stays consistent by construction.
+
+    ## The file is removed by the loop, not by the asker
+
+    A sentinel left behind would stop the *next* run the moment it started, and
+    the operator would be left restarting a loop that keeps exiting for a reason
+    they already dealt with. So the loop clears it on the way out, and clears a
+    stale one on the way in - loudly, because "I asked it to stop and it started
+    anyway" is a thing worth being told rather than discovering later.
+    """
+
+    __slots__ = ("_path",)
+
+    def __init__(self, path: Path) -> None:
+        self._path = Path(path)
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @property
+    def requested(self) -> bool:
+        return self._path.exists()
+
+    @property
+    def reason(self) -> str:
+        """Whatever the asker wrote in it, or a default naming the file.
+
+        Read defensively: the file existing *is* the request, and a read that
+        fails must not turn a stop into an exception inside the loop.
+        """
+        try:
+            written = self._path.read_text(encoding="utf-8").strip()
+        except OSError:
+            written = ""
+        return written or f"stop file {self._path} present"
+
+    def request(self, reason: str = "") -> None:
+        """Ask the loop to stop. Safe to call when one is already pending."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(reason or "stop requested", encoding="utf-8")
+
+    def clear(self) -> bool:
+        """Remove it. Returns whether there was one to remove."""
+        try:
+            self._path.unlink()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            # Unremovable is worth knowing about but is not worth crashing a
+            # loop that has already stopped.
+            return False
+        return True

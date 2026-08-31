@@ -39,6 +39,11 @@ def live_mt5(
     journal_path: Path = typer.Option(
         Path("state/mt5_journal.db"), "--journal", help="Order journal"
     ),
+    stop_file: Path = typer.Option(
+        Path("state/STOP"),
+        "--stop-file",
+        help="Creating this file asks the loop to stop after the current bar",
+    ),
 ) -> None:
     """Run a CFD strategy on live MT5 bars against the **paper** broker.
 
@@ -69,7 +74,7 @@ def live_mt5(
     from algo.execution.paper import PaperBroker
     from algo.live.alerts import build_alerter
     from algo.live.mt5_runner import XAUUSD_SPREAD_TICKS, build_mt5_paper_loop, strategy_for
-    from algo.live.shutdown import graceful_shutdown
+    from algo.live.shutdown import StopFile, graceful_shutdown
     from algo.persistence.journal import OrderJournal
     from algo.persistence.state import StateStore
 
@@ -153,9 +158,17 @@ def live_mt5(
                 f"stop {stop_loss_pct}% / trail {trail_pct}% from {trail_activation_pct}%"
             )
             alerter = build_alerter()
+            sentinel = StopFile(stop_file)
+            if sentinel.clear():
+                # Loud, not silent: "I asked it to stop and it started anyway"
+                # is worth being told now rather than discovered later.
+                typer.echo(f"stop file     cleared a stale {stop_file}")
             typer.echo(f"polling       {passes} pass(es), {poll_interval_s}s apart")
             typer.echo(f"alerts        {alerter.channels} channel(s)")
-            typer.echo("stop          Ctrl-C finishes the current bar, then exits\n")
+            typer.echo(
+                f"stop          Ctrl-C, or:  algo stop --stop-file {stop_file}\n"
+                "              either one finishes the current bar first\n"
+            )
 
             alerter.info(
                 "live-mt5 started",
@@ -177,7 +190,9 @@ def live_mt5(
                     max_passes=passes,
                     sleep=_time.sleep,
                     poll_interval_s=poll_interval_s,
-                    should_stop=lambda: stopping.requested,
+                    # Either route asks the same question, and both are
+                    # answered at a pass boundary rather than mid-pass.
+                    should_stop=lambda: stopping.requested or sentinel.requested,
                 ):
                     typer.echo(f"  {iso(result.ts)}  {result.summary()}")
                     _alert_on(alerter, result)
@@ -185,11 +200,15 @@ def live_mt5(
                 # Recorded either way, so a restart can tell "asked to stop and
                 # did" from "died mid-bar" - the two states a journal left in
                 # SENT cannot distinguish on its own.
-                ended = (
-                    f"live-mt5 stopped cleanly: {stopping.reason}"
-                    if stopping.requested
-                    else "live-mt5 finished its requested passes"
-                )
+                if stopping.requested:
+                    ended = f"live-mt5 stopped cleanly: {stopping.reason}"
+                elif sentinel.requested:
+                    ended = f"live-mt5 stopped cleanly: {sentinel.reason}"
+                else:
+                    ended = "live-mt5 finished its requested passes"
+                # Cleared on the way out so it cannot stop the next run for a
+                # reason the operator has already dealt with.
+                sentinel.clear()
                 store.record_note(clock.now(), ended)
                 store.set_health("engine", "stopped", at=clock.now())
                 # A loop that stops is worth knowing about even when the reason

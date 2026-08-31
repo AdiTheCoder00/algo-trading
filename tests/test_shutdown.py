@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import signal
 import threading
+from pathlib import Path
 
 import pytest
 
-from algo.live.shutdown import ShutdownRequest, graceful_shutdown
+from algo.live.shutdown import ShutdownRequest, StopFile, graceful_shutdown
 
 
 class TestShutdownRequest:
@@ -99,3 +100,96 @@ class TestHandlersAreRestored:
             handler(int(signal.SIGINT), None)
 
         assert seen == [(1, "SIGINT")]
+
+
+class TestStopFile:
+    """The route that works when there is no terminal to Ctrl-C.
+
+    A background loop, a service manager, or another console - and on Windows a
+    POSIX signal does not cross that boundary at all, so without this the only
+    option is killing the process, which is exactly what the graceful path
+    exists to avoid.
+    """
+
+    def test_absent_means_no_request(self, tmp_path: Path) -> None:
+        assert StopFile(tmp_path / "STOP").requested is False
+
+    def test_creating_it_is_the_request(self, tmp_path: Path) -> None:
+        sentinel = StopFile(tmp_path / "STOP")
+
+        sentinel.request("going to bed")
+
+        assert sentinel.requested is True
+        assert sentinel.reason == "going to bed"
+
+    def test_it_creates_missing_parent_directories(self, tmp_path: Path) -> None:
+        """`state/` may not exist on a fresh checkout, and failing to ask a
+        loop to stop because of a missing directory would be absurd."""
+        sentinel = StopFile(tmp_path / "nested" / "deeper" / "STOP")
+
+        sentinel.request()
+
+        assert sentinel.requested is True
+
+    def test_an_empty_file_still_reads_as_a_request(self, tmp_path: Path) -> None:
+        """`touch state/STOP` is a perfectly reasonable way to ask. The file
+        existing is the request; its contents are only an explanation."""
+        path = tmp_path / "STOP"
+        path.write_text("", encoding="utf-8")
+        sentinel = StopFile(path)
+
+        assert sentinel.requested is True
+        assert "STOP" in sentinel.reason
+
+    def test_clearing_reports_whether_there_was_one(self, tmp_path: Path) -> None:
+        sentinel = StopFile(tmp_path / "STOP")
+
+        assert sentinel.clear() is False  # nothing there
+        sentinel.request()
+        assert sentinel.clear() is True
+        assert sentinel.requested is False
+
+    def test_requesting_twice_is_harmless(self, tmp_path: Path) -> None:
+        sentinel = StopFile(tmp_path / "STOP")
+
+        sentinel.request("first")
+        sentinel.request("second")
+
+        assert sentinel.reason == "second"
+
+    def test_an_unreadable_file_still_stops_the_loop(self, tmp_path: Path) -> None:
+        """The file existing is the request. A `reason` that cannot be read must
+        degrade to a default, never raise into the loop that is asking."""
+        path = tmp_path / "STOP"
+        path.mkdir()  # a directory where a file is expected - read_text raises
+        sentinel = StopFile(path)
+
+        assert sentinel.requested is True
+        assert sentinel.reason  # a usable string, not an exception
+
+
+class TestEitherRouteStopsTheLoop:
+    """`should_stop` is one question with two askers, so the loop needs no
+    knowledge of which one it was."""
+
+    def test_the_signal_route_alone(self, tmp_path: Path) -> None:
+        request = ShutdownRequest()
+        sentinel = StopFile(tmp_path / "STOP")
+
+        def should_stop() -> bool:
+            return request.requested or sentinel.requested
+
+        assert should_stop() is False
+        request.request("SIGINT received")
+        assert should_stop() is True
+
+    def test_the_file_route_alone(self, tmp_path: Path) -> None:
+        request = ShutdownRequest()
+        sentinel = StopFile(tmp_path / "STOP")
+
+        def should_stop() -> bool:
+            return request.requested or sentinel.requested
+
+        assert should_stop() is False
+        sentinel.request("from another console")
+        assert should_stop() is True
