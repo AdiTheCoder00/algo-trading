@@ -39,7 +39,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -227,5 +227,9 @@ def load_profile(symbol: str, path: Path = DEFAULT_CACHE) -> SpreadProfile | Non
             measured_at=datetime.fromisoformat(raw["measured_at"]),
             fallback=Decimal(raw["fallback"]),
         )
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, InvalidOperation):
+        # InvalidOperation is listed explicitly because it is NOT a ValueError -
+        # it descends from ArithmeticError - so a cache whose numbers are corrupt
+        # escaped this handler and raised, which is exactly what the docstring
+        # above promises it will not do.
         return None
