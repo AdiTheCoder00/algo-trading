@@ -15,8 +15,8 @@ from algo.core.logging import configure_logging
 if TYPE_CHECKING:  # annotations only - the bodies import these lazily so
     # `algo live --help` does not drag in a broker SDK.
     from algo.config.schema import AppConfig
-    from algo.core.clock import SystemClock
-    from algo.data.smartapi_feed import SmartConnectTransport
+    from algo.core.clock import Clock
+    from algo.data.smartapi_feed import CandleTransport
     from algo.exchange.master import InstrumentMaster
 
 app = typer.Typer()
@@ -202,8 +202,8 @@ def _run_paper_loop(
     master: InstrumentMaster,
     live_master: InstrumentMaster,
     market_data_key: str,
-    transport: SmartConnectTransport,
-    clock: SystemClock,
+    transport: CandleTransport,
+    clock: Clock,
     passes: int,
     poll_interval_s: float,
     wait_for_bar_min: float,
@@ -442,7 +442,7 @@ def _quote_chain(
     master: InstrumentMaster,
     config: AppConfig,
     expiry: str,
-    clock: SystemClock,
+    clock: Clock,
 ) -> None:
     """One chain snapshot for the given expiry, printed as a table."""
     from datetime import date as _date
@@ -478,10 +478,10 @@ def _quote_chain(
 
 
 def _bars_from_candles(
-    transport: SmartConnectTransport,
+    transport: CandleTransport,
     master: InstrumentMaster,
     config: AppConfig,
-    clock: SystemClock,
+    clock: Clock,
 ) -> None:
     """One read of today's closed bars, as the live loop would get them."""
     from algo.core.bar import Timeframe
