@@ -53,3 +53,8 @@ tools/*/*.csv
 tools/*/ca-bundle.pem
 tools/*/*.log
 tools/*/*.pid
+
+# Unexpanded Windows env vars: robocopy in PowerShell treats %APPDATA% as a
+# literal, creating this folder here instead of installing to the MT5 terminal.
+# See mt5/README.md. Ignored so an accidental run cannot be committed again.
+%APPDATA%/
