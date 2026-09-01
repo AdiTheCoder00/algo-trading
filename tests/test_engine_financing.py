@@ -27,7 +27,7 @@ from datetime import date
 from decimal import Decimal
 
 from algo.backtest.engine import BacktestEngine
-from algo.core.bar import M30
+from algo.core.bar import M30, Bar
 from algo.core.enums import Exchange, Side
 from algo.core.fill import Charges
 from algo.core.instrument import FutureId, InstrumentSpec
@@ -70,7 +70,7 @@ FRIDAY = date(2026, 8, 21)
 
 def _engine(
     calendar: MarketCalendar,
-    bars: list,
+    bars: list[Bar],
     *,
     swap: SwapModel | None,
     lots: int = 1,
@@ -98,8 +98,8 @@ def _engine(
     )
 
 
-def _bars(calendar: MarketCalendar, days: list[date]) -> list:
-    out: list = []
+def _bars(calendar: MarketCalendar, days: list[date]) -> list[Bar]:
+    out: list[Bar] = []
     for day in days:
         out.extend(
             resample(

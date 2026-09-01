@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from algo.core.bar import Bar, Timeframe
+from algo.core.clock import SystemClock
 from algo.core.errors import DataError
 from algo.data.mt5_feed import Mt5Terminal, measure_server_offset
 
@@ -65,10 +66,12 @@ class ResolvedOffset:
     measured_now: bool
     measured_at: datetime
 
-    def describe(self) -> str:
+    def describe(self, *, now: datetime | None = None) -> str:
+        # `now` is injectable so the cache-age wording is testable, and so this
+        # reads the wall clock only through the clock module (D-015).
         if self.measured_now:
             return f"{self.offset} (measured just now)"
-        age = datetime.now(UTC) - self.measured_at
+        age = (now or SystemClock().now()) - self.measured_at
         return f"{self.offset} (cached {int(age.total_seconds() // 3600)}h ago)"
 
 
@@ -85,7 +88,7 @@ def resolve_server_offset(
     a state where guessing would misalign every bar, and saying so is the only
     honest answer.
     """
-    reference = now or datetime.now(UTC)
+    reference = now or SystemClock().now()
     try:
         offset = measure_server_offset(terminal, symbol, now=reference)
     except DataError as exc:

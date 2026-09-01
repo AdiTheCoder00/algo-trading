@@ -11,6 +11,7 @@ about the result it produces.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -91,8 +92,14 @@ def _run(
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> StateStore:
-    return StateStore(tmp_path / "dashboard.db")
+def store(tmp_path: Path) -> Iterator[StateStore]:
+    # Yielded through the context manager rather than returned: a returned store
+    # is closed only when the garbage collector gets to it, and an sqlite
+    # connection closed that way raises ResourceWarning from a finaliser, where
+    # `filterwarnings = error` turns it into an unraisable exception that fails
+    # whichever unlucky test happens to be running at the time.
+    with StateStore(tmp_path / "dashboard.db") as opened:
+        yield opened
 
 
 class TestEngineWritesTheDashboard:

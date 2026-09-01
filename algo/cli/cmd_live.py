@@ -260,11 +260,14 @@ def _run_paper_loop(
     underlying = config.instruments[0].underlying
     exchange = config.instruments[0].exchange
     futures = master.future_rows(underlying, exchange)
-    if not futures or futures[-1].expiry is None:
+    if not futures or futures[0].expiry is None:
         typer.echo("  paper loop: no futures contract in the master snapshot")
         return
+    # The front month: `future_rows` sorts ascending by expiry, so [0] is the
+    # nearest. This is the contract the loop asks for bars on, and the near month
+    # is the liquid one — the farthest listed contract barely trades.
     instrument = FutureId(
-        underlying=underlying, expiry=futures[-1].expiry, exchange=exchange
+        underlying=underlying, expiry=futures[0].expiry, exchange=exchange
     )
 
     calendar = mcx_calendar(
@@ -493,7 +496,7 @@ def _bars_from_candles(
     if not futures:
         typer.echo("  candle proof: no futures contract in the master snapshot")
         return
-    row = futures[-1]
+    row = futures[0]  # front month; future_rows sorts ascending by expiry
     if row.expiry is None:
         typer.echo("  candle proof: futures contract has no expiry; skipping")
         return

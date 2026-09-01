@@ -43,6 +43,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from algo.core.clock import SystemClock
 from algo.core.errors import DataError
 
 #: Hours in a trading week, indexed Monday 00:00 UTC = 0.
@@ -188,7 +189,7 @@ def measure_spread_profile(
         p90_by_hour=p90_by_hour,
         samples=taken,
         ticks=total_ticks,
-        measured_at=now or datetime.now(UTC),
+        measured_at=now or SystemClock().now(),
         fallback=_quantile(every, 0.5),
     )
 
