@@ -40,6 +40,7 @@ from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 
 from algo.core.bar import Bar, Timeframe
+from algo.core.clock import SystemClock
 from algo.core.errors import DataError
 
 #: MT5 timeframe constants, by minutes. Only the ones this project resamples to.
@@ -101,7 +102,9 @@ def measure_server_offset(
             "symbol may not be selected in Market Watch, or the market is closed "
             "and the terminal holds no quote."
         )
-    reference = now or datetime.now(UTC)
+    # Read through the clock module rather than the wall clock here (D-015).
+    # The `now` parameter is still the injection point; this is only its default.
+    reference = now or SystemClock().now()
     # `tick.time` is server-local seconds. Reading it as UTC and differencing
     # against real UTC is exactly the offset.
     as_if_utc = datetime.fromtimestamp(tick.time, UTC)
