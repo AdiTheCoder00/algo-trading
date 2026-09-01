@@ -2590,6 +2590,284 @@ been overwritten in `cmd_mt5.py` between sessions. The module and the
 wiring was lost, and it was noticed because the file's mtime was later than the
 edit that wrote it.
 
+### D-135 - A bad poll is not a reason to stop trading, and a crash must not be silent
+Both of these came from the same real failure rather than from a review. A live
+paper run died two minutes into an hour-long session:
+
+    DataError: MT5 returned no 60m bars for XAUUSD: (-10001, 'IPC send failed')
+
+One transient hiccup in the terminal's IPC channel, raised by
+`Mt5BarFeed.closed_bars`, propagated straight out of `pass_once`, past
+`LiveLoop.run`, and ended the process. Nothing was open so nothing was lost -
+but a loop that dies on one bad poll is not a loop anyone can leave running.
+
+**The retry, and where its line is drawn.** `errors.py` already had the
+distinction this needed: "the split that matters operationally is Retryable vs
+Fatal". `run` now catches `DataError` and `RetryableBrokerError`, reports them
+through `on_error`, and tries again on the next poll. `FatalBrokerError`,
+`DomainError` and `LookAheadError` still propagate untouched, because those say
+the run itself is wrong and retrying would only repeat it.
+
+`max_consecutive_errors` (5) bounds it, and the counter **resets on any
+successful pass** - five failures spread across an hour is a flaky feed, five
+in a row is an outage, and only the second should stop a run. A loop that spun
+silently through a dead feed would be a worse failure than the one being fixed.
+The retry also sleeps the normal poll interval rather than hammering a feed
+that is already struggling.
+
+**The crash is now evidence rather than absence.** The dead run had alerted
+only that it had *started*; the operator's entire signal that something was
+wrong was that no further messages arrived - which is indistinguishable from a
+quiet market. The loop is now wrapped so a fatal exit clears the stop sentinel,
+records `engine: crashed` with the exception, and sends a CRITICAL alert naming
+the error and the open-position count. Transient failures escalate to a WARNING
+only on the second consecutive one; alerting on every flaky poll is how an
+alerter gets muted.
+
+**The heartbeat that made the crash visible at all.** Written just before this
+happened, and immediately earned: `engine: running` is set at startup and
+`stopped` only by the exit handler, which a crashed process never reaches - so
+the word alone cannot distinguish a working loop from a dead one, and the
+dashboard would have shown a confident green "running" indefinitely. The loop
+now stamps `heartbeat` every pass (not every bar: on a 60m timeframe a
+bar-driven heartbeat looks stalled for an hour at a time, which is exactly what
+it must distinguish from). `/health` reports `stale` past `HEARTBEAT_GRACE_S`
+and says so in `warnings`. The crashed run's state file read `engine: running`
+with a heartbeat 54,157 seconds old, which is the case in one line.
+
+A cleanly stopped loop is never called stale, and a state file with no
+heartbeat at all - written by an older build - is not treated as dead either.
+Both verified, along with the staleness itself, by sabotage.
+
+**Testing note.** The first version of the retry tests monkeypatched
+`pass_once`, which `LiveLoop.__slots__` forbids. Driving the failure through
+the *feed* instead is both possible and more faithful: it is precisely where
+the real error came from. `ScriptedBars` grew `fail_next` and `failure` for it.
+Both halves - retrying transients, and giving up on an outage - were confirmed
+by deliberately breaking each and watching the right tests fail.
+
+### D-136 - The account is shared, and half the adapter did not know it
+
+You mentioned, after the demo balance moved on its own, that a second robot is
+trading the same MT5 account. That is not an unusual setup and the adapter was
+supposed to handle it: `MAGIC` exists for exactly this, the module docstring
+says foreign orders stay foreign, and the test file's docstring says anything
+without our magic number must not be adopted.
+
+Two of the four read paths did not implement it.
+
+| Read path | Filtered on `magic` |
+|---|---|
+| `open_orders` | yes |
+| `executions` | yes |
+| `positions` | **no** |
+| `opposing_tickets` | **no** |
+
+`positions_get(symbol=...)` returns every ticket on that symbol regardless of
+who opened it, so the other robot's XAUUSD exposure was netted into ours and
+returned as our book.
+
+**Why this is a trading fault and not a reporting one.** The strategy reads its
+position from the context (D-041). A foreign long makes it believe it is
+already long: it declines its own entry, and on the opposing breakout it sends
+a close for a position it does not own - closing or reversing the other
+robot's trade. A foreign ticket mirroring ours nets to zero, the strategy reads
+flat, and its next entry doubles a position it has misread. Kill switch flatten
+would do the same, deliberately and all at once.
+
+Nothing was at risk when this was found: the loop runs on the paper broker and
+`Mt5Broker.place` has still never been called. But `--broker live` exists as a
+flag, and this would have been waiting behind it.
+
+**The fix** is one shared `_our_tickets` helper both paths now go through, so
+the filter cannot be present in one and missing in the other again.
+
+**`account_health` deliberately still counts every ticket**, and unfiltered by
+symbol too. That snapshot describes the *account* - the balance, equity and
+margin beside it are account-wide, and a foreign robot's tickets consume the
+same margin ours do. Filtering there would report a margin level that no set of
+positions explains. The distinction is now commented at both sites.
+
+**Testing note.** Applying the filter broke four existing netting tests, which
+was the fix working: their fakes never stamped `magic`, so a `Row` without one
+defaults to 0 and is correctly foreign. They now stamp `MAGIC` explicitly,
+which is what they always meant. Five new tests cover the shared account -
+an unstamped manual trade, a different EA's magic, mixed netting, the
+mirrored hedge, and opposing-ticket counting - and all five fail when the
+filter is reverted.
+
+**Still true regardless.** Magic separates the books; it does not separate the
+*money*. The other robot's positions draw on the same margin and the same
+balance, so a margin call it causes closes our positions too. That is a
+property of sharing an account, not something an adapter can fix.
+
+### D-137 - `for result in loop.run(...)` is not a stream, and the heartbeat depended on it
+
+Checking the loop after the D-136 fix, `/health` reported:
+
+    status : stale
+    engine : running
+    warnings: the engine last reported 653s ago but still says it is running
+
+The loop was fine. Process alive, eleven minutes into a two-hour run. The
+staleness warning added in D-135 was correct about the evidence and wrong about
+the conclusion, because the evidence was never being written.
+
+`LiveLoop.run` returns `list[PassResult]`. It is not a generator. The MT5
+command consumed it as `for result in run.loop.run(...)`, which is valid Python
+that does the exact opposite of what it looks like: the body does not run per
+pass, it runs after **every** pass has finished. Inside that body were the
+terminal echo, the alert dispatch, the heartbeat write, the broker ledger save
+and the account snapshot.
+
+So a 120-pass run at a 60s cadence wrote its first heartbeat two hours in,
+saved no ledger until then, and sent no alert about anything that happened in
+between. The single heartbeat in the state file was the one written at startup.
+
+**This is the more serious half of D-135 failing.** That entry added staleness
+detection so a dead loop could not sit there claiming to be running. It works.
+But the same run also has to *emit* a heartbeat for it to mean anything, and
+the emitter was batched to the end - so a live loop and a dead one looked
+identical for the whole session, which is precisely the state D-135 set out to
+make distinguishable.
+
+**The fix** uses `on_pass`, which already existed for this and is called at the
+pass boundary. The per-pass body moved into `handle_pass` and the run became a
+statement. Nothing in `loop.py` changed; the hook was there and unused.
+
+**Testing.** Two levels, because neither alone is honest:
+
+- `test_on_pass_runs_during_the_run_not_after_it` drives a real loop with a
+  recording `sleep` and asserts the passes and waits alternate. It fails when
+  `on_pass` is moved to the end of `run`, which is the sabotage that recreates
+  the bug.
+- The CLI's use of the hook cannot be reached without a live terminal, so it is
+  asserted structurally, in the manner of `TestTheCliSourceStaysAscii`: the
+  command passes `on_pass=`, and does not iterate the finished list.
+
+**Worth stating plainly**: the batching also meant `broker.save(ledger_path)`
+was deferred for the whole run on the `--broker live` path. A crash mid-run
+would have left the ledger empty. The order journal still carries the intent,
+which is what reconcile reads first, so this was recoverable rather than
+silent - but only because that ordering was already deliberate (D-127).
+
+### D-138 - A scalper, built in the regime the measurements say loses money
+
+You asked for an intraday scalping expert. `GoldIntradayScalper.mq5`, magic
+`20260903`. It is the first expert here that is **not** a port: nothing in
+`algo/strategy/` corresponds to it, so there is no backtest it must agree with
+and none standing behind it either.
+
+**The tension, stated before the design.** D-124's common-window numbers are
+the reason this entry is not just a feature note:
+
+| | M15 | M30 | H1 |
+|---|---|---|---|
+| MACD, 0.5% stop | -$77,668 | $77,836 | $132,919 |
+| Breakout(20), 0.5% stop | -$14,779 | $52,467 | $136,477 |
+
+The stated cause was never the signal. Trade count roughly halves per step to a
+slower interval while the $0.29 round-trip spread is charged *per round trip*,
+so cost is the dominant term. A scalper trades **more** than the column that
+lost money. I said so before writing it and I am recording it here rather than
+letting the EA's own docstring be the only place it appears.
+
+That is not an argument the thing cannot work. It is an argument that the only
+part worth engineering carefully is the cost side, which is what drove every
+decision below.
+
+**The cost gate is mandatory and defaults ON.** `InpMinTpSpread` (4.0) refuses
+any trade whose target does not clear the *live* spread by that multiple.
+`GoldMacdCrossover` ships `InpMaxSpreadPoints` **off**, reasoned there as
+"enabling it makes live diverge from the backtest in a way the backtest cannot
+score." That reasoning is correct for a port and does not transfer: there is no
+backtest here to diverge from, and D-124 says this guard is the whole game.
+Setting it to 0 is allowed and logs a warning naming the M15 column.
+
+It **rejects rather than widens**. Widening a target until it clears the spread
+would quietly convert a scalp into a swing trade still carrying a scalp's stop,
+which is the worst of both.
+
+**A separate module, not a reuse of `ProtectiveExits.mqh`.** That file is
+anchored in percent of price because the Python it ports is, and its 0.5%
+default is about $23 on XAUUSD near 4,600 - a swing stop. A scalp cannot
+express its risk in that unit. `ScalpFilters.mqh` is ATR-relative throughout.
+
+This is a deliberate exception to the "one shared, tested piece rather than two
+copies that could drift" rule the README states. The two modules are not two
+copies of one idea; they are two different units of risk, and merging them
+would produce a module with a mode switch and two half-tested paths. They are
+documented as non-interchangeable at the top of both.
+
+**`BuildBracket` applies its three constraints in a fixed order** - broker
+`SYMBOL_TRADE_STOPS_LEVEL`, then `InpMinStopPoints`, then the cost gate. Order
+matters: the first two *widen* the stop and therefore the target, so the gate
+must test the final target. Testing the requested one would pass trades whose
+real target had already moved.
+
+**The bracket goes out with the order.** `OpenBracket()` attaches SL and TP to
+the same request rather than `Open()` then `ApplyStop()`. Between those two
+calls a position exists unprotected for a server round trip - which is exactly
+when the fast move that motivated the entry is still moving. A $23 swing stop
+tolerates that window; a stop a few ATR-tenths wide does not. The broker takes
+the whole bracket or rejects the whole order, and SL/TP - not the bar-close
+logic - becomes the primary exit.
+
+**A bug this created, found before it shipped.** `ApplyStop` clamps a level to
+the broker's stops band, and the clamp always pushes the level *away* from
+price. `TightenStop` was checking monotonicity first and letting `ApplyStop`
+clamp afterwards, so a trail level inside the band would be tested as a
+tightening and then applied as a **loosening** - the one direction a trail must
+never move. The clamp now happens in `TightenStop` before the test, so the
+check and the order agree; the clamp inside `ApplyStop` is then a no-op. Narrow
+window, real fault, and it only exists because the trail is broker-side here
+rather than modelled as it is in the Python.
+
+**The day is bounded, not just the trade.** Realised loss limit, profit target
+and trade cap. Scalpers rarely die on one bad trade; they die on forty round
+trips through a flat market, each paying the spread. `InpMinSepAtr` (0.25)
+refuses to trade while the EMAs are tangled, which is the state that generates
+those forty trades, and the governors bound the day if it happens anyway.
+
+All three are **recomputed from deal history every bar**, never accumulated in
+a variable - the same reasoning that makes the trail replayed rather than
+persisted. An expert is reloaded on recompile, on a chart change, on a terminal
+restart. A counter in memory would reset mid-day and hand back a budget already
+spent, which is the most dangerous way for this particular guard to fail.
+Commission is summed on entry deals too, because commission paid on the way in
+is money gone whether or not the position has closed; omitting it would
+understate the day's loss in the optimistic direction.
+
+**Sizing fails closed.** `LotsForRisk` converts through
+`SYMBOL_TRADE_TICK_VALUE`/`TICK_SIZE` rather than contract size - tick value is
+already in the account currency, whereas the contract-size route is correct
+only while quote and account currency coincide. If the symbol reports nothing
+usable it returns 0 and the entry is **skipped**. There is deliberately no
+fallback lot size: a sizing failure must not become a position. Where the
+computed size falls below `volume_min` the trade is taken at the minimum and
+the log says plainly that it risks *more* than asked.
+
+**`Trader.mqh` changed, so the other two experts were recompiled.** The two
+additions are purely additive and both existing experts still build 0 errors,
+0 warnings; all three `.ex5` were regenerated, since the two existing binaries
+went stale the moment the shared include changed.
+
+**It does not hand-roll its indicators**, and that is not inconsistent with
+`GoldMacdCrossover` avoiding `iMACD()`. That expert avoids the built-in because
+it must agree bar-for-bar with the EMA seeding in `algo/pricing/indicators.py`.
+Nothing here has a Python counterpart to agree with, so the terminal's own
+indicators are the right choice - they are what the Tester and the chart show.
+
+**What is not settled.** `InpDailyLossLimit` ships at 0 (off) because inventing
+a currency amount for a live account is not mine to do; it needs setting before
+the expert runs. Nothing here has been measured - not the signal, not the
+defaults, not the gate's threshold. D-131's finding was that parameter
+optimisation on this data fits noise, and a scalper has more parameters, not
+fewer, so tuning these on one window would be that finding repeated rather than
+learned from. Real-tick Tester first, and specifically **not** 1-minute OHLC
+modelling: interpolation inside the bar cannot say whether a bracket this
+narrow was hit stop-first or target-first, which is the entire question.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting
