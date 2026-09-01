@@ -799,5 +799,9 @@ def run_significance_study(
             "volatility clustering - is not tested against that here.",
             f"One symbol ({symbol}), one timeframe ({timeframe.label}), one "
             "history. Significance here is not significance elsewhere.",
+            "The window is the most recent bars, so it moves as the market "
+            "prints new ones. Reproducing a p-value exactly means reproducing "
+            f"the window: this one is {bars[0].ts.isoformat()} to "
+            f"{bars[-1].ts.isoformat()}. The seed alone is not enough.",
         ],
     }

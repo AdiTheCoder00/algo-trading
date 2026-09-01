@@ -486,3 +486,29 @@ class TestTheRealDataBacktestEndToEnd:
     def test_it_runs_without_a_config_too(self, tmp_path: pathlib.Path) -> None:
         """The other half of the both-paths rule."""
         _ok("backtest-bhavcopy", str(self._fixture(tmp_path)))
+
+
+class TestTheLiveLoopReportsWhileItRuns:
+    """`LiveLoop.run` returns a list, and that reads like a stream.
+
+    `for result in loop.run(...)` is valid Python that does the opposite of
+    what it looks like: the body waits for every pass to finish first. The MT5
+    command wrote its heartbeat inside such a loop, so a 120-pass run recorded
+    nothing for its whole duration and the dashboard reported a healthy loop as
+    stale - the exact failure the staleness warning was added to surface.
+
+    Behaviour cannot reach this without a live terminal, so the shape is
+    asserted instead: per-pass work goes through `on_pass`, which
+    `tests/test_live_loop.py` separately proves is interleaved.
+    """
+
+    def _source(self) -> str:
+        return (
+            pathlib.Path(__file__).resolve().parents[1] / "algo" / "cli" / "cmd_mt5.py"
+        ).read_text(encoding="utf-8")
+
+    def test_the_command_hooks_per_pass_work_onto_on_pass(self) -> None:
+        assert "on_pass=handle_pass" in self._source()
+
+    def test_it_does_not_iterate_the_finished_list_instead(self) -> None:
+        assert "for result in run.loop.run(" not in self._source()

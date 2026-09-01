@@ -556,3 +556,71 @@ class TestTheBrokerAccount:
 
     def test_it_needs_a_token_like_everything_else(self, client: TestClient) -> None:
         assert client.get("/account").status_code == 401
+
+
+class TestTheEngineStatusCannotLieAboutBeingAlive:
+    """`engine: running` is written at startup and `stopped` only by the exit
+    handler - which a crashed process never reaches. So the word alone cannot
+    distinguish a working loop from a dead one, and a heartbeat is what makes
+    the difference reportable.
+    """
+
+    def test_a_fresh_heartbeat_reads_as_ok(
+        self, client: TestClient, store: StateStore
+    ) -> None:
+        store.set_health("engine", "running", at=NOW)
+        store.set_health("heartbeat", NOW.isoformat(), at=NOW)
+
+        body = client.get("/health", headers={"Authorization": f"Bearer {TOKEN}"}).json()
+
+        assert body["status"] == "ok"
+        assert not [w for w in body["warnings"] if "still says" in w]
+
+    def test_a_stale_heartbeat_is_reported_rather_than_believed(
+        self, client: TestClient, store: StateStore
+    ) -> None:
+        """The case this exists for: the process died without ever recording a
+        stop, so the file still says running."""
+        long_ago = NOW - timedelta(hours=2)
+        store.set_health("engine", "running", at=long_ago)
+        store.set_health("heartbeat", long_ago.isoformat(), at=long_ago)
+
+        body = client.get("/health", headers={"Authorization": f"Bearer {TOKEN}"}).json()
+
+        assert body["status"] == "stale"
+        assert any("still says" in w for w in body["warnings"])
+
+    def test_a_stopped_engine_is_never_called_stale(
+        self, client: TestClient, store: StateStore
+    ) -> None:
+        """A cleanly stopped loop has an old heartbeat by definition. Reporting
+        that as a suspected crash would cry wolf on the normal case."""
+        long_ago = NOW - timedelta(hours=2)
+        store.set_health("engine", "stopped", at=long_ago)
+        store.set_health("heartbeat", long_ago.isoformat(), at=long_ago)
+
+        body = client.get("/health", headers={"Authorization": f"Bearer {TOKEN}"}).json()
+
+        assert body["status"] == "stopped"
+        assert not [w for w in body["warnings"] if "still says" in w]
+
+    def test_no_heartbeat_at_all_is_not_treated_as_stale(
+        self, client: TestClient, store: StateStore
+    ) -> None:
+        """A state file written by an older build has no heartbeat field. That
+        must not make a running loop look dead."""
+        store.set_health("engine", "running", at=NOW)
+
+        body = client.get("/health", headers={"Authorization": f"Bearer {TOKEN}"}).json()
+
+        assert body["status"] == "ok"
+
+    def test_an_unparseable_heartbeat_is_treated_as_absent(
+        self, client: TestClient, store: StateStore
+    ) -> None:
+        store.set_health("engine", "running", at=NOW)
+        store.set_health("heartbeat", "not-a-timestamp", at=NOW)
+
+        body = client.get("/health", headers={"Authorization": f"Bearer {TOKEN}"}).json()
+
+        assert body["status"] == "ok"

@@ -105,7 +105,7 @@ def significance(
 
         observed = out["observed"]
         typer.echo(
-            f"\nwindow        {out['window_start'][:10]} to {out['window_end'][:10]}"
+            f"\nwindow        {out['window_start'][:16]} to {out['window_end'][:16]}"
             f"  ({out['bars']} bars)"
         )
         typer.echo(

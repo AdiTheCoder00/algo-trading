@@ -1,12 +1,24 @@
 """Command line entry points.
 
-Three commands: `verify` proves the data pipeline end to end on synthetic bars,
-`config` shows exactly what settings a run would use, and `backtest` runs the
-Milestone 3 falsification.
+Seventeen commands, grouped by what they are for:
 
-`backtest` deliberately does not accept a real dataset yet. There is no recorded
-data to point it at, and a command that quietly ran on generated bars while
-looking like a strategy result would be worse than one that says what it is.
+* **Proofs** - `verify` runs the data pipeline end to end on synthetic bars;
+  `backtest` runs the Milestone 3 falsification (a coin flip on a flat market
+  must make exactly nothing before costs).
+* **Configuration** - `config` shows exactly what settings a run would use.
+* **Historical runs** - `backtest-bhavcopy` and `backtest-smartapi` run the
+  real strategy against recorded data; `walkforward` asks whether a
+  walk-forward on your data could tell you anything; `significance` reports
+  whether a result is distinguishable from luck.
+* **Live** - `live` runs the MCX loop, `live-mt5` the CFD paper loop, and
+  `mt5-replay` replays MT5 history through a strategy.
+* **Operations** - `serve` runs the monitoring API, `killswitch` requests a
+  halt, `stop` requests a cooperative shutdown, `credentials` inspects the
+  broker sessions, and `telegram-check` verifies alert delivery.
+* **Inspection** - `bhavcopy` and `chain` inspect recorded data.
+
+The commands that trade (live paths) are gated: they refuse any mode but
+backtest/paper unless the live gate is explicitly satisfied.
 """
 
 from __future__ import annotations
