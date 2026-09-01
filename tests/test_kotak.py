@@ -1039,3 +1039,203 @@ class TestABridgeOutageIsRetryable:
         from algo.execution.kotak import _ok_data
 
         assert _ok_data({"stat": "Not_Ok", "stCode": 5203, "errMsg": "No Data"}, "x") == []
+
+
+class TestTheRetryableFatalBoundary:
+    """`_call` is the one place "the network failed" becomes something the router
+    may retry, and everything else becomes something it must not.
+
+    Both directions are dangerous. Classifying a rejection as retryable makes the
+    router hammer an order the exchange has already refused. Classifying a network
+    blip as fatal aborts a live session mid-strategy - possibly with one leg of a
+    strangle open and the other not.
+
+    The SDK signals failure in six different shapes, listed in `_call`'s own
+    docstring. Each is pinned here, because the mapping is pure convention: there
+    is nothing in a payload that makes `{"Error": ...}` mean one thing and
+    `{"error": ...}` another except this function agreeing with the SDK.
+    """
+
+    def test_a_clean_payload_passes_straight_through(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        broker = _broker(transport, master, clock)
+        payload = {"stat": "Ok", "data": [1, 2]}
+
+        assert broker._call("read funds", lambda: payload) is payload
+
+    def test_a_non_dict_response_is_returned_untouched(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        """Some endpoints answer with a bare list. Only dicts carry error keys, so
+        anything else is data by definition and must not be inspected for them."""
+        broker = _broker(transport, master, clock)
+
+        assert broker._call("read book", lambda: [{"nOrdNo": "1"}]) == [{"nOrdNo": "1"}]
+
+    def test_nothing_at_all_is_retryable(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        """None is the shape the SDK returns when the call did not complete, which
+        is a transport failure rather than a decision by the exchange."""
+        broker = _broker(transport, master, clock)
+
+        with pytest.raises(RetryableBrokerError, match="returned nothing"):
+            broker._call("read funds", lambda: None)
+
+    def test_an_untyped_sdk_exception_becomes_retryable(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        broker = _broker(transport, master, clock)
+
+        def boom() -> Any:
+            raise ConnectionResetError("connection reset by peer")
+
+        with pytest.raises(RetryableBrokerError, match="connection reset"):
+            broker._call("place order", boom)
+
+    def test_an_already_fatal_error_is_not_downgraded_to_retryable(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        """The re-raise that matters most. Without it the blanket handler below
+        would wrap a fatal rejection as retryable, and the router would replay an
+        order the exchange has already refused."""
+        broker = _broker(transport, master, clock)
+
+        def boom() -> Any:
+            raise FatalBrokerError("already classified")
+
+        with pytest.raises(FatalBrokerError, match="already classified"):
+            broker._call("place order", boom)
+
+    def test_an_already_retryable_error_passes_through_unwrapped(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        broker = _broker(transport, master, clock)
+
+        def boom() -> Any:
+            raise RetryableBrokerError("socket timeout")
+
+        with pytest.raises(RetryableBrokerError, match="socket timeout"):
+            broker._call("read funds", boom)
+
+    # ------------------------------------------------- "Error Message": session
+    def test_a_lost_session_is_retryable_and_says_to_reconcile(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        """Retryable because reconnecting fixes it - but the message has to say
+        "reconcile", because an order may have been placed before the session
+        dropped and the local ledger cannot know."""
+        broker = _broker(transport, master, clock)
+
+        with pytest.raises(RetryableBrokerError) as exc:
+            broker._call("read funds", lambda: {"Error Message": "Invalid Session"})
+
+        assert "trade session is gone" in str(exc.value)
+        assert "reconcile" in str(exc.value)
+
+    # ------------------------------------------------------- "Error": mixed bag
+    @pytest.mark.parametrize("error", [ValueError("bad qty"), TypeError("bad type")])
+    def test_a_validation_exception_under_error_is_fatal(
+        self,
+        error: Exception,
+        transport: FakeKotakTransport,
+        master: InstrumentMaster,
+        clock: BacktestClock,
+    ) -> None:
+        """A value the SDK refused to send will not become valid on a retry.
+        Retrying it would be an infinite loop against our own bug."""
+        broker = _broker(transport, master, clock)
+
+        with pytest.raises(FatalBrokerError, match="rejected"):
+            broker._call("place order", lambda: {"Error": error})
+
+    def test_a_network_exception_under_error_is_retryable(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        """Same key, opposite classification, decided only by the exception type -
+        which is exactly why this needs a test rather than a reading."""
+        broker = _broker(transport, master, clock)
+
+        with pytest.raises(RetryableBrokerError, match="timed out"):
+            broker._call("place order", lambda: {"Error": TimeoutError("timed out")})
+
+    def test_a_plain_string_under_error_is_fatal(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        broker = _broker(transport, master, clock)
+
+        with pytest.raises(FatalBrokerError, match="insufficient margin"):
+            broker._call("place order", lambda: {"Error": "insufficient margin"})
+
+    # --------------------------------------------------- "error": business fail
+    def test_a_business_rejection_list_is_fatal_and_joins_its_messages(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        """The exchange gave reasons; all of them belong in the message, because
+        the second one is often the real cause."""
+        broker = _broker(transport, master, clock)
+        payload = {
+            "error": [
+                {"code": "1001", "message": "market closed"},
+                {"code": "1002", "message": "price out of range"},
+            ]
+        }
+
+        with pytest.raises(FatalBrokerError) as exc:
+            broker._call("place order", lambda: payload)
+
+        assert "market closed" in str(exc.value)
+        assert "price out of range" in str(exc.value)
+
+    def test_a_rejection_entry_without_a_message_falls_back_to_its_code(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        """A bare code is worse than a sentence but far better than nothing, which
+        is what a KeyError here would have produced."""
+        broker = _broker(transport, master, clock)
+
+        with pytest.raises(FatalBrokerError, match="1001"):
+            broker._call("place order", lambda: {"error": [{"code": "1001"}]})
+
+    def test_a_network_exception_under_lowercase_error_is_retryable(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        broker = _broker(transport, master, clock)
+
+        with pytest.raises(RetryableBrokerError, match="dns"):
+            broker._call("read funds", lambda: {"error": OSError("dns")})
+
+    def test_a_plain_string_under_lowercase_error_is_fatal(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        broker = _broker(transport, master, clock)
+
+        with pytest.raises(FatalBrokerError, match="not permitted"):
+            broker._call("place order", lambda: {"error": "not permitted"})
+
+    def test_an_empty_error_list_is_fatal_rather_than_indexed_into(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        """`error[0]` on an empty list would raise IndexError inside the handler,
+        turning a rejection into a crash. The guard is `and error`."""
+        broker = _broker(transport, master, clock)
+
+        with pytest.raises(FatalBrokerError):
+            broker._call("place order", lambda: {"error": []})
+
+    # ---------------------------------------------------------- reaching users
+    def test_the_classification_reaches_a_real_broker_method(
+        self, transport: FakeKotakTransport, master: InstrumentMaster, clock: BacktestClock
+    ) -> None:
+        """Proof the boundary is wired into callers, not merely callable: a
+        transport blowing up on limits() must surface as retryable from funds()."""
+        broker = _broker(transport, master, clock)
+
+        def boom() -> dict[str, Any]:
+            raise ConnectionError("no route to host")
+
+        transport.limits = boom  # type: ignore[method-assign]
+
+        with pytest.raises(RetryableBrokerError, match="no route to host"):
+            broker.funds()
