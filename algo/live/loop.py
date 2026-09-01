@@ -51,7 +51,7 @@ from typing import Protocol, runtime_checkable
 from algo.backtest.engine import BacktestEngine, BarDecision
 from algo.core.bar import Bar
 from algo.core.clock import Clock
-from algo.core.errors import AlgoError, DomainError
+from algo.core.errors import AlgoError, DataError, DomainError, RetryableBrokerError
 from algo.core.fill import Fill
 from algo.core.order import Order
 from algo.core.timeutil import iso, ist_date
@@ -228,6 +228,8 @@ class LiveLoop:
         sleep: Callable[[float], None] | None = None,
         poll_interval_s: float = 0.0,
         should_stop: Callable[[], bool] | None = None,
+        max_consecutive_errors: int = 5,
+        on_error: Callable[[Exception, int], None] | None = None,
     ) -> list[PassResult]:
         """Pass repeatedly until bounded out.
 
@@ -240,17 +242,55 @@ class LiveLoop:
         sent with no journal record of what came back (`algo/live/shutdown.py`).
         A request arriving mid-pass is therefore honoured at the next boundary,
         which is the earliest moment it can be honoured safely.
+
+        ## A bad poll is not a reason to stop trading
+
+        A live run died on `MT5 returned no bars: IPC send failed` - one
+        transient hiccup in the terminal connection, propagating out of
+        `pass_once` and ending an hour-long session on its second minute. A
+        missing bar is a reason to wait for the next poll, not to abandon the
+        position you are holding.
+
+        So a *transient* failure (`DataError`, `RetryableBrokerError` - the
+        Retryable side of the split `errors.py` already draws) is counted,
+        reported through `on_error`, and retried on the next pass. The count
+        resets on any successful pass, because five failures spread over an hour
+        is a flaky feed while five in a row is an outage.
+
+        `max_consecutive_errors` bounds it: a feed that has been down for five
+        straight polls is a real failure and the loop stops rather than spinning
+        silently. Everything else - `FatalBrokerError`, `DomainError`,
+        `LookAheadError` - propagates immediately, because those say the run
+        itself is wrong and retrying would only repeat it.
         """
         if max_passes < 1:
             raise DomainError(f"max_passes must be at least 1, got {max_passes}")
 
         results: list[PassResult] = []
+        consecutive_errors = 0
         for pass_number in range(max_passes):
             if should_stop is not None and should_stop():
                 break
             if until is not None and self._clock.now() >= until:
                 break
-            result = self.pass_once()
+
+            try:
+                result = self.pass_once()
+            except (DataError, RetryableBrokerError) as exc:
+                consecutive_errors += 1
+                if on_error is not None:
+                    on_error(exc, consecutive_errors)
+                if consecutive_errors >= max_consecutive_errors:
+                    raise
+                # Sleep before trying again, so a feed that is down is polled at
+                # the normal cadence rather than hammered in a tight loop.
+                if sleep is not None and poll_interval_s > 0:
+                    self._sleep_interruptibly(sleep, poll_interval_s, should_stop)
+                continue
+
+            # Reset on success: five failures across an hour is a flaky feed,
+            # five in a row is an outage, and only the second should stop a run.
+            consecutive_errors = 0
             results.append(result)
             if on_pass is not None:
                 on_pass(result)

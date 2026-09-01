@@ -42,6 +42,12 @@ from algo.persistence.state import StateStore
 
 TOKEN_ENV = "ALGO_API_TOKEN"
 
+#: How far behind the heartbeat may fall before `engine: running` stops
+#: being believed. Generous on purpose: the loop stamps it once per poll,
+#: and a default poll is 30-60s, so this tolerates a couple of missed
+#: passes rather than crying stale over one slow MT5 call.
+HEARTBEAT_GRACE_S = 300.0
+
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
 
 
@@ -103,6 +109,23 @@ class KillSwitchResponse(BaseModel):
     request_id: int
     accepted_at: datetime
     note: str
+
+
+def _heartbeat_age(stamp: str, now: datetime) -> float | None:
+    """Seconds since the loop last reported, or None if it never has.
+
+    An unparseable stamp is treated as absent rather than as stale: a health
+    field written by an older build should not make a running loop look dead.
+    """
+    if not stamp:
+        return None
+    try:
+        seen = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if seen.tzinfo is None:
+        return None
+    return (now - seen).total_seconds()
 
 
 def create_app(
@@ -173,8 +196,23 @@ def create_app(
         if pending:
             warnings.append(f"{len(pending)} kill-switch request(s) not yet acted on")
 
+        # A loop that crashed leaves `engine: running` behind it forever - the
+        # exit handler is the only thing that writes `stopped`, and a process
+        # that died never reached it. So "running" is believed only while the
+        # heartbeat is advancing; past the grace period it is reported as stale,
+        # which is the difference between "it is working" and "nobody has told
+        # us otherwise".
+        engine = detail.get("engine", "")
+        stale_for = _heartbeat_age(detail.get("heartbeat", ""), the_clock.now())
+        if engine == "running" and stale_for is not None and stale_for > HEARTBEAT_GRACE_S:
+            warnings.append(
+                f"the engine last reported {int(stale_for)}s ago but still says "
+                "it is running - it may have died without recording a stop"
+            )
+            engine = "stale"
+
         return HealthResponse(
-            status="ok" if detail.get("engine") == "running" else "unknown",
+            status="ok" if engine == "running" else engine or "unknown",
             mode=detail.get("mode", mode),
             kill_switch=detail.get("kill_switch", "unknown"),
             broker=detail.get("broker", "unknown"),

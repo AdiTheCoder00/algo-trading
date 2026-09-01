@@ -221,7 +221,7 @@ the engine acts on it at its next bar, so the UI says "halt requested", never "h
 .venv/Scripts/python.exe -m pytest
 ```
 
-880 tests. The suite includes the look-ahead canaries required by the brief: cheating
+1320 tests. The suite includes the look-ahead canaries required by the brief: cheating
 strategies that try to read the next bar, reach for a dataframe, reach for the feed, or
 bolt an attribute onto the context — each must raise. It also runs the whole pipeline
 twice, once against a dataset whose future bars have been replaced with randomised
@@ -258,22 +258,23 @@ algo/
 ├── core/        domain models, Decimal money, UTC time, the bar window
 ├── config/      schema, loader, the live-trading gate
 ├── exchange/    MCX calendar, expiry resolution, contract specs
-├── data/        feeds, resampler, synthetic fixtures, quality gates
+├── data/        feeds, resampler, synthetic fixtures, quality gates, MT5/Kotak feeds
 ├── pricing/     Black-76, IV solver, greeks, forward cross-check
-├── costs/       MCX charge stack, spread and slippage models
-├── execution/   the fill simulator, shared by backtest and paper
+├── costs/       MCX charge stack, CFD swap, spread and slippage models
+├── execution/   the fill simulator, broker adapters (Kotak, MT5, paper), router
 ├── portfolio/   position book, cash, the equity identity
-├── risk/        sizing and the caps
-├── backtest/    the bar-by-bar event loop, and the bhavcopy-to-engine bridge
-├── live/        the trading loop, its feeds, and the polled option chain
-├── reporting/   metrics
-├── strategy/    Strategy contract, BarContext, the strangle, two reference strategies
+├── risk/        sizing, exits, kill switch, devolvement guard
+├── backtest/    the bar-by-bar event loop, bhavcopy/CFD/smartapi runners, sweep
+├── live/        the trading loop, feeds, alerts, shutdown, the MT5 paper runner
+├── reporting/   metrics, significance (bootstrap + permutation)
+├── strategy/    Strategy contract, BarContext, the strangle, CFD reference strategies
 ├── persistence/ the write-ahead order journal and the dashboard state store
 ├── api/         FastAPI read-only monitoring + the kill-switch request
-└── cli/         verify, config, backtest, backtest-bhavcopy, walkforward, live,
-                 serve, killswitch, credentials, bhavcopy
+└── cli/         verify, config, backtest, backtest-bhavcopy, backtest-smartapi,
+                 walkforward, significance, live, live-mt5, mt5-replay, serve,
+                 killswitch, stop, credentials, telegram-check, bhavcopy, chain
 
-dashboard/       Next.js monitoring page (4 runtime dependencies, no chart library)
+dashboard/       Next.js monitoring page (3 runtime dependencies, no chart library)
 ```
 
 The Kotak Neo (live broker) and Angel SmartAPI (historical bars) adapters are built

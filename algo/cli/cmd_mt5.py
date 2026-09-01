@@ -237,6 +237,19 @@ def live_mt5(
                 "symbol": symbol,
                 "currency": str(account.currency),
                 "strategy": f"{strategy_name} {timeframe.label}",
+                # Without these three the dashboard showed whatever the
+                # *previous* run left behind - a finished run's `engine:
+                # stopped` sat there while this one was polling happily, which
+                # reads as "the loop died" at exactly the moment someone is
+                # checking whether it is alive.
+                "engine": "running",
+                "mode": "live" if live else "paper",
+                "broker": "mt5" if live else "paper",
+                # A heartbeat, refreshed every pass below. `engine: running`
+                # alone cannot distinguish a live loop from one that crashed
+                # without ever reaching its exit handler - both leave the same
+                # word in the file. A timestamp that stops advancing can.
+                "heartbeat": iso(clock.now()),
             }.items():
                 store.set_health(key, value, at=clock.now())
 
@@ -261,51 +274,111 @@ def live_mt5(
                     else f"\n  {name} again - forcing."
                 )
 
-            with graceful_shutdown(on_request=announce) as stopping:
-                for result in run.loop.run(
-                    max_passes=passes,
-                    sleep=_time.sleep,
-                    poll_interval_s=poll_interval_s,
-                    # Either route asks the same question, and both are
-                    # answered at a pass boundary rather than mid-pass.
-                    should_stop=lambda: stopping.requested or sentinel.requested,
-                ):
-                    typer.echo(f"  {iso(result.ts)}  {result.summary()}")
-                    _alert_on(alerter, result)
-                    if live:
-                        # After the pass, so an order placed during it is in the
-                        # file before the next one can be. A crash between
-                        # `order_send` and here still leaves the intent in the
-                        # order journal, which is what reconcile reads first.
-                        broker.save(ledger_path)
-                        _record_account(store, broker, at=result.ts)
+            def report_error(exc: Exception, run_of: int) -> None:
+                """A transient failure the loop is retrying through.
 
-                # Recorded either way, so a restart can tell "asked to stop and
-                # did" from "died mid-bar" - the two states a journal left in
-                # SENT cannot distinguish on its own.
-                if stopping.requested:
-                    ended = f"live-mt5 stopped cleanly: {stopping.reason}"
-                elif sentinel.requested:
-                    ended = f"live-mt5 stopped cleanly: {sentinel.reason}"
-                else:
-                    ended = "live-mt5 finished its requested passes"
-                # Cleared on the way out so it cannot stop the next run for a
-                # reason the operator has already dealt with.
-                sentinel.clear()
+                Told at the terminal every time, but only escalated to a person
+                once it stops looking like a hiccup - an alert per flaky poll is
+                how an alerter gets muted.
+                """
+                typer.echo(f"  ! poll failed ({run_of} in a row): {exc}")
+                if run_of == 2:
+                    alerter.warning(
+                        "live-mt5 feed trouble",
+                        f"{run_of} consecutive poll failures, still retrying.\n{exc}",
+                        at=clock.now(),
+                    )
+
+            def handle_pass(result: PassResult) -> None:
+                """Everything that must happen *during* the run, not after it.
+
+                This was written as `for result in loop.run(...)`, which reads
+                like a stream and is not one: `run` returns a list, so every
+                line here - the echo, the alert, the heartbeat, the account
+                snapshot - waited until all the passes were done. A 120-pass
+                run at a 60s cadence therefore wrote its first heartbeat two
+                hours in, and the dashboard spent those two hours reporting a
+                live loop as stale. `on_pass` is called at the pass boundary,
+                which is what the code always meant.
+                """
+                typer.echo(f"  {iso(result.ts)}  {result.summary()}")
+                _alert_on(alerter, result)
+                # Advanced every pass, not every bar: on a 60m timeframe a
+                # bar-driven heartbeat would look stalled for an hour at a
+                # time, which is indistinguishable from actually stalled.
+                store.set_health("heartbeat", iso(result.ts), at=result.ts)
                 if live:
+                    # After the pass, so an order placed during it is in the
+                    # file before the next one can be. A crash between
+                    # `order_send` and here still leaves the intent in the
+                    # order journal, which is what reconcile reads first.
                     broker.save(ledger_path)
-                    _record_account(store, broker, at=clock.now())
-                store.record_note(clock.now(), ended)
-                store.set_health("engine", "stopped", at=clock.now())
-                # A loop that stops is worth knowing about even when the reason
-                # is dull: "it is no longer trading" is the fact, and nobody
-                # should have to infer it from silence.
-                alerter.warning(
-                    "live-mt5 stopped",
-                    f"{ended}. {len(run.broker.positions())} position(s) open.",
-                    at=clock.now(),
-                )
-                typer.echo(f"\n{ended}")
+                    _record_account(store, broker, at=result.ts)
+
+            with graceful_shutdown(on_request=announce) as stopping:
+                # A fatal exit must never be silent. The run that died on an MT5
+                # `IPC send failed` alerted only that it had *started*, so the
+                # operator's evidence that anything was wrong was the absence of
+                # further messages - which is indistinguishable from a quiet
+                # market. `engine: crashed` is recorded too, so the dashboard
+                # says so rather than leaving `running` behind forever.
+                try:
+                    run.loop.run(
+                        max_passes=passes,
+                        sleep=_time.sleep,
+                        poll_interval_s=poll_interval_s,
+                        # Either route asks the same question, and both are
+                        # answered at a pass boundary rather than mid-pass.
+                        should_stop=lambda: stopping.requested or sentinel.requested,
+                        on_pass=handle_pass,
+                        on_error=report_error,
+                    )
+
+                    # Recorded either way, so a restart can tell "asked to stop and
+                    # did" from "died mid-bar" - the two states a journal left in
+                    # SENT cannot distinguish on its own.
+                    if stopping.requested:
+                        ended = f"live-mt5 stopped cleanly: {stopping.reason}"
+                    elif sentinel.requested:
+                        ended = f"live-mt5 stopped cleanly: {sentinel.reason}"
+                    else:
+                        ended = "live-mt5 finished its requested passes"
+                    # Cleared on the way out so it cannot stop the next run for a
+                    # reason the operator has already dealt with.
+                    sentinel.clear()
+                    if live:
+                        broker.save(ledger_path)
+                        _record_account(store, broker, at=clock.now())
+                    store.record_note(clock.now(), ended)
+                    store.set_health("engine", "stopped", at=clock.now())
+                    # A loop that stops is worth knowing about even when the reason
+                    # is dull: "it is no longer trading" is the fact, and nobody
+                    # should have to infer it from silence.
+                    alerter.warning(
+                        "live-mt5 stopped",
+                        f"{ended}. {len(run.broker.positions())} position(s) open.",
+                        at=clock.now(),
+                    )
+                    typer.echo(f"\n{ended}")
+                except Exception as exc:
+                    # Reached only when the loop gave up - `run` already retries
+                    # transient failures and re-raises once they stop looking
+                    # transient. Everything here is about leaving evidence: the
+                    # sentinel cleared so a restart is not blocked, the crash in
+                    # the state file so the dashboard says `crashed` rather than
+                    # a stale `running`, and a CRITICAL alert because silence is
+                    # what an operator cannot distinguish from a quiet market.
+                    sentinel.clear()
+                    store.record_note(clock.now(), f"live-mt5 crashed: {exc}")
+                    store.set_health("engine", "crashed", at=clock.now())
+                    alerter.critical(
+                        "live-mt5 CRASHED",
+                        f"{type(exc).__name__}: {exc}{NEWLINE}"
+                        f"{len(run.broker.positions())} position(s) open. "
+                        "The loop is no longer running.",
+                        at=clock.now(),
+                    )
+                    raise
             store.close()
     finally:
         mt5.shutdown()

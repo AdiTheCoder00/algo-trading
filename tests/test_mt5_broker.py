@@ -312,8 +312,8 @@ class TestHedgingIsNettedForTheEngine:
     def test_two_longs_net_to_their_sum(self) -> None:
         terminal = FakeTerminal()
         terminal.positions = [
-            Row(type=0, volume=1.0, price_open=4400.0),
-            Row(type=0, volume=0.5, price_open=4500.0),
+            Row(magic=MAGIC, type=0, volume=1.0, price_open=4400.0),
+            Row(magic=MAGIC, type=0, volume=0.5, price_open=4500.0),
         ]
 
         position = _broker(terminal).positions()[0]
@@ -324,8 +324,8 @@ class TestHedgingIsNettedForTheEngine:
     def test_the_average_is_weighted_by_size(self) -> None:
         terminal = FakeTerminal()
         terminal.positions = [
-            Row(type=0, volume=1.0, price_open=4400.0),
-            Row(type=0, volume=0.5, price_open=4500.0),
+            Row(magic=MAGIC, type=0, volume=1.0, price_open=4400.0),
+            Row(magic=MAGIC, type=0, volume=0.5, price_open=4500.0),
         ]
 
         # (100*4400 + 50*4500) / 150
@@ -333,15 +333,15 @@ class TestHedgingIsNettedForTheEngine:
 
     def test_a_short_is_negative(self) -> None:
         terminal = FakeTerminal()
-        terminal.positions = [Row(type=1, volume=0.2, price_open=4459.0)]
+        terminal.positions = [Row(magic=MAGIC, type=1, volume=0.2, price_open=4459.0)]
 
         assert _broker(terminal).positions()[0].qty == Decimal("-20")
 
     def test_opposing_tickets_that_cancel_report_no_position(self) -> None:
         terminal = FakeTerminal()
         terminal.positions = [
-            Row(type=0, volume=1.0, price_open=4400.0),
-            Row(type=1, volume=1.0, price_open=4450.0),
+            Row(magic=MAGIC, type=0, volume=1.0, price_open=4400.0),
+            Row(magic=MAGIC, type=1, volume=1.0, price_open=4450.0),
         ]
 
         assert _broker(terminal).positions() == []
@@ -350,14 +350,81 @@ class TestHedgingIsNettedForTheEngine:
         """Netting to zero hides two tickets that both still pay financing."""
         terminal = FakeTerminal()
         terminal.positions = [
-            Row(type=0, volume=1.0, price_open=4400.0),
-            Row(type=1, volume=1.0, price_open=4450.0),
+            Row(magic=MAGIC, type=0, volume=1.0, price_open=4400.0),
+            Row(magic=MAGIC, type=1, volume=1.0, price_open=4450.0),
         ]
 
         assert _broker(terminal).opposing_tickets() == (1, 1)
 
     def test_a_flat_account_reports_nothing(self) -> None:
         assert _broker().positions() == []
+
+
+class TestASecondRobotOnTheSameAccount:
+    """A demo account is shared ground, and this one demonstrably is.
+
+    Another EA - or the person at the terminal - can hold XAUUSD at the same
+    time as this system, and `positions_get` reports their tickets alongside
+    ours with nothing but `magic` to tell them apart. `open_orders` and
+    `executions` filtered on it from the start; `positions` and
+    `opposing_tickets` did not, and so read a stranger's exposure as our own.
+
+    The damage is not a wrong number on a dashboard. The strategy reads its
+    position from the context, so a foreign long makes it believe it is already
+    long: it holds back its own entry, and on the opposing signal sends a close
+    for a position it never opened - flattening or reversing the other robot.
+    Kill switch flatten would do it deliberately and all at once.
+    """
+
+    def test_a_foreign_long_is_not_our_position(self) -> None:
+        terminal = FakeTerminal()
+        terminal.positions = [Row(magic=0, type=0, volume=1.0, price_open=4400.0)]
+
+        assert _broker(terminal).positions() == []
+
+    def test_another_robots_magic_is_foreign_too(self) -> None:
+        """Not just unstamped manual trades - a different EA stamps its own."""
+        terminal = FakeTerminal()
+        terminal.positions = [
+            Row(magic=MAGIC + 1, type=0, volume=1.0, price_open=4400.0),
+        ]
+
+        assert _broker(terminal).positions() == []
+
+    def test_only_our_side_of_a_shared_account_is_netted(self) -> None:
+        terminal = FakeTerminal()
+        terminal.positions = [
+            Row(magic=MAGIC, type=0, volume=1.0, price_open=4400.0),
+            Row(magic=0, type=0, volume=5.0, price_open=4400.0),
+            Row(magic=MAGIC + 1, type=1, volume=3.0, price_open=4450.0),
+        ]
+
+        assert _broker(terminal).positions()[0].qty == Decimal("100")
+
+    def test_their_hedge_does_not_cancel_ours(self) -> None:
+        """The inversion that would flatten someone else's trade.
+
+        Ours is long. Theirs is the mirror. Netting the pair reports flat, the
+        strategy sees no position, and its next long entry is an addition to a
+        book it has misread.
+        """
+        terminal = FakeTerminal()
+        terminal.positions = [
+            Row(magic=MAGIC, type=0, volume=1.0, price_open=4400.0),
+            Row(magic=0, type=1, volume=1.0, price_open=4400.0),
+        ]
+
+        assert _broker(terminal).positions()[0].qty == Decimal("100")
+
+    def test_their_tickets_are_not_counted_as_opposing(self) -> None:
+        terminal = FakeTerminal()
+        terminal.positions = [
+            Row(magic=MAGIC, type=0, volume=1.0, price_open=4400.0),
+            Row(magic=0, type=1, volume=1.0, price_open=4450.0),
+            Row(magic=0, type=1, volume=2.0, price_open=4460.0),
+        ]
+
+        assert _broker(terminal).opposing_tickets() == (1, 0)
 
 
 class TestForeignActivityStaysForeign:

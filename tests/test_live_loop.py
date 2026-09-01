@@ -21,7 +21,12 @@ from algo.backtest.engine import BacktestEngine
 from algo.core.bar import Bar, Timeframe
 from algo.core.clock import Clock
 from algo.core.enums import Exchange, Side
-from algo.core.errors import DomainError
+from algo.core.errors import (
+    DataError,
+    DomainError,
+    FatalBrokerError,
+    RetryableBrokerError,
+)
 from algo.core.fill import Charges, Fill
 from algo.core.instrument import FutureId
 from algo.costs.charges import McxChargeModel
@@ -72,12 +77,25 @@ class FrozenClock(Clock):
 
 
 class ScriptedBars:
-    """A feed the test drives by hand, including repeating itself."""
+    """A feed the test drives by hand, including repeating itself.
+
+    `fail_next` makes it raise instead of answering, which is precisely how the
+    real failure arrived: `Mt5BarFeed.closed_bars` raising `DataError` on an MT5
+    `IPC send failed`. Injecting it here rather than patching `pass_once` also
+    keeps `LiveLoop.__slots__` intact.
+    """
 
     def __init__(self) -> None:
         self.visible: list[Bar] = []
+        self.fail_next = 0
+        self.failure: Exception = DataError("MT5 returned no bars: IPC send failed")
+        self.calls = 0
 
     def closed_bars(self) -> list[Bar]:
+        self.calls += 1
+        if self.fail_next > 0:
+            self.fail_next -= 1
+            raise self.failure
         return list(self.visible)
 
 
@@ -361,6 +379,33 @@ class TestItStops:
 
         assert len(seen) == 4
 
+    def test_on_pass_runs_during_the_run_not_after_it(self, rig: Rig) -> None:
+        """The heartbeat depends on this, and a caller got it wrong.
+
+        `run` returns a *list*, so `for result in loop.run(...)` reads like a
+        stream and is not one: the body runs only once every pass is done. The
+        MT5 CLI wrote its heartbeat that way, so a 120-pass run at a 60s
+        cadence recorded its first heartbeat two hours in, and the dashboard
+        called a healthy loop stale for the whole session. `on_pass` is the
+        interleaved hook - this asserts it actually interleaves, by checking a
+        pass is reported before the wait that follows it.
+        """
+        loop, feed, _fills, _placer, all_bars = rig
+        feed.visible = all_bars[:2]
+        order: list[str] = []
+
+        loop.run(
+            max_passes=3,
+            on_pass=lambda _result: order.append("pass"),
+            sleep=lambda _seconds: order.append("sleep"),
+            poll_interval_s=1.0,
+        )
+
+        # Every wait is preceded by the pass it follows; nothing is deferred to
+        # the end. Sleeps are sliced, so collapse the runs before comparing.
+        collapsed = [step for i, step in enumerate(order) if i == 0 or step != order[i - 1]]
+        assert collapsed == ["pass", "sleep", "pass", "sleep", "pass"]
+
 
 class TestItSharesTheBacktestDecisionPath:
     def test_the_loop_never_reimplements_sizing(self, rig: Rig) -> None:
@@ -620,3 +665,84 @@ class TestItStopsGracefully:
         loop.run(max_passes=2, sleep=slept.append, poll_interval_s=30.0)
 
         assert slept == [30.0]
+
+
+class TestATransientFailureDoesNotEndTheRun:
+    """A live run died on `MT5 returned no bars: IPC send failed` - one hiccup
+    in the terminal connection ending an hour-long session on its second
+    minute. A missing bar is a reason to wait for the next poll, not to abandon
+    a position.
+    """
+
+    def test_a_data_error_is_retried_not_fatal(self, rig: Rig) -> None:
+        loop, feed, _fills, _placer, all_bars = rig
+        feed.visible = all_bars[:2]
+        feed.fail_next = 2
+
+        results = loop.run(max_passes=5)
+
+        # Two passes failed and were skipped; the remaining three worked.
+        assert len(results) == 3
+
+    def test_a_retryable_broker_error_is_retried_too(self, rig: Rig) -> None:
+        loop, feed, _fills, _placer, all_bars = rig
+        feed.visible = all_bars[:2]
+        feed.failure = RetryableBrokerError("rate limited")
+        feed.fail_next = 1
+
+        assert len(loop.run(max_passes=4)) == 3
+
+    def test_it_gives_up_after_enough_consecutive_failures(self, rig: Rig) -> None:
+        """A feed down for several straight polls is an outage, not a hiccup,
+        and a loop that spins silently through one is worse than one that
+        stops."""
+        loop, feed, _fills, _placer, all_bars = rig
+        feed.visible = all_bars[:2]
+        feed.fail_next = 99
+
+        with pytest.raises(DataError, match="IPC send failed"):
+            loop.run(max_passes=50, max_consecutive_errors=3)
+
+    def test_only_the_configured_number_of_attempts_is_made(self, rig: Rig) -> None:
+        loop, feed, _fills, _placer, all_bars = rig
+        feed.visible = all_bars[:2]
+        feed.fail_next = 99
+
+        with pytest.raises(DataError):
+            loop.run(max_passes=50, max_consecutive_errors=3)
+
+        assert feed.calls == 3
+
+    def test_a_fatal_error_still_stops_immediately(self, rig: Rig) -> None:
+        """`FatalBrokerError` says the run itself is wrong. Retrying would only
+        repeat it, so it is not caught at all."""
+        loop, feed, _fills, _placer, all_bars = rig
+        feed.visible = all_bars[:2]
+        feed.failure = FatalBrokerError("auth rejected")
+        feed.fail_next = 99
+
+        with pytest.raises(FatalBrokerError, match="auth rejected"):
+            loop.run(max_passes=50)
+
+        assert feed.calls == 1  # no retry at all
+
+    def test_a_programming_error_is_never_swallowed(self, rig: Rig) -> None:
+        loop, feed, _fills, _placer, all_bars = rig
+        feed.visible = all_bars[:2]
+        feed.failure = DomainError("bad invariant")
+        feed.fail_next = 99
+
+        with pytest.raises(DomainError, match="bad invariant"):
+            loop.run(max_passes=50)
+
+    def test_the_caller_is_told_about_each_retry(self, rig: Rig) -> None:
+        """So the operator sees a flaky feed at the terminal, and can escalate
+        to an alert once it stops looking like a hiccup."""
+        loop, feed, _fills, _placer, all_bars = rig
+        feed.visible = all_bars[:2]
+        feed.fail_next = 2
+        seen: list[int] = []
+
+        loop.run(max_passes=5, on_error=lambda exc, n: seen.append(n))
+
+        assert seen == [1, 2]

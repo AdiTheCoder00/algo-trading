@@ -365,16 +365,37 @@ class Mt5Broker:
             )
         return out
 
+    def _our_tickets(self, why: str) -> tuple[Any, ...]:
+        """Open tickets on this symbol that **we** opened.
+
+        An MT5 account is shared ground. Another EA, or the person at the
+        terminal, can hold positions in the same symbol at the same time, and
+        `positions_get` reports all of them without distinction. `open_orders`
+        and `executions` already filtered on `magic`; these did not, which meant
+        a second robot's exposure was read back as ours.
+
+        That is not a cosmetic mismatch. The strategy reads its position from
+        the context (D-041), so a foreign long would make it believe it is
+        already long: it would decline its own entry, and on the opposing
+        breakout it would send a close for a position it does not own. Kill
+        switch flatten would do the same, deliberately.
+
+        `magic` is the only thing that separates them - MT5 overwrites the
+        comment, which is why the ledger exists at all.
+        """
+        self._require_connection(why)
+        tickets = self._terminal.positions_get(symbol=self._symbol) or ()
+        return tuple(t for t in tickets if int(getattr(t, "magic", 0)) == MAGIC)
+
     def positions(self) -> list[BrokerPositionSnapshot]:
-        """Open exposure, netted per symbol.
+        """Open exposure **we** hold, netted per symbol.
 
         The account is HEDGING, so MT5 holds a ticket per trade. Netting them is
         the arithmetic the engine expects; `opposing_tickets` exists because
         netting alone would hide two positions that cancel on paper while both
         still pay financing.
         """
-        self._require_connection("read positions")
-        tickets = self._terminal.positions_get(symbol=self._symbol) or ()
+        tickets = self._our_tickets("read positions")
         net_ounces = Decimal("0")
         weighted = Decimal("0")
         for row in tickets:
@@ -403,8 +424,7 @@ class Mt5Broker:
         Both sides open at once means real financing on both, so this is exposed
         for the live loop to report rather than left implicit.
         """
-        self._require_connection("read positions")
-        tickets = self._terminal.positions_get(symbol=self._symbol) or ()
+        tickets = self._our_tickets("read positions")
         longs = sum(1 for r in tickets if int(r.type) == _TYPE_BUY)
         shorts = sum(1 for r in tickets if int(r.type) == _TYPE_SELL)
         return longs, shorts
@@ -491,6 +511,12 @@ class Mt5Broker:
             margin_free=Decimal(str(account.margin_free)),
             margin_level=level if level > 0 else None,
             floating_pnl=Decimal(str(getattr(account, "profit", 0) or 0)),
+            # Deliberately every ticket on the account, ours or not, and
+            # unfiltered by symbol - unlike `positions`. This snapshot
+            # describes the *account*: the balance, equity and margin beside it
+            # are already account-wide, and a foreign robot's tickets consume
+            # the same margin ours do. Filtering here would report a margin
+            # level no set of positions explains.
             open_tickets=len(self._terminal.positions_get() or ()),
             trade_allowed=bool(getattr(account, "trade_allowed", False)),
         )
