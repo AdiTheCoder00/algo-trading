@@ -173,8 +173,10 @@ class KotakChainFeed:
         return self._underlying
 
     def _rows_for(self, option_expiry: date) -> tuple[MasterRow, tuple[MasterRow, ...]]:
-        futures = self._master.future_rows(self._underlying, self._exchange)
-        if not futures:
+        underlying_row = self._master.future_for_option_expiry(
+            self._underlying, self._exchange, option_expiry
+        )
+        if underlying_row is None:
             raise DataError(
                 f"no {self._underlying} futures contract in the master snapshot; "
                 "a chain needs the underlying's own token"
@@ -185,7 +187,12 @@ class KotakChainFeed:
                 f"no {self._underlying} options listed for expiry {option_expiry} "
                 "in the master snapshot"
             )
-        return futures[-1], option_rows  # nearest-expiry contract is the reference
+        # The contract this option cycle settles into, not the front month and not
+        # the farthest listed — see `InstrumentMaster.future_for_option_expiry`.
+        # This row is both the chain's price anchor and the `underlying_future` of
+        # every OptionId in the snapshot, so picking the wrong one moves the strikes
+        # the strategy selects as well as mislabelling the instrument.
+        return underlying_row, option_rows
 
     def poll(self, option_expiry: date) -> OptionChainSnapshot:
         """One snapshot, now.

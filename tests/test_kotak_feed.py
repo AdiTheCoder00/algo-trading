@@ -37,6 +37,21 @@ MASTER_ROWS = [
         lot_size=Decimal("100"),
         tick_size=Decimal("50"),
     ),
+    #: A back month, listed but not the one the September options settle into.
+    #: It exists so that `futures[0]`, `futures[-1]` and the correct answer are
+    #: three different rows: with a single futures contract in the master, a feed
+    #: anchoring on the wrong one is indistinguishable from a correct one. No quote
+    #: is scripted for this token, so anchoring on it fails loudly.
+    MasterRow(
+        symboltoken="578790",
+        tradingsymbol="GOLDM25OCT26FUT",
+        exch_seg="MCX",
+        name="GOLDM",
+        instrumenttype="FUTCOM",
+        expiry=date(2026, 10, 30),
+        lot_size=Decimal("100"),
+        tick_size=Decimal("50"),
+    ),
     MasterRow(
         symboltoken="578788",
         tradingsymbol="GOLDM25SEP26148500CE",
@@ -201,6 +216,73 @@ class TestChainFeed:
         assert call.option.option_expiry == option_expiry
         assert call.option.underlying_future.expiry == futures_expiry
 
+    def test_the_chain_anchors_on_the_contract_the_options_settle_into(
+        self, clock: BacktestClock, session: SessionWindow
+    ) -> None:
+        """Not the front month, and not the farthest listed contract.
+
+        Three futures are listed and all three answers differ, so this fails
+        against either wrong rule. It matters twice over: the anchor row supplies
+        `futures_price`, which is what the strategy picks strikes against, and its
+        expiry becomes `underlying_future.expiry` on every OptionId in the snapshot.
+        """
+        option_expiry = date(2026, 9, 25)
+        settles_into = date(2026, 9, 30)
+        master = InstrumentMaster(
+            [
+                MasterRow(
+                    symboltoken=token,
+                    tradingsymbol=symbol,
+                    exch_seg="MCX",
+                    name="GOLDM",
+                    instrumenttype="FUTCOM",
+                    expiry=expiry,
+                    lot_size=Decimal("100"),
+                )
+                for token, symbol, expiry in (
+                    ("1", "GOLDM28AUG26FUT", date(2026, 8, 28)),  # front month
+                    ("2", "GOLDM30SEP26FUT", settles_into),
+                    ("3", "GOLDM30OCT26FUT", date(2026, 10, 30)),  # farthest
+                )
+            ]
+            + [
+                MasterRow(
+                    symboltoken="4",
+                    tradingsymbol="GOLDM25SEP26148500CE",
+                    exch_seg="MCX",
+                    name="GOLDM",
+                    instrumenttype="OPTFUT",
+                    expiry=option_expiry,
+                    strike=Decimal("148500"),
+                    lot_size=Decimal("100"),
+                )
+            ],
+            fetched_at=NOW,
+        )
+        transport = FakeQuotesTransport()
+        transport.quote_payloads = {
+            "1": _quote("MCX|1", ltp="140000", bid="139950", ask="140050"),
+            "2": _quote("MCX|2", ltp="148500", bid="148450", ask="148550"),
+            "3": _quote("MCX|3", ltp="152000", bid="151950", ask="152050"),
+            "4": _quote("MCX|4", ltp="756", bid="750", ask="762"),
+        }
+        feed = KotakChainFeed(
+            transport=transport,
+            master=master,
+            underlying="GOLDM",
+            clock=clock,
+            session=session,
+            poll_interval_s=0.0,
+        )
+
+        snapshot = feed.poll(option_expiry)
+
+        assert snapshot.futures_price == Decimal("148500")  # not 140000, not 152000
+        call = snapshot.by_strike(Decimal("148500"), Right.CE)
+        assert call is not None
+        assert call.option.underlying_future.expiry == settles_into
+        assert call.option.option_expiry == option_expiry
+
     def test_missing_underlying_quote_is_retryable(
         self, master: InstrumentMaster, clock: BacktestClock, session: SessionWindow
     ) -> None:
@@ -294,7 +376,13 @@ class TestChainFeed:
     def test_no_futures_in_master_is_a_data_error(
         self, master: InstrumentMaster, clock: BacktestClock, session: SessionWindow
     ) -> None:
-        empty_master = InstrumentMaster(MASTER_ROWS[1:], fetched_at=NOW)
+        # Every futures row removed, by kind rather than by position: the
+        # slice this used to be said "drop row 0" and silently stopped
+        # meaning "drop the futures" the moment a second contract was listed.
+        empty_master = InstrumentMaster(
+            [r for r in MASTER_ROWS if not r.instrumenttype.startswith("FUT")],
+            fetched_at=NOW,
+        )
         feed = KotakChainFeed(
             transport=FakeQuotesTransport(),
             master=empty_master,
