@@ -142,16 +142,29 @@ def chain_cells(snapshot: OptionChainSnapshot) -> list[list[Any]]:
         if row is None:
             return [None, None, None, None, None]
         quote = row.quote
-        cells = [
-            quote.open_interest,
-            quote.volume,
+        if call:
+            # CE_OI, CE_VOLUME, CE_BID, CE_ASK, CE_LTP
+            return [
+                quote.open_interest,
+                quote.volume,
+                _num(quote.bid),
+                _num(quote.ask),
+                _num(quote.ltp),
+            ]
+        # PE_LTP, PE_BID, PE_ASK, PE_VOLUME, PE_OI.
+        #
+        # Written out rather than reversing the call list. The put columns mirror
+        # the calls so the two books meet at the strike, but only their *order*
+        # mirrors — a bid is still a bid. Reversing produced [LTP, ASK, BID, ...]
+        # against headers [PE_LTP, PE_BID, PE_ASK, ...], quietly swapping the put
+        # book so every put appeared to be bid above its offer.
+        return [
+            _num(quote.ltp),
             _num(quote.bid),
             _num(quote.ask),
-            _num(quote.ltp),
+            quote.volume,
+            quote.open_interest,
         ]
-        # Puts mirror the calls so the two books meet at the strike column, which
-        # is the layout every exchange chain screen uses.
-        return cells if call else list(reversed(cells))
 
     out: list[list[Any]] = []
     for strike in sorted(by_strike):

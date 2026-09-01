@@ -634,3 +634,143 @@ def test_side_is_read_as_an_enum_not_a_string() -> None:
     assert armed is not None
     assert armed.side is Side.SELL
     assert armed.order_type is OrderType.LIMIT
+
+
+# --------------------------------------------------------------- chain sheet
+def _chain_master() -> InstrumentMaster:
+    """The shared master plus quotes for its tokens is enough for a real feed."""
+    return _master()
+
+
+def _chain_payloads() -> list[dict[str, Any]]:
+    """Deliberately asymmetric bids and asks.
+
+    A fixture where both sides quote the same numbers cannot tell a correct
+    ladder from one that has swapped the put book, which is exactly how the
+    put-side bid/ask transposition survived the first round of tests.
+    """
+    def q(token: str, *, ltp: str, bid: str, ask: str) -> dict[str, Any]:
+        return {
+            "exchange_token": token,
+            "ltp": ltp,
+            "open_int": "2000",
+            "volume": 55,
+            "depth": {
+                "buy": [{"price": bid, "quantity": "3"}],
+                "sell": [{"price": ask, "quantity": "4"}],
+            },
+        }
+
+    return [
+        q("1", ltp="150000", bid="149990", ask="150010"),  # the anchor future
+        q("3", ltp="700", bid="690", ask="710"),  # 150000 CE
+        q("4", ltp="500", bid="480", ask="520"),  # 150000 PE
+    ]
+
+
+def _feed_factory(master: InstrumentMaster, quotes: FakeQuotes, seen: list[str]) -> Any:
+    """A real `KotakChainFeed` per underlying, recording what it was asked for."""
+    from algo.data.kotak_feed import KotakChainFeed
+    from algo.data.live import SessionWindow
+    from algo.exchange.calendar import synthetic_calendar
+
+    def make(underlying: str) -> KotakChainFeed:
+        seen.append(underlying)
+        return KotakChainFeed(
+            transport=quotes,
+            master=master,
+            underlying=underlying,
+            clock=FixedClock(),
+            session=SessionWindow(synthetic_calendar()),
+            poll_interval_s=0.0,
+        )
+
+    return make
+
+
+def _chain_bridge(io: FakeSheetIO, seen: list[str]) -> ExcelBridge:
+    master = _chain_master()
+    quotes = FakeQuotes(_chain_payloads())
+    return ExcelBridge(
+        io=io,
+        master=master,
+        quotes=quotes,
+        clock=FixedClock(),
+        mode=Mode.PAPER,
+        chain_feed_for=_feed_factory(master, quotes, seen),
+    )
+
+
+def test_the_put_book_is_not_transposed_by_the_mirrored_layout() -> None:
+    """The put columns mirror the calls in ORDER only; a bid is still a bid.
+
+    Reversing the call list to build them put ASK under PE_BID and BID under
+    PE_ASK, so every put read as bid above its own offer — a crossed book, which
+    is precisely the shape a tradeability check treats as free money.
+    """
+    io = FakeSheetIO()
+    io.write(layout.Chain.SHEET, *layout.Chain.UNDERLYING_CELL, [["GOLDM"]])
+    _chain_bridge(io, []).refresh()
+
+    row = io.read(layout.Chain.SHEET, layout.Chain.FIRST_DATA_ROW, 1, 1, 11)[0]
+    names = dict(zip(layout.Chain.HEADERS, row, strict=True))
+
+    assert names["STRIKE"] == 150000.0
+    assert names["CE_BID"] == 690.0 and names["CE_ASK"] == 710.0
+    assert names["PE_BID"] == 480.0 and names["PE_ASK"] == 520.0
+    # The invariant underneath the assertions above: neither side is crossed.
+    assert names["CE_BID"] < names["CE_ASK"]
+    assert names["PE_BID"] < names["PE_ASK"]
+    assert names["PE_LTP"] == 500.0 and names["CE_LTP"] == 700.0
+
+
+def test_the_chain_writes_the_futures_anchor_above_the_ladder() -> None:
+    io = FakeSheetIO()
+    io.write(layout.Chain.SHEET, *layout.Chain.UNDERLYING_CELL, [["goldm"]])
+    _chain_bridge(io, []).refresh()
+
+    assert io.cell(layout.Chain.SHEET, *layout.Chain.FUTURES_PRICE_CELL) == 150000.0
+    assert io.cell(layout.Status.SHEET, 5, layout.Status.VALUE_COL) == ""  # no LAST_ERROR
+
+
+def test_a_blank_expiry_falls_back_to_the_nearest_listed_one() -> None:
+    """Leaving the cell empty is not an error - it means "the front cycle"."""
+    io = FakeSheetIO()
+    io.write(layout.Chain.SHEET, *layout.Chain.UNDERLYING_CELL, [["GOLDM"]])
+    io.write(layout.Chain.SHEET, *layout.Chain.EXPIRY_CELL, [[None]])
+    _chain_bridge(io, []).refresh()
+
+    # OPTION_EXPIRY is the only listed cycle, so a ladder proves it was chosen.
+    assert io.cell(layout.Chain.SHEET, layout.Chain.FIRST_DATA_ROW, 6) == 150000.0
+
+
+def test_an_explicit_expiry_is_honoured() -> None:
+    io = FakeSheetIO()
+    io.write(layout.Chain.SHEET, *layout.Chain.UNDERLYING_CELL, [["GOLDM"]])
+    io.write(layout.Chain.SHEET, *layout.Chain.EXPIRY_CELL, [[OPTION_EXPIRY.isoformat()]])
+    _chain_bridge(io, []).refresh()
+
+    assert io.cell(layout.Chain.SHEET, layout.Chain.FIRST_DATA_ROW, 6) == 150000.0
+
+
+def test_a_blank_underlying_leaves_the_chain_untouched() -> None:
+    """No underlying means the operator has not asked for a chain, which is not
+    the same as asking for an empty one - the feed must not even be built."""
+    io = FakeSheetIO()
+    seen: list[str] = []
+    _chain_bridge(io, seen).refresh()
+
+    assert seen == []
+    assert io.cell(layout.Chain.SHEET, *layout.Chain.FUTURES_PRICE_CELL) is None
+
+
+def test_an_underlying_with_no_options_is_reported_not_raised() -> None:
+    """A bad chain must not stop the tick: quotes and orders still run, and the
+    reason lands in Status where the operator will actually see it."""
+    io = FakeSheetIO()
+    io.write(layout.Chain.SHEET, *layout.Chain.UNDERLYING_CELL, [["NOSUCH"]])
+    _chain_bridge(io, []).refresh()
+
+    error = str(io.cell(layout.Status.SHEET, 5, layout.Status.VALUE_COL))
+    assert "chain:" in error
+    assert "NOSUCH" in error
