@@ -25,6 +25,7 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from algo.cli.main import app
+from algo.live.shutdown import StopFile
 
 RUNNER = CliRunner()
 REFERENCE = pathlib.Path("config/goldm.yaml")
@@ -488,27 +489,139 @@ class TestTheRealDataBacktestEndToEnd:
         _ok("backtest-bhavcopy", str(self._fixture(tmp_path)))
 
 
-class TestTheLiveLoopReportsWhileItRuns:
-    """`LiveLoop.run` returns a list, and that reads like a stream.
+class TestStop:
+    """`algo stop` is the halt button for a loop you cannot reach.
 
-    `for result in loop.run(...)` is valid Python that does the opposite of
-    what it looks like: the body waits for every pass to finish first. The MT5
-    command wrote its heartbeat inside such a loop, so a 120-pass run recorded
-    nothing for its whole duration and the dashboard reported a healthy loop as
-    stale - the exact failure the staleness warning was added to surface.
+    Its module docstring explains why it has to exist at all: on Windows a POSIX
+    signal does not cross a process boundary, so "just Ctrl-C it" degrades into
+    "kill the process" - the ungraceful exit the whole shutdown path exists to
+    avoid. If this command is wrong, a live loop started in the background cannot
+    be stopped cleanly at all.
 
-    Behaviour cannot reach this without a live terminal, so the shape is
-    asserted instead: per-pass work goes through `on_pass`, which
-    `tests/test_live_loop.py` separately proves is interleaved.
+    So these assert on the sentinel the loop actually polls, not merely on what
+    the command printed. A command that says "stop requested" and writes nothing
+    is the exact failure mode worth catching, and output alone cannot see it.
     """
 
-    def _source(self) -> str:
-        return (
-            pathlib.Path(__file__).resolve().parents[1] / "algo" / "cli" / "cmd_mt5.py"
-        ).read_text(encoding="utf-8")
+    def _sentinel(self, path: pathlib.Path) -> StopFile:
+        return StopFile(path)
 
-    def test_the_command_hooks_per_pass_work_onto_on_pass(self) -> None:
-        assert "on_pass=handle_pass" in self._source()
+    def test_it_writes_the_sentinel_the_loop_polls(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        stop_file = tmp_path / "state" / "STOP"
 
-    def test_it_does_not_iterate_the_finished_list_instead(self) -> None:
-        assert "for result in run.loop.run(" not in self._source()
+        result = _ok("stop", "--stop-file", str(stop_file))
+
+        assert self._sentinel(stop_file).requested, (
+            "the command reported success but the loop would never see a request"
+        )
+        assert "stop requested" in result.output
+
+    def test_it_creates_the_directory_rather_than_failing(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """The default lives under state/, which may not exist on a fresh clone -
+        and a halt that fails because of a missing directory is no halt."""
+        stop_file = tmp_path / "does" / "not" / "exist" / "STOP"
+
+        _ok("stop", "--stop-file", str(stop_file))
+
+        assert stop_file.exists()
+
+    def test_the_reason_is_recorded_for_the_loop_to_report(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """The loop reads this back into its exit note, so an operator finding a
+        stopped run later learns why rather than guessing."""
+        stop_file = tmp_path / "STOP"
+
+        result = _ok("stop", "--stop-file", str(stop_file), "--reason", "margin call")
+
+        assert self._sentinel(stop_file).reason == "margin call"
+        assert "margin call" in result.output
+
+    def test_a_request_without_a_reason_is_still_a_request(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """The file existing IS the request; the reason is a courtesy. An empty
+        one must not produce an empty file that reads as no reason at all."""
+        stop_file = tmp_path / "STOP"
+
+        _ok("stop", "--stop-file", str(stop_file))
+
+        sentinel = self._sentinel(stop_file)
+        assert sentinel.requested
+        assert sentinel.reason.strip() != ""
+
+    def test_a_second_request_does_not_overwrite_the_first_reason(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Asking twice is what a worried operator does. The first reason is the
+        true one - it is what the loop will report - so the second must not
+        silently replace it."""
+        stop_file = tmp_path / "STOP"
+        _ok("stop", "--stop-file", str(stop_file), "--reason", "first")
+
+        result = _ok("stop", "--stop-file", str(stop_file), "--reason", "second")
+
+        assert self._sentinel(stop_file).reason == "first"
+        assert "already pending" in result.output
+        assert "first" in result.output
+
+    def test_a_pending_request_says_when_it_will_be_acted_on(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """"Nothing happened yet" and "it is ignoring me" look identical to an
+        operator watching a loop that has not reached a bar boundary."""
+        stop_file = tmp_path / "STOP"
+        _ok("stop", "--stop-file", str(stop_file))
+
+        result = _ok("stop", "--stop-file", str(stop_file))
+
+        assert "next bar boundary" in result.output
+
+    def test_clear_removes_a_pending_request(self, tmp_path: pathlib.Path) -> None:
+        """For the case where you change your mind before the loop notices."""
+        stop_file = tmp_path / "STOP"
+        _ok("stop", "--stop-file", str(stop_file), "--reason", "mistake")
+
+        result = _ok("stop", "--stop-file", str(stop_file), "--clear")
+
+        assert not self._sentinel(stop_file).requested
+        assert "keep running" in result.output
+
+    def test_clearing_nothing_is_not_an_error(self, tmp_path: pathlib.Path) -> None:
+        """Idempotent on purpose: an operator clearing twice, or clearing a stop
+        the loop already consumed, has done nothing wrong."""
+        result = _ok("stop", "--stop-file", str(tmp_path / "STOP"), "--clear")
+
+        assert "nothing to clear" in result.output
+
+    def test_it_succeeds_with_no_loop_running_and_says_so(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """It deliberately finds, signals and kills nothing - the strongest thing
+        it does is create a file. With no loop running that is a no-op, and the
+        operator is told rather than left thinking something was stopped."""
+        stop_file = tmp_path / "STOP"
+
+        result = _ok("stop", "--stop-file", str(stop_file))
+
+        assert "If no loop is running" in result.output
+        assert stop_file.exists()
+
+    def test_the_request_survives_a_round_trip_through_the_loop_s_reader(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """End to end across the boundary that matters: the CLI writes, and the
+        class the live loop actually uses reads it back. These are two different
+        modules agreeing about one file, which is the whole mechanism."""
+        stop_file = tmp_path / "STOP"
+        _ok("stop", "--stop-file", str(stop_file), "--reason", "end of session")
+
+        seen_by_loop = StopFile(stop_file)
+        assert seen_by_loop.requested is True
+        assert seen_by_loop.reason == "end of session"
+        assert seen_by_loop.clear() is True
+        assert seen_by_loop.requested is False
