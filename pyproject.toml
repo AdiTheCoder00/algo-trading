@@ -55,6 +55,13 @@ dev = [
 # is `scripts/measure_macd_xauusd.py` and a live run against Vantage.
 mt5 = ["MetaTrader5>=5.0.45"]
 
+# Windows-only for the same reason as `mt5`, and optional for a second one: the
+# Excel bridge is a front end, not part of the engine. `algo/excel/` imports
+# xlwings in exactly one place - `XlwingsSheetIO`, behind the `SheetIO` protocol -
+# so the type and test gates, and every other command, run on a machine with
+# neither xlwings nor Excel installed.
+excel = ["xlwings>=0.31"]
+
 [project.scripts]
 algo = "algo.cli.main:app"
 
