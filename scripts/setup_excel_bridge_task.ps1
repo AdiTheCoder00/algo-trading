@@ -1,11 +1,17 @@
 # Registers "Kotak Excel Bridge" as a Windows Scheduled Task: one refresh of
 # the workbook each trading morning, shortly after MCX opens.
 #
-# Run this once, elevated: right-click this file -> "Run with PowerShell",
-# and accept the UAC prompt. Registering a scheduled task needs an
-# administrator token even for a task that only runs as your own user - a
-# non-elevated PowerShell gets "Access is denied" on ANY task creation
-# (tools/macd_telegram_alert/setup_scheduled_task.ps1 found the same).
+# Run this once: right-click this file -> "Run with PowerShell". No elevation
+# needed.
+#
+# tools/macd_telegram_alert/setup_scheduled_task.ps1 states that task creation
+# always needs an administrator token and that a non-elevated shell gets
+# "Access is denied" on ANY task creation. That did not hold here: registering
+# this task from an ordinary, non-elevated PowerShell on Windows 11 succeeded,
+# verified by checking the registered task afterwards. The likely difference is
+# that this task asks for nothing privileged - it runs as the current user at
+# RunLevel Limited, LogonType Interactive, with no stored password. If you do
+# hit "Access is denied", rerun this from an elevated shell.
 #
 # What it sets up:
 #   - Weekdays at 09:05 IST. MCX opens at 09:00 and trades Monday to Friday,
