@@ -108,6 +108,12 @@ module = [
     "SmartApi.*",
     "neo_api_client.*",
     "MetaTrader5",
+    # Same reason as MetaTrader5, one step further: xlwings is an optional
+    # Windows-only extra, so CI installs `.[dev]` without it and mypy would fail
+    # on the one `import xlwings` in algo/excel/io.py. The import is inside
+    # `XlwingsSheetIO.attach`, behind the `SheetIO` protocol, so nothing else in
+    # `algo` depends on it being resolvable.
+    "xlwings",
     "logzero",
     "pyotp",
     "requests",
