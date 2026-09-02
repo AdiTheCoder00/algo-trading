@@ -21,12 +21,13 @@ window, daily governors and the ATR bracket with its cost gate.
 All three compile clean (0 errors, 0 warnings) against the standard library shipped with
 the Vantage Markets MT5 terminal, build `X64 Regular`.
 
-> **The scalper is unmeasured.** Everything in the "what has actually been measured"
-> section below is about the two ports. `GoldIntradayScalper` has never been backtested,
-> because there is no Python counterpart to backtest it against — and the measured M15
-> column is precisely the regime it operates in. Read
-> [Why the scalper exists, and what it is up against](#why-the-scalper-exists-and-what-it-is-up-against)
-> before you attach it to anything.
+> **The scalper does not work — measured, not suspected.** Across three windows and
+> ~5,900 trades (Jun–Aug 2026, Jan–May 2026, Jun–Dec 2025) it returns profit factor
+> **0.91 / 0.87 / 0.73**, with drawdowns reaching **88.5%**. It is below break-even
+> everywhere and worse out-of-sample. **Do not trade it.** D-140 has the full result and
+> the reasoning for stopping rather than tuning. The surrounding machinery —
+> `ScalpFilters`, the attached bracket, the daily governors, the gate telemetry — is
+> sound and reusable; the entry rule is what fails.
 
 ---
 
@@ -284,6 +285,25 @@ The risk unit `R` is recovered from the TP the bracket actually placed
 (`R = TP distance ÷ InpRewardRisk`), and the extreme for the trail is replayed from the
 bars since entry. A recompile mid-trade therefore changes nothing about how the open
 position is managed, and there is no state file to go stale.
+
+### Out-of-sample: the result that ended it
+
+The M1 numbers below were in-sample. Re-run on two windows it was never developed
+against, with everything else identical:
+
+| Window | Trades | PF | Net | Max DD |
+| --- | ---: | ---: | ---: | ---: |
+| 2026.06–08 *(in-sample)* | 1,261 | 0.91 | −$2,775 | 31.0% |
+| 2026.01–05 | 1,898 | **0.87** | −$5,007 | 51.4% |
+| 2025.06–12 | 2,739 | **0.73** | −$8,748 | **88.5%** |
+
+Below break-even in all three, and degrading out-of-sample. That is not a tuning
+problem — D-131 already found that optimising on this data fits noise. The entry rule
+is what fails; the machinery around it is fine.
+
+For context from the 76-EA screen on the same window: only **13 of 48** EAs that traded
+cleared PF 1.0, and the 28 stock candlestick robots all landed between 0.61 and 0.85 —
+so 0.91 was mid-field, not close to viable.
 
 ### What it actually measured on M1
 

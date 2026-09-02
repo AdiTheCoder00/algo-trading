@@ -2948,6 +2948,98 @@ nor any set file. Changing a default in `.mq5` and re-running proves nothing
 until that cache is cleared. The expert prints its whole configuration on init
 for exactly this reason; that banner is what caught it.
 
+### D-140 - Screened all 76 installed experts; ours is dead, and the one survivor rests on an assumption this broker cannot test
+
+You asked for every installed expert to be backtested, not just ours. 76 found,
+75 completed (one licensed EA hung past its cap), on identical settings: XAUUSD
+M1, 2026.06.01-08.31, real-tick model, $10,000, 1:100, each on its own compiled
+defaults.
+
+**48 traded, 16 took no trades, 11 could not initialise** (licence checks -
+`MHD Scalper Pro 9.5`, `Piner EA`, `Grid Scalper MA`, `VALHALLA EDGE`,
+`TwisterPro Scalper`). **Only 13 of 48 cleared profit factor 1.0.**
+
+**Our scalper does not work, and this is the entry that says so.** Three
+windows, ~5,900 trades, eighteen months:
+
+| Window | Trades | PF | Net | Max DD |
+|---|---|---|---|---|
+| 2026.06-08 (in-sample) | 1,261 | 0.91 | -$2,775 | 31.0% |
+| 2026.01-05 (out-of-sample) | 1,898 | **0.87** | -$5,007 | 51.4% |
+| 2025.06-12 (out-of-sample) | 2,739 | **0.73** | -$8,748 | **88.5%** |
+
+Below break-even in every window, and *worse* out-of-sample. A signal that loses
+everywhere it is shown does not have an edge hidden behind a parameter, and
+D-131 already established that sweeping thresholds on this data fits noise.
+**Stop work on GoldIntradayScalper as a strategy.** The plumbing around it -
+`ScalpFilters`, the attached bracket, the daily governors, the gate telemetry -
+is sound and reusable. The entry rule is not.
+
+Its one virtue is diagnostic: PF moved only 0.91 -> 0.87 -> 0.73 across regimes
+*because* it realises every loss through a hard stop, and equity drawdown
+tracked balance drawdown to within 0.4% in all three runs. The numbers are
+stable because they are honest, which is more than most of the field managed.
+
+**The survivor.** `Adaptive Gold Scalper v2.3` held up on windows it was never
+selected on - PF 17.75 (221 trades) and 5.44 (263 trades) against 25.81
+in-sample, strike rate steady near 91%, max loss pinned at -$40.30/-$40.40/
+-$40.70 every time. That constant is its 400-point stop on a fixed 0.10 lot.
+Its M5 run returned byte-identical results to M1: it is a price-level strategy
+(`_order_price_gap`, `_point_shift` are distances, not bar counts) and ignores
+the chart timeframe entirely.
+
+Economics worked back from the report: average win ~$53, average loss ~$32,
+strike rate 91%. Its `_take_profit=10000` ($100) is essentially never reached -
+the $0.20 trailing stop closes almost everything. So the real claim is **~1.3:1
+reward at a 91% strike rate**, which has very little margin.
+
+**And that is the assumption this broker cannot test.** Real ticks begin
+2026.08.26; the account retains about five days. Every run above used ticks
+synthesized from M1 bars. This EA fills through pending stop orders resting ~$50
+from price - the most slippage-sensitive order type there is. The tester fills a
+resting order at exactly its price; a spike violent enough to travel $50 does
+not. At 1.3:1 and 91%, a few points of real slippage per fill inverts the
+expectancy. No historical run here can settle it; **forward-testing on demo is
+the only remaining discriminator.**
+
+**Two things I asserted and had to withdraw.**
+
+*Max/min lot ratio is not a martingale tell.* I introduced it as the cleanest
+one available without source. Our own EA scores 14.7 on it and contains no
+martingale - the spread is ATR-based risk sizing choosing larger lots when stops
+are tighter. It flags *variable sizing*, nothing more.
+
+*`Adaptive Gold Scalper` does not hide its losses.* Seeing a 100% win rate on
+the real-tick window, I concluded it had an exit that never realises a loss. The
+balance-versus-equity drawdown decomposition refutes it: 0.38% against 0.58%.
+That decomposition, not the win rate, is the test that settles the question, and
+it cleanly separates the field - `Quantum Athena` 1.17% balance against 11.16%
+equity (9.5x), `ExpertMAPSAR` 5.0x, `MoonDog` 2.1x all *do* carry unrealised
+losses.
+
+**Four harness traps, each of which silently produced plausible wrong output.**
+
+1. **A UTF-8 BOM voids the entire config.** PowerShell 5.1's `Set-Content
+   -Encoding UTF8` writes one; MT5 then reads `<BOM>[Tester]`, fails to match
+   the section header, and ignores every setting - while still logging
+   *"successfully initialized from start config"* and opening normally. Two full
+   batch attempts tested nothing at all before this was found.
+2. **The tester prefers its saved input cache to compiled defaults** (D-139), so
+   `MQL5\Profiles\Tester\<Expert>.set` must be cleared per EA or the run
+   silently uses stale values.
+3. **`ShutdownTerminal=1` is not reliable here.** Waiting on process exit made
+   every EA burn its full timeout.
+4. **The batch left a 9.19 GB tester log** (martingale EAs log every tick), and
+   reading it to detect completion threw `OutOfMemoryException` - which a
+   `try/catch` converted into "0 finishes", so the check could never succeed.
+   Disk hit 97% full. Completion is now signalled by the report file appearing
+   and its size settling: one `stat()`, no log read.
+
+The shape shared by (1) and (4) is worth naming: **an error path that returns a
+plausible value instead of failing loudly.** Both times the instrument broke
+silently and the silence read as progress - the same failure the gate telemetry
+in D-139 exists to prevent, repeated in the tooling that measures it.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting
