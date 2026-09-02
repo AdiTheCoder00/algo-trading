@@ -3040,6 +3040,75 @@ plausible value instead of failing loudly.** Both times the instrument broke
 silently and the silence read as progress - the same failure the gate telemetry
 in D-139 exists to prevent, repeated in the tooling that measures it.
 
+### D-141 - The gold EAs do not transfer, and two of them were never trading the chart symbol
+
+Follow-on to D-140. You wanted `Adaptive Gold Scalper` on FixedVol100, then the
+top 10 on FixedVol100 and BTCUSD. Both symbols carry **real ticks from
+2026.06.01** - XAUUSD retains only ~5 days - so unlike everything in D-140,
+these rest on ticks that happened.
+
+**The broker constraints are the whole story, and they differ enormously.**
+
+| | XAUUSD | FixedVol100 | BTCUSD |
+|---|---|---|---|
+| price | 4,326 | 4,911 | 76,640 |
+| spread (price) | 0.28 | 0.88 | **16.95** |
+| spread / price | 0.0065% | 0.018% | **0.022%** |
+| `STOPS_LEVEL` | 0.20 | **7.123** | 0 |
+| $ per 1.0 price at min lot | 1.00 | 0.10 | 0.01 |
+
+**AGS is not symbol-locked; it is constraint-locked.** On FixedVol100 with its
+own defaults it sent 1,027 orders and had **2,054 rejected as `Invalid stops`,
+filling none**. Its stop sits 4.000 from entry; the broker minimum there is
+7.123. Scaling the distances past that (`_stop_loss` 400->1000,
+`_trailing_points` 20->800, `_take_profit` 10000->25000, `_order_price_gap`
+5000->12500) makes it trade normally: 265 trades, **profit factor 0.61**, win
+rate 43.0% against 94.9% on gold, expected payoff -$0.23.
+
+**And it cannot be fixed by tuning, for a structural reason.** AGS's profit
+engine is its trailing stop - the $100 take-profit is essentially never reached,
+the $0.20 trail closes almost everything. On XAUUSD that trail is 1x the broker
+minimum, ~5% of the stop distance. On FixedVol100 the tightest *legal* trail is
+7.123, which is **71% of a 10.000 stop**. The mechanism that makes this EA money
+is unavailable on that instrument at any parameter setting.
+
+**Top 10 by gold profit factor, on both symbols: none transfer.** Genuine
+results only (see the invalidated rows below): Quantum Titan 0.78 and
+ExpertMAPSAR 3.85 on FixedVol100; AGS 0.39, Smart Gold Hunter 0.15,
+ExpertMAPSAR 0.18 on BTCUSD. Five EAs produce no signal at all off gold.
+ExpertMAPSAR's 3.85 is the *stock MetaQuotes sample* over 59 trades, and it
+scored 1.69 on gold and 0.20 on the real-tick gold window - noise, not edge.
+Quantum Titan's BTCUSD 2.65 is unusable: **1,332 of ~1,400 orders were
+rejected**, so the 68 fills are a biased survivor sample.
+
+**Two EAs ignore the chart symbol entirely, which invalidates their rows.**
+
+- `Iron Stops v1.18` traded **XAUUSD** when attached to FixedVol100 *and* when
+  attached to BTCUSD. Net $6,817.04 and $6,816.64 against $6,811.41 on gold -
+  the same 49 trades every time.
+- `Range Breakout v5.20` traded a **XAUUSD / USDJPY / BTCUSD** basket on both
+  charts.
+
+Their apparent cross-symbol profit factors are the gold result re-run. **Any
+EA screen that does not verify which symbol was actually dealt will silently
+report this as a transferable edge.** The check is cheap: read the deals
+table's Symbol column, not the chart the test was configured with.
+
+**A third instance of the same measurement failure.** The harness was built to
+distinguish `rejected` from `no signal` - precisely the distinction that matters
+here - and it reported 0 rejects for the run that had 2,054. The tester log is
+UTF-16; seeking to a byte offset past the BOM and decoding from there yields
+garbage matching no pattern. Correct counts came from re-reading the file whole
+with encoding detection and scoping by run block.
+
+That is the third time in this exercise: the UTF-8 BOM voiding the tester config
+(D-140), an `OutOfMemoryException` swallowed by a `catch` and returned as "not
+finished", and now this. **Every one was an error path returning a plausible
+value instead of failing loudly**, and every one initially read as a result
+rather than a fault. Where a measurement can fail silently, it needs a positive
+signal that it ran - which is the same argument the gate telemetry in D-139
+already made, now paid for three more times.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting
