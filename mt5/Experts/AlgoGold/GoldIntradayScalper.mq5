@@ -54,9 +54,10 @@
 //|                                                                   |
 //|   regime   emaFast > emaSlow, and their separation is at least    |
 //|            InpMinSepAtr * ATR - a trend, not a tangle             |
-//|   pullback RSI was at or below InpRsiPullback on the bar before   |
-//|   resume   RSI is above it now                                    |
-//|   confirm  the bar closed above emaFast                           |
+//|   pullback RSI dipped to or below InpRsiPullback on ANY of the    |
+//|            last InpPullbackBars closed bars                       |
+//|   resume   RSI is above that band on the bar that just closed     |
+//|   confirm  that bar closed above emaFast (InpRequireCloseConfirm) |
 //|                                                                   |
 //| Short is the mirror, with the pullback band at 100-InpRsiPullback.|
 //|                                                                   |
@@ -65,6 +66,38 @@
 //| what stops it from catching a falling knife: RSI can turn up on a |
 //| bar that still closed below the fast EMA, and that bar is a pause |
 //| in a decline rather than the end of a pullback.                   |
+//|                                                                   |
+//| ====================================================================
+//| WHY THE PULLBACK IS A WINDOW AND NOT TWO ADJACENT BARS
+//| ====================================================================
+//| The first version of this expert required the dip and the recovery|
+//| on two ADJACENT bars. Measured on M5 over 2026.06.01-08.31 that   |
+//| produced TWO TRADES in three months - and the telemetry that now  |
+//| exists did not, so it took reading the log to establish that the  |
+//| gates had rejected nothing at all. The signal simply almost never |
+//| fired: a four-way conjunction resting on a single-bar coincidence.|
+//|                                                                   |
+//| InpPullbackBars generalises it to what the idea always described - |
+//| price dipped RECENTLY and has now resumed. The dip and the        |
+//| resumption are both still required, in that order; only the       |
+//| demand that they be neighbours is gone. InpPullbackBars = 1       |
+//| reproduces the original rule exactly, which is what makes this a  |
+//| generalisation rather than a different signal wearing its name.   |
+//|                                                                   |
+//| ====================================================================
+//| THE DEFAULTS SHIPPED HERE ARE M1 DEFAULTS
+//| ====================================================================
+//| EMA 12/36, RSI 9, a 3-bar pullback window, a 0.15 ATR chop floor  |
+//| and an 80-point stop floor. On M5 or M15 the periods want to be   |
+//| longer and the floors wider; mt5/README.md carries a table. The   |
+//| expert does not detect the timeframe and adjust itself, because a |
+//| strategy that silently means something different per chart is one |
+//| nobody can reason about.                                          |
+//|                                                                   |
+//| M1 is also where the cost gate does its real work. GateStatsReport|
+//| prints, at shutdown, how many signals each gate refused - so when |
+//| the gate rejects most of them, that shows up as a number instead  |
+//| of as a quietly disappointing equity curve.                       |
 //|                                                                   |
 //| ====================================================================
 //| WHY THE BRACKET GOES OUT WITH THE ORDER
@@ -105,29 +138,32 @@
 //+------------------------------------------------------------------+
 //| Inputs                                                            |
 //+------------------------------------------------------------------+
-input group "--- Signal ---"
-input int    InpEmaFast          = 21;      // Fast EMA period (trend side)
-input int    InpEmaSlow          = 50;      // Slow EMA period (trend direction)
-input int    InpRsiPeriod        = 14;      // RSI period
-input double InpRsiPullback      = 40.0;    // Long pullback band: RSI <= this, then above
-input double InpMinSepAtr        = 0.25;    // CHOP FILTER: min |emaFast-emaSlow| in ATR. 0 = off
+input group "--- Signal (defaults are tuned for M1 - see the header) ---"
+input int    InpEmaFast          = 12;      // Fast EMA period (trend side)
+input int    InpEmaSlow          = 36;      // Slow EMA period (trend direction)
+input int    InpRsiPeriod        = 9;       // RSI period
+input double InpRsiPullback      = 45.0;    // Long pullback band: RSI dips <= this, then leaves it
+input int    InpPullbackBars     = 3;       // Dip may be up to this many bars back. 1 = single-bar cross
+input bool   InpRequireCloseConfirm = true; // Also require the bar to close on the trend side of emaFast
+input double InpMinSepAtr        = 0.15;    // CHOP FILTER: min |emaFast-emaSlow| in ATR. 0 = off
+input int    InpCooldownBars     = 2;       // Bars of silence after an exit. 0 = off
 
 input group "--- Bracket (ATR multiples, NOT percentages) ---"
 input int    InpAtrPeriod        = 14;      // ATR period
 input double InpAtrStopMult      = 1.20;    // Stop distance = this * ATR
 input double InpRewardRisk       = 1.50;    // Target = this * stop distance
-input int    InpMinStopPoints    = 150;     // Hard floor on the stop, points. 0 = broker level only
+input int    InpMinStopPoints    = 80;      // Hard floor on the stop, points. 0 = broker level only
 
 input group "--- Cost gate (the one the measurements argue for) ---"
-input double InpMinTpSpread      = 4.0;     // Target must clear this many spreads. 0 = OFF (not advised)
-input int    InpMaxSpreadPoints  = 60;      // Block entries above this spread, points. 0 = off
+input double InpMinTpSpread      = 3.0;     // Target must clear this many spreads. 0 = OFF (not advised)
+input int    InpMaxSpreadPoints  = 40;      // Block entries above this spread, points. 0 = off
 
 input group "--- Position management ---"
 input double InpBreakEvenR       = 0.80;    // Move stop to entry at this many R. 0 = off
 input double InpBreakEvenLockPts = 20;      // Points of profit locked when it moves. 0 = flat entry
 input double InpTrailStartR      = 1.00;    // Arm the ATR trail at this many R. 0 = off
 input double InpTrailAtrMult     = 1.00;    // Trail this many ATR behind the extreme
-input int    InpMaxBarsInTrade   = 24;      // Time stop, bars. 0 = off
+input int    InpMaxBarsInTrade   = 30;      // Time stop, bars. 0 = off
 
 input group "--- Session (SERVER hours - the expert prints the current one on init) ---"
 input int    InpSessionStart     = 8;       // Entries allowed from this server hour
@@ -138,7 +174,7 @@ input bool   InpCloseAtSessionEnd= true;    // Flatten when the window shuts (no
 input group "--- Daily governors ---"
 input double InpDailyLossLimit   = 0.0;     // Halt for the day at this realised loss. 0 = off
 input double InpDailyProfitTarget= 0.0;     // Halt for the day at this realised profit. 0 = off
-input int    InpMaxTradesPerDay  = 10;      // Halt after this many entries. 0 = off
+input int    InpMaxTradesPerDay  = 30;      // Halt after this many entries. 0 = off
 
 input group "--- Execution ---"
 input bool   InpUseRiskSizing    = true;    // true: size from InpRiskPercent. false: fixed InpLots
@@ -154,6 +190,7 @@ input string InpComment          = "AlgoGold Scalp"; // Cosmetic only - MT5 over
 //+------------------------------------------------------------------+
 CGoldTrader      g_trader;
 DayGuard         g_day;
+GateStats        g_gate;
 ENUM_TIMEFRAMES  g_tf          = PERIOD_CURRENT;
 datetime         g_lastBarTime = 0;
 
@@ -196,6 +233,65 @@ bool ReadPair(const int handle,const string name,double &prev,double &last)
    prev = buf[0];   // shift 2
    last = buf[1];   // shift 1
    return true;
+  }
+
+//+------------------------------------------------------------------+
+//| `count` closed values of one buffer, oldest first.                |
+//|                                                                   |
+//| out[count-1] is shift 1 (the bar that just closed) and out[0] is   |
+//| shift `count`. Same short-read-is-a-failure rule as ReadPair.      |
+//+------------------------------------------------------------------+
+bool ReadSeries(const int handle,const string name,const int count,double &out[])
+  {
+   ArraySetAsSeries(out,false);
+   const int copied = CopyBuffer(handle,0,1,count,out);
+   if(copied<count)
+     {
+      PrintFormat("%s not ready: CopyBuffer returned %d of %d (error %d)",
+                  name,copied,count,GetLastError());
+      return false;
+     }
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Did RSI visit the pullback band in the window, and has it left?    |
+//|                                                                   |
+//| THIS IS THE CHANGE THAT MADE THE EXPERT TRADE AT ALL.              |
+//|                                                                   |
+//| The first version required the dip and the recovery on two         |
+//| ADJACENT bars: rsi[2] inside the band and rsi[1] outside it. That  |
+//| is a single-bar coincidence, and stacked on the regime filter and  |
+//| the close confirm it produced two trades in three months of M5 -   |
+//| with the gates rejecting nothing. The signal simply almost never   |
+//| fired.                                                            |
+//|                                                                   |
+//| The rule it should always have been is the one the idea actually   |
+//| describes: price dipped RECENTLY and has now resumed. So the dip   |
+//| may sit anywhere in the last `window` closed bars while the        |
+//| recovery is still required on the bar that just closed. Nothing    |
+//| about the idea is loosened - a dip and a resumption are still both |
+//| required, in that order - only the demand that they be neighbours. |
+//|                                                                   |
+//| `window == 1` reproduces the original adjacent-bar rule exactly,   |
+//| which is what makes this a generalisation rather than a different  |
+//| signal wearing its name.                                           |
+//+------------------------------------------------------------------+
+bool DippedThenResumed(const double &rsi[],const int count,const double band,
+                       const bool longSide)
+  {
+//--- The recovery, on shift 1.
+   const double now = rsi[count-1];
+   if(longSide  && now <= band) return false;
+   if(!longSide && now >= band) return false;
+
+//--- The dip, anywhere in shifts 2..count.
+   for(int i=0; i<count-1; i++)
+     {
+      if(longSide  && rsi[i] <= band) return true;
+      if(!longSide && rsi[i] >= band) return true;
+     }
+   return false;
   }
 
 //+------------------------------------------------------------------+
@@ -328,6 +424,7 @@ int OnInit()
   {
    g_tf = (ENUM_TIMEFRAMES)_Period;
    DayGuardReset(g_day);
+   GateStatsReset(g_gate);
 
    if(InpEmaFast>=InpEmaSlow)
      {
@@ -351,6 +448,12 @@ int OnInit()
    if(InpRewardRisk<=0.0 || InpAtrStopMult<=0.0)
      {
       Print("FATAL: InpRewardRisk and InpAtrStopMult must both be positive");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpPullbackBars<1)
+     {
+      Print("FATAL: InpPullbackBars must be at least 1. 1 requires the dip and the "
+            "recovery on adjacent bars, which is the original rule.");
       return INIT_PARAMETERS_INCORRECT;
      }
    if(InpUseRiskSizing && InpRiskPercent<=0.0)
@@ -431,6 +534,8 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
+   GateStatsReport(g_gate);
+
    if(g_emaFastH!=INVALID_HANDLE) IndicatorRelease(g_emaFastH);
    if(g_emaSlowH!=INVALID_HANDLE) IndicatorRelease(g_emaSlowH);
    if(g_rsiH!=INVALID_HANDLE)     IndicatorRelease(g_rsiH);
@@ -462,11 +567,16 @@ void OnTick()
 //+------------------------------------------------------------------+
 void OnClosedBar()
   {
-   double emaFastPrev,emaFast, emaSlowPrev,emaSlow, rsiPrev,rsi, atrPrev,atr;
+   double emaFastPrev,emaFast, emaSlowPrev,emaSlow, atrPrev,atr;
    if(!ReadPair(g_emaFastH,"fast EMA",emaFastPrev,emaFast)) return;
    if(!ReadPair(g_emaSlowH,"slow EMA",emaSlowPrev,emaSlow)) return;
-   if(!ReadPair(g_rsiH,"RSI",rsiPrev,rsi))                  return;
    if(!ReadPair(g_atrH,"ATR",atrPrev,atr))                  return;
+
+   const int rsiCount = InpPullbackBars+1;
+   double rsi[];
+   if(!ReadSeries(g_rsiH,"RSI",rsiCount,rsi))
+      return;
+   const double rsiNow = rsi[rsiCount-1];
 
    const double close = iClose(_Symbol,g_tf,1);
    if(close<=0.0 || atr<=0.0)
@@ -491,59 +601,82 @@ void OnClosedBar()
 
    if(pos.exists)
       return;                  // one position at a time
-
    if(!InpAllowNewEntries)
       return;
 
-   string why = "";
-   if(!SessionAllowsEntry(now,InpSessionStart,InpSessionEnd,InpFridayEnd,why))
-      return;                  // silent: this is the common case, not an event
-
-   if(!DayGuardAllowsEntry(g_day,InpDailyLossLimit,InpDailyProfitTarget,InpMaxTradesPerDay))
-      return;                  // DayGuardAllowsEntry logs the halt once
-
-//--- 3. Regime. The chop filter is the main defence against paying the spread
-//---    forty times in a flat market.
+//--- 3. The signal is evaluated BEFORE the gates, which is the opposite of the
+//---    first version's order and is the whole point of the telemetry. With the
+//---    gates first, a bar that produced no signal and a bar whose signal was
+//---    refused both leave the same trace: nothing. Those two have opposite
+//---    fixes, and the first M5 run could not tell them apart - two trades, and
+//---    "entry suppressed" appearing zero times. Now every fired signal is
+//---    counted, and every refusal is counted against a reason.
    const double separation = MathAbs(emaFast-emaSlow);
-   if(InpMinSepAtr>0.0 && separation < InpMinSepAtr*atr)
-      return;
+   const bool   trending   = (InpMinSepAtr<=0.0) || (separation >= InpMinSepAtr*atr);
+   const bool   up         = trending && (emaFast > emaSlow);
+   const bool   down       = trending && (emaFast < emaSlow);
 
-   const bool up   = (emaFast > emaSlow);
-   const bool down = (emaFast < emaSlow);
-   if(!up && !down)
-      return;
+   const double shortBand  = 100.0-InpRsiPullback;
+   const bool   confirmL   = (!InpRequireCloseConfirm) || (close > emaFast);
+   const bool   confirmS   = (!InpRequireCloseConfirm) || (close < emaFast);
 
-//--- 4. Pullback, then resumption, then confirmation.
-   const double shortBand = 100.0-InpRsiPullback;
-   const bool longSignal  = up   && rsiPrev<=InpRsiPullback && rsi>InpRsiPullback && close>emaFast;
-   const bool shortSignal = down && rsiPrev>=shortBand      && rsi<shortBand      && close<emaFast;
+   const bool longSignal  = up   && confirmL &&
+                            DippedThenResumed(rsi,rsiCount,InpRsiPullback,true);
+   const bool shortSignal = down && confirmS &&
+                            DippedThenResumed(rsi,rsiCount,shortBand,false);
    if(!longSignal && !shortSignal)
       return;
 
-//--- 5. The live spread guard, before the bracket is even priced.
+   g_gate.signals++;
+
+//--- 4. Session.
+   string why = "";
+   if(!SessionAllowsEntry(now,InpSessionStart,InpSessionEnd,InpFridayEnd,why))
+     {
+      g_gate.outOfSession++;
+      return;                  // silent: this is the common case, not an event
+     }
+
+//--- 5. The daily budget.
+   if(!DayGuardAllowsEntry(g_day,InpDailyLossLimit,InpDailyProfitTarget,InpMaxTradesPerDay))
+     {
+      g_gate.dayHalted++;
+      return;                  // DayGuardAllowsEntry logs the halt once
+     }
+
+//--- 6. Cooldown. Only meaningful now that the signal fires often enough for
+//---    an immediate re-entry into the same losing condition to be possible.
+   if(InpCooldownBars>0)
+     {
+      const int since = BarsSinceLastExit(_Symbol,InpMagic,g_tf,now,3,1000000);
+      if(since < InpCooldownBars)
+        {
+         g_gate.cooldown++;
+         return;
+        }
+     }
+
+//--- 7. The live spread guard, before the bracket is even priced.
    if(InpMaxSpreadPoints>0)
      {
       const long spreadPoints = SymbolInfoInteger(_Symbol,SYMBOL_SPREAD);
       if(spreadPoints>InpMaxSpreadPoints)
         {
-         PrintFormat("entry suppressed: spread %d points is above the %d-point limit",
-                     (int)spreadPoints,InpMaxSpreadPoints);
+         g_gate.wideSpread++;
          return;
         }
      }
 
-//--- 6. The bracket, and with it the cost gate.
+//--- 8. The bracket, and with it the cost gate.
    const ScalpBracket bracket = BuildBracket(_Symbol,atr,InpAtrStopMult,InpRewardRisk,
                                              InpMinStopPoints,InpMinTpSpread);
    if(!bracket.valid)
      {
-      PrintFormat("entry suppressed: %s",bracket.reason);
+      g_gate.costGate++;
       return;
      }
-   if(bracket.reason!="")
-      Print(bracket.reason);
 
-//--- 7. Size it.
+//--- 9. Size it.
    double volume = g_trader.Lots();
    if(InpUseRiskSizing)
      {
@@ -551,6 +684,7 @@ void OnClosedBar()
       volume = g_trader.LotsForRisk(riskMoney,bracket.stopDistance);
       if(volume<=0.0)
         {
+         g_gate.sizing++;
          Print("entry suppressed: risk sizing produced no tradable volume. Not falling "
                "back to a default size - a sizing failure must not become a position.");
          return;
@@ -558,14 +692,12 @@ void OnClosedBar()
      }
 
    const ENUM_POSITION_TYPE side = longSignal ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
-   const string reason = StringFormat("pullback %s: rsi %.1f -> %.1f, close %s %s emaFast, "
-                                      "ema sep %.*f (%.2f ATR)",
-                                      (longSignal?"long":"short"),rsiPrev,rsi,
-                                      DoubleToString(close,g_trader.Digits()),
-                                      (longSignal?"above":"below"),
+   const string reason = StringFormat("pullback %s: rsi %.1f, ema sep %.*f (%.2f ATR)",
+                                      (longSignal?"long":"short"),rsiNow,
                                       g_trader.Digits(),separation,separation/atr);
 
-   g_trader.OpenBracket(side,volume,bracket.stopDistance,bracket.takeDistance,reason);
+   if(g_trader.OpenBracket(side,volume,bracket.stopDistance,bracket.takeDistance,reason))
+      g_gate.taken++;
   }
 
 //+------------------------------------------------------------------+

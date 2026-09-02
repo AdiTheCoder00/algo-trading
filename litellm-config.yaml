@@ -1,0 +1,9 @@
+model_list:
+  - model_name: nemotron-3-super
+    litellm_params:
+      model: openai/nvidia/nemotron-3-super-120b-a12b
+      api_base: https://integrate.api.nvidia.com/v1
+      api_key: os.environ/ALGO_NVIDIA_API_KEY
+      temperature: 1
+      top_p: 0.95
+      max_tokens: 16384

@@ -271,6 +271,108 @@ bool DayGuardAllowsEntry(DayGuard &g,const double lossLimit,const double profitT
   }
 
 //+------------------------------------------------------------------+
+//| COOLDOWN                                                          |
+//|                                                                   |
+//| Bars elapsed since our most recent exit, or `notFound` when there  |
+//| is no exit in the search window.                                   |
+//|                                                                   |
+//| Raising the entry rate raises the odds of the pathological case a  |
+//| slow strategy never meets: a stop-out, and an immediate re-entry   |
+//| on the very next bar into the same losing condition, repeatedly.   |
+//| One bar of enforced silence after an exit is what breaks that      |
+//| loop, and it costs a genuine signal at most one bar of lateness.   |
+//|                                                                   |
+//| Derived from deal history rather than a remembered timestamp, for  |
+//| the same reason the daily counters are: a recompile mid-session    |
+//| must not hand back a cooldown that had not elapsed.                |
+//+------------------------------------------------------------------+
+int BarsSinceLastExit(const string symbol,const long magic,const ENUM_TIMEFRAMES tf,
+                      const datetime now,const int lookbackDays,const int notFound)
+  {
+   const datetime from = now - (datetime)(lookbackDays*86400);
+   if(!HistorySelect(from,now+86400))
+      return notFound;
+
+   datetime latest = 0;
+   const int total = HistoryDealsTotal();
+   for(int i=total-1; i>=0; i--)
+     {
+      const ulong ticket = HistoryDealGetTicket(i);
+      if(ticket==0)
+         continue;
+      if(HistoryDealGetString(ticket,DEAL_SYMBOL)!=symbol)
+         continue;
+      if(HistoryDealGetInteger(ticket,DEAL_MAGIC)!=magic)
+         continue;
+      if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket,DEAL_ENTRY)==DEAL_ENTRY_IN)
+         continue;
+
+      const datetime when = (datetime)HistoryDealGetInteger(ticket,DEAL_TIME);
+      if(when>latest)
+         latest = when;
+     }
+
+   if(latest==0)
+      return notFound;
+
+   const int shift = iBarShift(symbol,tf,latest,false);
+   return (shift<0) ? notFound : shift;
+  }
+
+//+------------------------------------------------------------------+
+//| GATE TELEMETRY                                                    |
+//|                                                                   |
+//| Why entries did not happen, counted.                              |
+//|                                                                   |
+//| This exists because of what the first M5 run showed: two trades in |
+//| three months, and `entry suppressed` appearing zero times in the   |
+//| log. Without a count there was no way to tell a signal that never  |
+//| fired from a signal being refused at the gate - the two look       |
+//| identical from the outside and have opposite fixes. Printed at     |
+//| shutdown, so a Tester run ends by saying where its trades went.    |
+//+------------------------------------------------------------------+
+struct GateStats
+  {
+   int               signals;      // the entry rule fired
+   int               outOfSession;
+   int               dayHalted;
+   int               cooldown;
+   int               wideSpread;
+   int               costGate;
+   int               sizing;
+   int               taken;
+  };
+
+void GateStatsReset(GateStats &s)
+  {
+   s.signals      = 0;
+   s.outOfSession = 0;
+   s.dayHalted    = 0;
+   s.cooldown     = 0;
+   s.wideSpread   = 0;
+   s.costGate     = 0;
+   s.sizing       = 0;
+   s.taken        = 0;
+  }
+
+void GateStatsReport(const GateStats &s)
+  {
+   PrintFormat("--- where the entries went ---");
+   PrintFormat("  signals fired      %d", s.signals);
+   PrintFormat("  blocked: session   %d", s.outOfSession);
+   PrintFormat("  blocked: day halt  %d", s.dayHalted);
+   PrintFormat("  blocked: cooldown  %d", s.cooldown);
+   PrintFormat("  blocked: spread    %d", s.wideSpread);
+   PrintFormat("  blocked: cost gate %d", s.costGate);
+   PrintFormat("  blocked: sizing    %d", s.sizing);
+   PrintFormat("  TAKEN              %d", s.taken);
+   if(s.signals>0 && s.costGate>0)
+      PrintFormat("  the cost gate refused %.1f%% of all signals. That is the spread "
+                  "declining to be paid, not a bug.",
+                  100.0*s.costGate/(double)s.signals);
+  }
+
+//+------------------------------------------------------------------+
 //| THE BRACKET                                                       |
 //|                                                                   |
 //| Stop and target distances in price, derived from ATR and then     |
