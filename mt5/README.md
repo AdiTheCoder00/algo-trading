@@ -285,15 +285,77 @@ The risk unit `R` is recovered from the TP the bracket actually placed
 bars since entry. A recompile mid-trade therefore changes nothing about how the open
 position is managed, and there is no state file to go stale.
 
+### What it actually measured on M1
+
+XAUUSD M1, 2026.06.01–08.31, real-tick model, $10,000, 0.5% risk per trade,
+shipped defaults. Both columns are the same run with position management toggled:
+
+| | breakeven + trail ON | OFF |
+| --- | --- | --- |
+| Trades | 1,261 | 1,223 |
+| **Net** | **−$2,775.13** | **−$2,641.42** |
+| Profit factor | 0.91 | 0.92 |
+| Expected payoff | −$2.20 | −$2.16 |
+| Win rate | 47.82% | 42.4% |
+| Avg win / avg loss | 0.99 | 1.25 |
+| Max drawdown | 31.02% | 28.96% |
+
+Gate telemetry, first column: 3,451 signals fired, 2,086 blocked by the session
+window, 104 by cooldown, **0 by the cost gate**, **0 by the spread guard**, 1,261 taken.
+
+Three things that says, none of them encouraging:
+
+1. **It loses.** Profit factor 0.91 over 1,261 trades is not noise around break-even.
+2. **The position management is roughly neutral, not harmful.** Turning breakeven and
+   the trail off restores the reward:risk from 0.99 to 1.25 but drops the win rate from
+   47.8% to 42.4%. The effects cancel — profit factor moves 0.91 → 0.92.
+3. **Costs are the decisive term, exactly as D-124 said.** With management off the
+   realised reward:risk is 1.25 against a bracket *designed* at 1.5. At a 42.4% win rate
+   break-even needs 1.358, and the designed 1.5 would give a profit factor near 1.10.
+   The gap between 1.5 and 1.25 is the spread, and it is what turns a marginally
+   positive system negative.
+
+The cost gate refused nothing, and that is not a gate failure. `InpMinStopPoints = 80`
+floors the stop at 0.80, so the target is 1.20 against a ~0.22 spread — over the 3×
+threshold every time. The gate exists to catch a target that is *small relative to
+spread*; it cannot catch a system whose edge is merely thinner than its costs.
+
+**These numbers have not been tuned and should not be.** D-131's finding was that
+parameter optimisation on this data fits noise, and this is one instrument over one
+90-day window.
+
+### Beware the Strategy Tester's input cache
+
+The tester reuses the last input set it saved for an expert
+(`MQL5\Profiles\Tester\<Expert>.set`) in preference to the compiled defaults. After
+changing a default in the `.mq5`, a re-run silently uses the **stale** value for every
+pre-existing input while newly added inputs take their compiled value — a hybrid
+matching neither the source nor any set file. Delete that `.set` (and the
+`<Expert>.<Symbol>.<Period>.*.ini` beside it) before trusting a run. The expert prints
+its full configuration on init precisely so this is visible in the log.
+
 ### Suggested starting point, and what to do with it
 
-M5 on XAUUSD, defaults as shipped, `InpDailyLossLimit` set to something you would actually
-be willing to lose in a day. Then **Strategy Tester on real ticks** — "Every tick based on
-real ticks", not "1 minute OHLC", because a modelling mode that interpolates inside the bar
-cannot tell you whether a bracket a few ATR-tenths wide was hit stop-first or target-first,
-which is the entire question. Demo after that. `algo significance` and the walk-forward
-exist for the same reason they do for the ports: D-131's finding was that parameter
-optimisation on this data fits noise, and a scalper has more parameters, not fewer.
+The shipped defaults are M1 defaults, and M1 is where it was measured — badly. Do not put
+this on a demo account expecting the numbers to improve. `InpDailyLossLimit` still ships at
+0 and needs setting to something you would actually be willing to lose in a day before the
+expert runs anywhere.
+
+Use **"Every tick based on real ticks"**, not "1 minute OHLC" — a model that interpolates
+inside the bar cannot tell you whether a bracket a few ATR-tenths wide was hit stop-first
+or target-first, which is the entire question. Note that this broker retains only about
+five days of XAUUSD tick history (`real ticks begin from …` in the tester log); everything
+earlier is synthesized from M1 bars even when the real-tick model is selected, so a long
+window is not as honest as the model name suggests.
+
+`algo significance` and the walk-forward exist for the same reason they do for the ports:
+D-131's finding was that parameter optimisation on this data fits noise, and a scalper has
+more parameters, not fewer.
+
+If you want to keep going with this, the productive direction is not sweeping these
+inputs. It is finding an entry whose *designed* reward:risk survives the ~0.22 spread —
+which on M1 means either a materially higher win rate or a wider target, and a wider
+target is a slower timeframe wearing a scalper's name.
 
 `GoldTimeframeNote` will warn every time you attach this below M15. That warning is
 correct and is left in deliberately.

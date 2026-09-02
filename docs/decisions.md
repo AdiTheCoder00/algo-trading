@@ -2868,6 +2868,86 @@ learned from. Real-tick Tester first, and specifically **not** 1-minute OHLC
 modelling: interpolation inside the bar cannot say whether a bracket this
 narrow was hit stop-first or target-first, which is the entire question.
 
+### D-139 - The scalper now trades 1,261 times instead of 2, and loses money doing it
+
+You asked it to trade more, and to work on M1. Both done. The result is
+negative and this entry records it rather than tuning until it is not.
+
+**Why it only traded twice.** The first M5 run took two trades in three months.
+The cause was not the gates - it was a four-way conjunction resting on a
+*single-bar coincidence*: the RSI dip on shift 2 and the recovery on shift 1,
+adjacent bars, plus the regime filter and the close confirm on top.
+
+`InpPullbackBars` generalises it to what the idea always described - price
+dipped RECENTLY and has now resumed. The dip may sit anywhere in the last N
+closed bars; the recovery is still required on the bar that just closed, and
+both are still required in that order. **`InpPullbackBars = 1` reproduces the
+old rule exactly**, which is what makes this a generalisation rather than a
+different signal wearing the same name.
+
+**Telemetry, because "nothing happened" had two meanings.** The M5 run could
+not distinguish a signal that never fired from a signal refused at a gate -
+both leave no trace, and they have opposite fixes. `GateStats` counts every
+fired signal and every refusal by reason, and prints at shutdown. It answered
+the question immediately on the next run and should have existed from the
+start.
+
+**Measured, M1, XAUUSD, 2026.06.01-08.31, $10,000, 0.5% risk:**
+
+| | breakeven+trail ON | OFF |
+|---|---|---|
+| Trades | 1,261 | 1,223 |
+| Net | **-$2,775.13** | **-$2,641.42** |
+| Profit factor | 0.91 | 0.92 |
+| Expected payoff | -$2.20 | -$2.16 |
+| Win rate | 47.82% | 42.4% |
+| Avg win / avg loss | 45.26 / -45.69 = **0.99** | 58.68 / -46.86 = **1.25** |
+| Max drawdown | 31.02% | 28.96% |
+
+Gate telemetry for the first column: 3,451 signals, 2,086 blocked by the
+session window, 104 by cooldown, **0 by the cost gate and 0 by the spread
+guard**, 1,261 taken.
+
+**A diagnosis I got wrong, and the run that corrected it.** Seeing avg win
+0.99x avg loss against a bracket designed at 1.5R, I concluded the breakeven
+and the trail were cutting winners short and destroying the reward side. The
+control run says otherwise: turning both off *did* restore the ratio to 1.25,
+but the win rate fell 47.8% -> 42.4% and the two effects cancelled almost
+exactly. Profit factor moved 0.91 -> 0.92. **The management is roughly neutral,
+not harmful** - it trades win rate for reward at close to fair odds.
+
+**What is actually wrong is the thing D-124 said would be wrong.** With
+management off the realised reward:risk is 1.25 against a designed 1.5. That
+0.25 shortfall is the cost drag, and it is decisive: at a 42.4% win rate
+break-even needs 1.358, and the *designed* 1.5 would give a profit factor near
+1.10. Costs turn a marginally-positive system into a 0.92 one. That is D-124's
+"trade count roughly halves per step while the spread is charged per round
+trip", reproduced at the frequency this expert was asked to run at.
+
+**The cost gate did not save it, and that is not a gate failure.** It refused
+nothing because `InpMinStopPoints = 80` floors the stop at 0.80, so the target
+is 1.20 against a ~0.22 spread - comfortably over the 3x threshold on every
+trade. The gate catches trades whose target is small relative to spread; it
+cannot catch a system whose edge is merely *thinner* than its costs. Those are
+different failures and only the first has a gate.
+
+**Not tuned further, deliberately.** The obvious move is to sweep the
+thresholds until the curve turns up. D-131's finding was that parameter
+optimisation on this data fits noise, and this is one instrument on one
+90-day window with the trending period included. A profit factor of 0.91
+across 1,261 trades is not a near miss to be optimised across; it is the
+measurement saying this signal does not clear costs at M1 frequency.
+
+**An operational trap worth its own paragraph.** The first M1 run reported
+`EMA(21/50) + RSI(14) | cost gate 4.0x` - the *old* defaults - because the
+Strategy Tester silently reuses the last input set it saved for an expert
+(`MQL5\Profiles\Tester\<Expert>.set`) in preference to the compiled defaults.
+Newly added inputs take their compiled value while every pre-existing one keeps
+the stale saved value, so the run is a hybrid that matches neither the source
+nor any set file. Changing a default in `.mq5` and re-running proves nothing
+until that cache is cleared. The expert prints its whole configuration on init
+for exactly this reason; that banner is what caught it.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting
