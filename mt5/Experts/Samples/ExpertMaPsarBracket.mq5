@@ -61,8 +61,9 @@
 #property link      "https://www.mql5.com"
 #property version   "1.00"
 #property description "ExpertMAPSAR with an explicit stop loss and take profit."
-#property description "Units are adjusted points (pips); resolved price distances"
-#property description "are printed on init and validated against the broker minimum."
+#property description "DO NOT TRADE: measured at profit factor 1.06/0.77/0.81 on M1 and"
+#property description "0.90/0.58/1.04 on M15 across three XAUUSD windows - no edge (D-142)."
+#property description "The bracket, gates and pre-flight are the reusable part."
 //+------------------------------------------------------------------+
 //| Include                                                          |
 //+------------------------------------------------------------------+
@@ -70,6 +71,10 @@
 #include <Expert\Signal\SignalMA.mqh>
 #include <Expert\Trailing\TrailingParabolicSAR.mqh>
 #include <Expert\Money\MoneyNone.mqh>
+//--- The cost-side gates from the AlgoGold work. Reused rather than rewritten:
+//--- they are the one part of D-140 that survived, and a second copy would be
+//--- the "two copies that quietly drift" hazard mt5/README.md warns about.
+#include <AlgoGold\ScalpFilters.mqh>
 //+------------------------------------------------------------------+
 //| Inputs                                                           |
 //+------------------------------------------------------------------+
@@ -110,10 +115,100 @@ input int                Inp_Signal_Pattern_3             =60;      // piercing
 //--- inputs for trailing
 input double             Inp_Trailing_ParabolicSAR_Step   =0.02;
 input double             Inp_Trailing_ParabolicSAR_Maximum=0.2;
+//--- Cost and exposure gates.
+//---
+//--- ALL DEFAULT TO OFF, so the expert's measured behaviour is unchanged until
+//--- they are switched on. That is deliberate: D-142 recorded this strategy at
+//--- profit factor 1.06 / 0.77 / 0.81 across three windows, and a filter set
+//--- that silently altered the baseline would make the comparison worthless.
+//---
+//--- These are not tuning knobs for the SIGNAL. They exist because every result
+//--- in this repo keeps landing on the same cause - the spread is charged per
+//--- round trip and dominates gross P&L (D-124, D-139, D-140, D-141). A signal
+//--- with no edge cannot be rescued by them; a signal with a thin one can be
+//--- destroyed by their absence. Turning them on is testable either way.
+input group "--- Cost gates (all 0/off by default - see the header) ---"
+input int                Inp_Filter_MaxSpreadPoints       =0;       // Block entries above this spread, points. 0 = off
+input double             Inp_Filter_MinTpSpreadMult       =0.0;     // Target must clear this many spreads. 0 = off
+input int                Inp_Filter_CooldownBars          =0;       // Bars of silence after an exit. 0 = off
+input group "--- Session (SERVER hours; start==end means all day) ---"
+input int                Inp_Filter_SessionStart          =0;       // Entries allowed from this server hour
+input int                Inp_Filter_SessionEnd            =0;       // ...until this one
+input int                Inp_Filter_FridayEnd             =-1;      // No entries Friday from here. -1 = off
+input group "--- Daily governors ---"
+input double             Inp_Filter_DailyLossLimit        =0.0;     // Halt for the day at this realised loss. 0 = off
+input int                Inp_Filter_MaxTradesPerDay       =0;       // Halt after this many entries. 0 = off
 //+------------------------------------------------------------------+
 //| Global expert object                                             |
 //+------------------------------------------------------------------+
-CExpert ExtExpert;
+CExpert  ExtExpert;
+DayGuard ExtDay;
+//+------------------------------------------------------------------+
+//| CSignalMA with the cost gates applied.                            |
+//|                                                                   |
+//| Overriding the two vote methods is the right seam: CExpertSignal  |
+//| sums the models' weights and compares against threshold_open, so  |
+//| returning 0 suppresses the entry without touching the rest of the |
+//| framework's ordering, sizing or trailing.                         |
+//|                                                                   |
+//| Only ENTRIES are gated. Nothing here can block an exit - refusing  |
+//| to leave a position because leaving is expensive is how a small   |
+//| loss becomes a large one, and CExpert's close path never consults |
+//| these methods anyway.                                             |
+//+------------------------------------------------------------------+
+class CFilteredSignalMA : public CSignalMA
+  {
+private:
+   bool              EntryAllowed(void);
+public:
+   virtual int       LongCondition(void)  { return EntryAllowed() ? CSignalMA::LongCondition()  : 0; }
+   virtual int       ShortCondition(void) { return EntryAllowed() ? CSignalMA::ShortCondition() : 0; }
+  };
+//+------------------------------------------------------------------+
+//| Every gate, in the order that makes the cheapest check first.     |
+//+------------------------------------------------------------------+
+bool CFilteredSignalMA::EntryAllowed(void)
+  {
+   const datetime now = TimeCurrent();
+//--- session
+   if(Inp_Filter_SessionStart != Inp_Filter_SessionEnd || Inp_Filter_FridayEnd >= 0)
+     {
+      string why="";
+      if(!SessionAllowsEntry(now,Inp_Filter_SessionStart,Inp_Filter_SessionEnd,
+                             Inp_Filter_FridayEnd,why))
+         return false;
+     }
+//--- live spread
+   if(Inp_Filter_MaxSpreadPoints > 0)
+     {
+      if(SymbolInfoInteger(_Symbol,SYMBOL_SPREAD) > Inp_Filter_MaxSpreadPoints)
+         return false;
+     }
+//--- cost gate: is the target even worth the spread it must pay?
+   if(Inp_Filter_MinTpSpreadMult > 0.0 && Inp_Signal_TakeLevel > 0)
+     {
+      const double spread = SpreadPrice(_Symbol);
+      const double target = Inp_Signal_TakeLevel * AdjustedPoint();
+      if(spread > 0.0 && target < spread*Inp_Filter_MinTpSpreadMult)
+         return false;
+     }
+//--- cooldown, derived from deal history so a reload cannot reset it
+   if(Inp_Filter_CooldownBars > 0)
+     {
+      const int since = BarsSinceLastExit(_Symbol,Expert_MagicNumber,(ENUM_TIMEFRAMES)_Period,
+                                          now,3,1000000);
+      if(since < Inp_Filter_CooldownBars)
+         return false;
+     }
+//--- daily budget
+   if(Inp_Filter_DailyLossLimit > 0.0 || Inp_Filter_MaxTradesPerDay > 0)
+     {
+      DayGuardRefresh(ExtDay,_Symbol,Expert_MagicNumber,now);
+      if(!DayGuardAllowsEntry(ExtDay,Inp_Filter_DailyLossLimit,0.0,Inp_Filter_MaxTradesPerDay))
+         return false;
+     }
+   return true;
+  }
 //+------------------------------------------------------------------+
 //| The same unit CExpert::Init will compute, so the value printed   |
 //| and validated here is the one actually used.                     |
@@ -180,6 +275,21 @@ int OnInit(void)
 //--- fails loudly at attach instead of silently at every order.
    if(!ValidateBracket())
       return(INIT_PARAMETERS_INCORRECT);
+   DayGuardReset(ExtDay);
+//--- Say which gates are live. A filter that is silently off looks exactly like
+//--- a filter that is on and never triggers, and this session has paid for that
+//--- confusion enough times.
+   PrintFormat("  gates: spread<=%d pts | tp>=%.1fx spread | cooldown %d bars | "
+               "session %02d:00-%02d:00 (friday %d) | daily loss %.2f | max trades %d",
+               Inp_Filter_MaxSpreadPoints,Inp_Filter_MinTpSpreadMult,Inp_Filter_CooldownBars,
+               Inp_Filter_SessionStart,Inp_Filter_SessionEnd,Inp_Filter_FridayEnd,
+               Inp_Filter_DailyLossLimit,Inp_Filter_MaxTradesPerDay);
+   if(Inp_Filter_MaxSpreadPoints==0 && Inp_Filter_MinTpSpreadMult<=0.0 &&
+      Inp_Filter_CooldownBars==0 && Inp_Filter_DailyLossLimit<=0.0 &&
+      Inp_Filter_MaxTradesPerDay==0 &&
+      Inp_Filter_SessionStart==Inp_Filter_SessionEnd && Inp_Filter_FridayEnd<0)
+      Print("  ALL GATES OFF - this is the unfiltered baseline (D-142: PF 1.06 / "
+            "0.77 / 0.81 across three windows, i.e. no edge)");
 //--- Initializing expert
    if(!ExtExpert.Init(Symbol(),Period(),Expert_EveryTick,Expert_MagicNumber))
      {
@@ -188,7 +298,7 @@ int OnInit(void)
       return(-1);
      }
 //--- Creation of signal object
-   CSignalMA *signal=new CSignalMA;
+   CFilteredSignalMA *signal=new CFilteredSignalMA;
    if(signal==NULL)
      {
       printf(__FUNCTION__+": error creating signal");

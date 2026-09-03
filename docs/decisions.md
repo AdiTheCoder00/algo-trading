@@ -3109,6 +3109,116 @@ rather than a fault. Where a measurement can fail silently, it needs a positive
 signal that it ran - which is the same argument the gate telemetry in D-139
 already made, now paid for three more times.
 
+### D-142 - Adding a stop to ExpertMAPSAR fixed the risk and revealed there was no edge
+
+You asked for a stop loss and take profit on the MetaQuotes `ExpertMAPSAR`
+sample. Added as `mt5/Experts/Samples/ExpertMaPsarBracket.mq5` (magic 14599, a
+new file - the stock sample stays as shipped). The bracket works. The strategy
+does not.
+
+**The sample has no stop and no target, and nothing in its `.mq5` says so.**
+`CExpertSignal`'s constructor sets `m_stop_level(0.0)`/`m_take_level(0.0)`, and
+`OpenLongParams` does `sl = (m_stop_level==0.0) ? 0.0 : ...`, so every order
+goes out with `sl=0 tp=0`. Worse, `CTrailingPSAR::CheckTrailingStopLong` uses
+`base = (pos_sl==0.0) ? PriceOpen() : pos_sl` - with no initial stop, `base` IS
+the entry, so the trail can only move the stop *above entry* and a position
+going straight against you is unprotected until the opposite signal.
+
+**Pattern 0 makes a bracketed version churn.** `CSignalMA` votes with four
+models; pattern 0 - "price is on the necessary side of the indicator" - is a
+persistent STATE whose default weight of 80 clears `threshold_open` 50 alone.
+Unbracketed that is harmless (one position, held). Bracketed it is not: stop
+out, state still true, re-enter next bar. Measured on XAUUSD M1 2026.06-08:
+
+| | Trades | PF | Net | bal DD | eq DD | max loss |
+|---|---|---|---|---|---|---|
+| stock, no bracket | 51 | 1.69 | +117.87 | 1.17% | 5.82% | -119.93 |
+| bracket, pattern 0 on | 4,936 | 0.88 | -1,173.84 | 11.94% | 11.96% | -38.26 |
+| bracket, pattern 0 off | 1,405 | **1.06** | +142.41 | 1.15% | 1.17% | -5.95 |
+
+Patterns 1/2/3 are crossings and piercings - events - so disabling pattern 0
+keeps the bracket without the churn. That was predicted from reading the source
+before running it, not found by sweeping.
+
+**And it does not survive out-of-sample.** The pattern_0 choice was still made
+after seeing the window above, so the window above is in-sample:
+
+| bracket, pattern 0 off | Trades | PF | Net |
+|---|---|---|---|
+| 2026.06-08 (in-sample) | 1,405 | 1.06 | +142.41 |
+| 2026.01-05 | 554 | **0.77** | -296.36 |
+| 2025.06-12 | 717 | **0.81** | -157.16 |
+
+**The 1.06 was the window doing the work.** No edge. Same conclusion as D-140
+reached for our own scalper, by the same route.
+
+**The stock sample is not merely edgeless, it is dangerous.** PF 1.69, then
+11.06, then 0.10 across the three windows on 51/56/33 trades, and in 2025H2 a
+**single trade lost $1,013 on a $10,000 account**. Its equity drawdown runs
+12-18x its balance drawdown in two of three windows (0.69% balance against
+12.60% equity in 2026H1). That is the unrealised-loss signature D-141 used to
+disqualify `Quantum Athena` and `MoonDog`, and it is what produces a 94% win
+rate: it does not close losers. **Its own largest loss exceeds its entire net
+profit in the one window where it made money.**
+
+**What the bracket actually bought, since the strategy is a write-off:**
+
+| | stock | bracketed |
+|---|---|---|
+| worst single loss | -$1,013.11 | -$37.87 |
+| equity vs balance DD | up to 18x gap | 1.01x |
+
+A 27x smaller worst case and no hidden unrealised risk. A stop cannot
+manufacture edge; it can stop a bad strategy from being catastrophic, and it
+makes the absence of edge *visible* instead of hidden behind a win rate.
+
+**Gap risk, measured rather than assumed.** The bracketed runs' worst losses
+were -$37.87 and -$15.04 against a $4.00 stop at 0.01 lots - price jumping the
+stop over a weekend or on a spike, **4-9x the intended risk when it happens**.
+Rare (2 of 3,286 losing exits in-sample) but real, and the same exposure D-141
+flagged as AGS's unverifiable assumption.
+
+**One harness bug worth recording**, since it wasted a run and is easy to
+repeat: clearing the tester cache with `Get-ChildItem -Filter "$leaf*"` is
+case-insensitive AND prefix-based, so clearing `ExpertMAPSAR*` also deleted
+`ExpertMaPsarBracket.set`. Matching `"$leaf.*"` - with the dot - keeps them
+apart. Related: a PowerShell function that both `Write-Output`s and returns a
+value folds the output INTO the return value, so the confirmation line never
+printed and the run's inputs had to be verified from the `.set` afterwards.
+
+**Asked to make it tradable; it cannot be, and this is where that stops.**
+Two changes were added, both principled rather than searched:
+
+- **The cost gates** - spread cap, target-vs-spread ratio, session window,
+  cooldown, daily loss limit and trade cap - reusing `ScalpFilters.mqh` rather
+  than a second copy. All default to OFF so the measured baseline above is
+  unchanged, and the expert prints which gates are live on init, because a
+  filter that is silently off looks exactly like one that never triggers.
+- **The timeframe**, tested as a hypothesis. D-124 established slower-is-better
+  on different strategies before this expert existed - trade count roughly
+  halves per step while spread is charged per round trip - so M15 is a
+  prediction, not a knob.
+
+| XAUUSD | M1 | M15 |
+|---|---|---|
+| 2026.06-08 | 1.06 | 0.90 |
+| 2026.01-05 | 0.77 | **0.58** |
+| 2025.06-12 | 0.81 | 1.04 |
+
+**Six window-configurations, scattered around break-even with no consistency.**
+The timeframe hypothesis was a fair test and it failed. Trying M30, H1, H4
+until one came back above 1.0 would be D-131's finding repeated deliberately,
+so it was not done. `CSignalMA` on XAUUSD has no edge this repo can find, and
+no bracket, gate or interval fixes that.
+
+**What the work is actually worth keeping for.** The signal is a write-off; the
+scaffolding is not. The bracket, the `STOPS_LEVEL` pre-flight that refuses to
+start rather than send orders that will all be rejected (D-141), the gates, and
+the init banner that states its own configuration are all signal-agnostic and
+reusable. That is the same split D-140 reached for `GoldIntradayScalper`: the
+machinery survived, the entry rule did not. Two independent strategies now,
+same verdict, same cause.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting
