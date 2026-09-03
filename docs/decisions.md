@@ -3219,6 +3219,68 @@ reusable. That is the same split D-140 reached for `GoldIntradayScalper`: the
 machinery survived, the entry rule did not. Two independent strategies now,
 same verdict, same cause.
 
+### D-143 - The grid made it five times worse while raising the win rate
+
+You asked for a scale-in ladder on GoldTrendlineBreakout: add on the same side
+at every $5 of loss, up to 5 positions, lot x1.25 each add, close the basket at
+$2 combined profit. Built as `dda3486` and measured. It is now DISABLED, and
+this records why.
+
+**Controlled before/after.** Same expert, same symbols, same window
+(2026.06.01-08.31), same M15, real ticks, $10,000. The only change is the grid:
+
+| | trades | PF | net | max DD | win rate |
+|---|---|---|---|---|---|
+| FixedVol100, single position | 1,166 | 0.83 | -$1,385 | 14.57% | 39.5% |
+| FixedVol100, **with grid** | 3,246 | **0.50** | **-$7,191** | **73.65%** | **55.7%** |
+| BTCUSD, single position | 708 | 0.67 | -$1,460 | 14.93% | 41.4% |
+| BTCUSD, **with grid** | 2,509 | **0.39** | **-$6,527** | **65.40%** | 48.3% |
+
+**Roughly 5x the loss and a 15% drawdown turned into 65-74%.**
+
+**The win rate went UP while the account did far worse** - 39.5% to 55.7% on
+FixedVol100. That is the whole grid trade in one number: the adds pull the
+average entry toward price, so baskets resolve profitably more often, and the
+ones that do not resolve cost several positions instead of one. It is the same
+signature D-141 used to disqualify `Quantum Athena` and `MoonDog`, reproduced
+here deliberately and measured rather than inferred.
+
+**A behaviour worth recording.** The tester log shows `scale-in 5 of 5` firing
+three times inside one basket. The cap is on CONCURRENT positions, not total
+adds: when one of the five closes on its own bracket a slot frees and the ladder
+refills it. So the init banner's "WORST CASE ... about 83.34" is the worst case
+at any INSTANT, not the most a single basket can lose over its life. The banner
+wording is accurate but easy to read as the stronger claim.
+
+**Timeframe, measured on the same runs.** Before the grid existed:
+
+| | trades | PF | net | max DD |
+|---|---|---|---|---|
+| FixedVol100 M1 | 9,789 | 0.78 | **-$10,004** | **100.05%** |
+| FixedVol100 M15 | 1,166 | 0.83 | -$1,385 | 14.57% |
+| BTCUSD M15 | 708 | 0.67 | -$1,460 | 14.93% |
+| BTCUSD M1 | 0 | - | - | - |
+
+**M1 lost the entire account** - 100.05% drawdown on a $10,000 deposit across
+9,789 trades in three months. Both charts were moved to M15 on that basis.
+D-124's finding again, now on two more instruments.
+
+BTCUSD M1 returning zero trades is UNEXPLAINED. The report is genuine (22 KB
+against megabytes for the others) and the run completed; I did not determine the
+cause and am not claiming one.
+
+**What is running now**, after disabling: M15, bracket attached at entry at
+1.5:1, money trail arming at $5, salvage at $5 adverse -> exit at $2, scale-in
+OFF, basket exit OFF. That is within a salvage rule of the configuration that
+measured 0.83 and 0.67 - still losing, but survivable rather than
+account-ending.
+
+**The strategy underneath is unchanged and still has no edge.** PF 0.07 on M1
+gold (D-140), 0.78-0.83 on FixedVol100, 0.67 on BTCUSD. Every exit mechanism
+added over this session - bracket, points, money, trail, salvage, grid - changes
+the SHAPE of the outcome distribution. None of them changed the sign. A grid on
+a losing signal wins more often and loses more.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting
