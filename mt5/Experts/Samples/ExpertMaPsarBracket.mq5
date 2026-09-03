@@ -86,6 +86,27 @@ input ENUM_APPLIED_PRICE Inp_Signal_MA_Applied            =PRICE_CLOSE;
 input group "--- Bracket (adjusted points = pips, NOT raw points) ---"
 input int                Inp_Signal_StopLevel             =400;     // Stop loss. 0 = none (the stock sample's behaviour)
 input int                Inp_Signal_TakeLevel             =800;     // Take profit. 0 = none
+//--- Pattern weights, exposed because pattern 0 interacts badly with a stop.
+//---
+//--- CSignalMA votes with four models. Pattern 0 - "price is on the necessary
+//--- side of the indicator" - is a persistent STATE, not an event, and its
+//--- default weight of 80 clears CExpertSignal's threshold_open of 50 on its
+//--- own. Without a stop that is harmless: one position is opened and held
+//--- until the opposite signal. With a stop it is not: the position is stopped
+//--- out, the state is still true, and it re-enters immediately.
+//---
+//--- Measured on XAUUSD M1 2026.06-08: the same expert took 51 trades with no
+//--- bracket and 4,936 with one, and the difference was almost entirely this.
+//--- 4,936 round trips at ~$0.28 spread is ~$1,382 of cost against a gross
+//--- result near +$208.
+//---
+//--- Patterns 1/2/3 are crossings and piercings - events, which fire once - so
+//--- setting Pattern_0 to 0 is the way to keep the bracket without the churn.
+input group "--- Signal pattern weights (library defaults 80/10/60/60) ---"
+input int                Inp_Signal_Pattern_0             =80;      // "price on the right side of MA" - a STATE. 0 disables
+input int                Inp_Signal_Pattern_1             =10;      // crossed with opposite direction
+input int                Inp_Signal_Pattern_2             =60;      // crossed with same direction
+input int                Inp_Signal_Pattern_3             =60;      // piercing
 //--- inputs for trailing
 input double             Inp_Trailing_ParabolicSAR_Step   =0.02;
 input double             Inp_Trailing_ParabolicSAR_Maximum=0.2;
@@ -191,6 +212,15 @@ int OnInit(void)
 //--- sl and tp. Left at 0 they produce sl=0/tp=0, which is the stock behaviour.
    signal.StopLevel(Inp_Signal_StopLevel);
    signal.TakeLevel(Inp_Signal_TakeLevel);
+//--- Pattern weights. Setting Pattern_0 to 0 removes the state-based entry that
+//--- makes a stopped-out position re-enter on the very next bar.
+   signal.Pattern_0(Inp_Signal_Pattern_0);
+   signal.Pattern_1(Inp_Signal_Pattern_1);
+   signal.Pattern_2(Inp_Signal_Pattern_2);
+   signal.Pattern_3(Inp_Signal_Pattern_3);
+   if(Inp_Signal_Pattern_0==0)
+      Print("  pattern 0 disabled - entries come only from crossings/piercings, "
+            "so a stop-out cannot immediately re-enter on a still-true state");
 //--- Check signal parameters
    if(!signal.ValidationSettings())
      {
