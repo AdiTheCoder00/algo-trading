@@ -92,6 +92,25 @@ input bool   InpBracketAtEntry    = true;    // Attach SL/TP to the ENTRY order,
 //--- point-based stop on the very next bar with a different level.
 input int    InpStopLossPoints    = 0;       // Stop in POINTS. >0 overrides InpStopLossPct
 input int    InpTakeProfitPoints  = 0;       // Target in POINTS. >0 overrides InpTakeProfitPct
+//--- Target as a MONEY amount, in account currency. Highest precedence of all.
+//---
+//--- Precedence: money > points > percent. The first non-zero one wins, so the
+//--- others can be left set as fallbacks without ambiguity.
+//---
+//--- The conversion depends on VOLUME, which the other two do not:
+//---     money per 1.0 price move = (tick_value / tick_size) * lots
+//---     distance                 = InpTakeProfitTargetMoney / that
+//--- so changing InpLots silently changes the price distance this produces.
+//--- That is inherent to asking for a money target, not a flaw - but it means
+//--- the resolved distance has to be read from the init banner rather than
+//--- assumed, and re-read after any lot change.
+//---
+//--- Worked example on FixedVol100 at 1.2 lots: tick_value 0.001 and tick_size
+//--- 0.001 give 1.0 per price per lot, so 1.2 per price. A $20 target is a
+//--- 16.67 price move. On XAUUSD at 0.05 lots it is (1.0/0.01)*0.05 = 5.0 per
+//--- price, so the same $20 is a 4.00 move. Same input, very different trade.
+input double InpStopLossMoney     = 0.0;     // Stop as LOSS in account currency. >0 overrides points and percent
+input double InpTakeProfitMoney   = 0.0;     // Target as PROFIT in account currency. >0 overrides both above
 
 input group "--- Execution ---"
 input double InpLots              = 1.00;    // Volume in MT5 LOTS (1.00 = 100 oz = Python default)
@@ -127,8 +146,36 @@ int WarmupBars()
 //| once and then behaves identically. Without this the entry would    |
 //| use points and the next bar would overwrite it with the percent.   |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Money moved per 1.0 of PRICE, at the configured volume.           |
+//|                                                                   |
+//| Via tick_value/tick_size rather than contract size, because tick   |
+//| value is already denominated in the ACCOUNT currency - the         |
+//| contract-size route is right only while quote and account currency |
+//| coincide. Returns 0 when the symbol reports nothing usable, and    |
+//| every caller treats that as "fall through to the next unit"        |
+//| rather than inventing a distance.                                  |
+//+------------------------------------------------------------------+
+double MoneyPerPrice()
+  {
+   const double tickValue = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+   const double tickSize  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   const double lots      = g_trader.Lots();
+   if(tickValue<=0.0 || tickSize<=0.0 || lots<=0.0)
+      return 0.0;
+   return (tickValue/tickSize)*lots;
+  }
+
 double EffectiveStopPct(const double refPrice)
   {
+   if(InpStopLossMoney > 0.0 && refPrice > 0.0)
+     {
+      const double perPrice = MoneyPerPrice();
+      if(perPrice > 0.0)
+         return (InpStopLossMoney/perPrice)/refPrice*100.0;
+      Print("WARNING: InpStopLossMoney set but the symbol reports no usable tick "
+            "value - falling back to points/percent");
+     }
    if(InpStopLossPoints > 0 && refPrice > 0.0)
       return InpStopLossPoints*_Point/refPrice*100.0;
    return InpStopLossPct;
@@ -141,11 +188,35 @@ double EffectiveStopPct(const double refPrice)
 //+------------------------------------------------------------------+
 double TakeDistancePrice(const double refPrice)
   {
+   if(InpTakeProfitMoney > 0.0)
+     {
+      const double perPrice = MoneyPerPrice();
+      if(perPrice > 0.0)
+         return InpTakeProfitMoney/perPrice;
+      Print("WARNING: InpTakeProfitMoney set but the symbol reports no usable tick "
+            "value - falling back to points/percent");
+     }
    if(InpTakeProfitPoints > 0)
       return InpTakeProfitPoints*_Point;
    if(InpTakeProfitPct > 0.0 && refPrice > 0.0)
       return refPrice*InpTakeProfitPct/100.0;
    return 0.0;
+  }
+
+//+------------------------------------------------------------------+
+//| Which unit is actually in force, for the init banner.             |
+//+------------------------------------------------------------------+
+string StopUnitName()
+  {
+   if(InpStopLossMoney  > 0.0) return StringFormat("%.2f money",InpStopLossMoney);
+   if(InpStopLossPoints > 0)   return StringFormat("%d points",InpStopLossPoints);
+   return StringFormat("%.2f%%",InpStopLossPct);
+  }
+string TakeUnitName()
+  {
+   if(InpTakeProfitMoney  > 0.0) return StringFormat("%.2f money",InpTakeProfitMoney);
+   if(InpTakeProfitPoints > 0)   return StringFormat("%d points",InpTakeProfitPoints);
+   return StringFormat("%.2f%%",InpTakeProfitPct);
   }
 
 //+------------------------------------------------------------------+
@@ -164,6 +235,16 @@ int OnInit()
    if(InpTakeProfitPct<0.0)
      {
       Print("FATAL: InpTakeProfitPct cannot be negative");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpStopLossMoney<0.0 || InpTakeProfitMoney<0.0)
+     {
+      Print("FATAL: money stop/target cannot be negative");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpStopLossPoints<0 || InpTakeProfitPoints<0)
+     {
+      Print("FATAL: point stop/target cannot be negative");
       return INIT_PARAMETERS_INCORRECT;
      }
    if(!GoldPreflight(InpMagic,InpStopLossPct,InpTrailActivationPct,InpTrailPct))
@@ -189,15 +270,26 @@ int OnInit()
       const double tpNow  = TakeDistancePrice(price);
       PrintFormat("bracket at %.2f: stop %.*f (%s), target %.*f (%s), broker minimum %.*f (%d points)",
                   price,
-                  digits,slNow,(InpStopLossPoints>0
-                                ? StringFormat("%d points",InpStopLossPoints)
-                                : StringFormat("%.2f%%",InpStopLossPct)),
-                  digits,tpNow,(InpTakeProfitPoints>0
-                                ? StringFormat("%d points",InpTakeProfitPoints)
-                                : StringFormat("%.2f%%",InpTakeProfitPct)),
+                  digits,slNow,StopUnitName(),
+                  digits,tpNow,TakeUnitName(),
                   digits,stops,(int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL));
       PrintFormat("  1 point = %.*f price here, so the broker minimum is %d points",
                   digits,point,(int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL));
+//--- With a money target the price distance depends on VOLUME, so state what
+//--- the configured lots actually buy - and what the levels are worth in money
+//--- whichever unit was used, since that is the number being reasoned about.
+      const double perPrice = MoneyPerPrice();
+      if(perPrice > 0.0)
+        {
+         PrintFormat("  at %.2f lots, 1.0 of price = %.2f in account currency",
+                     g_trader.Lots(),perPrice);
+         PrintFormat("  so this bracket risks %.2f to make %.2f (%.2f:1)",
+                     slNow*perPrice,tpNow*perPrice,
+                     (slNow>0.0 ? tpNow/slNow : 0.0));
+        }
+      else
+         Print("  WARNING: symbol reports no usable tick value - money-based "
+               "stop/target cannot be converted and will fall back to points/percent");
       const int minPoints = (int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
       if(stops>0.0 && slNow>0.0 && slNow<stops)
          PrintFormat("WARNING: the stop resolves to %.*f here, INSIDE the broker's %.*f "
