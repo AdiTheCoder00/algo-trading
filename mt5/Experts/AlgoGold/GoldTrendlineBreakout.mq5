@@ -748,6 +748,11 @@ void PaintDashboard(void)
       return;
    g_lastDashPaint = now;
 
+//--- Rebuild anything deleted by hand. Deleting a panel object is easy to do by
+//--- accident (Object List, or Ctrl+A on the chart), and a panel that stays half
+//--- gone until the expert is re-attached reads as a bug.
+   g_dash.Refresh(StringFormat("ALGOGOLD BREAKOUT  (%d)",(int)InpMagic));
+
    const int    digits = (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
    const double bid    = SymbolInfoDouble(_Symbol,SYMBOL_BID);
    const GoldPosition pos = g_trader.Snapshot();

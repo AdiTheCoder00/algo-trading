@@ -53,6 +53,7 @@ private:
    string            Name(const string part) const { return m_prefix+part; }
    void              MakeLabel(const string part,const int x,const int y,
                                const int size,const color clr,const string text);
+   void              EnsureBackdrop(void);
 
 public:
                      CGoldDashboard(void): m_prefix(""),m_active(false),m_x(12),m_y(18),
@@ -64,6 +65,8 @@ public:
    //--- row 0..DASH_MAX_ROWS-1; label is fixed-width, value is coloured
    void              Set(const int row,const string label,const string value,const color clr=clrWhite);
    void              SetTitle(const string title);
+   //--- Recreate anything the user deleted by hand. Call once per repaint.
+   void              Refresh(const string title);
   };
 
 //+------------------------------------------------------------------+
@@ -81,7 +84,24 @@ bool CGoldDashboard::Create(const string prefix,const string title,const int x,c
    m_y = y;
    m_active = true;
 
-//--- backdrop first so the labels sit on top of it
+   EnsureBackdrop();
+   MakeLabel("TITLE",m_x,m_y,10,C'120,200,255',title);
+   MakeLabel("RULE", m_x,m_y+m_rowH-2,9,C'60,66,80',
+             "------------------------------------");
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Create the backdrop if it is missing, and (re)apply its style.    |
+//|                                                                   |
+//| Split out of Create() so a repaint can heal a panel the user      |
+//| deleted by hand. The labels already self-heal because MakeLabel    |
+//| recreates anything absent; without this the backdrop alone would   |
+//| stay gone until the expert was re-initialised, which looks exactly |
+//| like a half-broken panel.                                          |
+//+------------------------------------------------------------------+
+void CGoldDashboard::EnsureBackdrop(void)
+  {
    const string bg = Name("BG");
    if(ObjectFind(0,bg)<0)
       ObjectCreate(0,bg,OBJ_RECTANGLE_LABEL,0,0,0);
@@ -96,11 +116,19 @@ bool CGoldDashboard::Create(const string prefix,const string title,const int x,c
    ObjectSetInteger(0,bg,OBJPROP_BACK,false);
    ObjectSetInteger(0,bg,OBJPROP_SELECTABLE,false);
    ObjectSetInteger(0,bg,OBJPROP_HIDDEN,true);
+  }
 
+//+------------------------------------------------------------------+
+//| Heal the whole panel. Cheap: ObjectFind on three names.           |
+//+------------------------------------------------------------------+
+void CGoldDashboard::Refresh(const string title)
+  {
+   if(!m_active)
+      return;
+   EnsureBackdrop();
    MakeLabel("TITLE",m_x,m_y,10,C'120,200,255',title);
    MakeLabel("RULE", m_x,m_y+m_rowH-2,9,C'60,66,80',
              "------------------------------------");
-   return true;
   }
 
 //+------------------------------------------------------------------+
