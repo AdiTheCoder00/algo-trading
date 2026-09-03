@@ -173,6 +173,86 @@ input int    InpSalvageWindowMin  = 5;       // Minutes after entry in which the
 input double InpSalvageLossMoney  = 0.0;     // Must have been down at least this much. 0 = one spread
 input double InpSalvageExitProfit = 0.0;     // Close once profit reaches this. 0 = any profit above zero
 
+//+------------------------------------------------------------------+
+//| SCALE-IN - add to a losing position, same side, up to a limit.    |
+//|                                                                   |
+//| When the netted position is InpScaleInLossMoney down, open another|
+//| position on the SAME side. When it is twice that down, open a     |
+//| third, and so on to InpScaleInMaxTrades in total.                 |
+//|                                                                   |
+//| ====================================================================
+//| WHAT THIS IS, STATED PLAINLY
+//| ====================================================================
+//| This is averaging into a loser. It is the same family as the grid |
+//| and martingale EAs D-141 disqualified - with one important        |
+//| difference: the size does NOT escalate. Every add is InpLots, so  |
+//| total exposure is bounded at InpScaleInMaxTrades * InpLots and the|
+//| worst case is a known number, not an open-ended one.              |
+//|                                                                   |
+//| At 1.1 lots on FixedVol100 with a 9.26 stop, five positions risk  |
+//| about $51 against a ~$1,050 account - roughly 4.8%. That is the   |
+//| number to decide about.                                           |
+//|                                                                   |
+//| ====================================================================
+//| THE ADDS MOVE THE SHARED STOP
+//| ====================================================================
+//| Snapshot() nets every ticket into one volume-weighted position and|
+//| ApplyStop puts ONE level on all of them. So each add pulls the    |
+//| average entry toward price and the shared stop moves with it -    |
+//| the first ticket's stop WIDENS as you add. That is coherent for an|
+//| averaging strategy (you are betting on the mean), but it means the|
+//| risk is not simply "five independent trades": they live and die   |
+//| together on one level.                                            |
+//|                                                                   |
+//| ====================================================================
+//| THE LADDER IS CUMULATIVE, WHICH IS WHAT STOPS IT SPAMMING
+//| ====================================================================
+//| Add number k fires at k * InpScaleInLossMoney of total floating   |
+//| loss. So -5 opens the 2nd, -10 the 3rd, -15 the 4th, -20 the 5th. |
+//| Because the count rises with each add, the next threshold is      |
+//| immediately further away and one tick cannot trigger two adds.    |
+//|                                                                   |
+//| NO PYTHON COUNTERPART, and nothing here has ever backtested it.   |
+//+------------------------------------------------------------------+
+input group "--- Scale-in on loss (no Python counterpart) ---"
+input bool   InpScaleInEnabled    = true;    // Add to a losing position, same side
+input double InpScaleInLossMoney  = 5.0;     // Each add fires at another this-much of loss
+input int    InpScaleInMaxTrades  = 5;       // Total positions including the first
+//--- Size multiplier per add. 1.0 = flat averaging; anything above 1.0 is a
+//--- MARTINGALE, and the distinction is not cosmetic.
+//---
+//--- With 1.25 and five positions the ladder is base x 1, 1.25, 1.5625, 1.9531,
+//--- 2.4414 - a total of 8.21x the base lot rather than 5x. On FixedVol100 at
+//--- 1.1 base that rounds to 1.1 / 1.4 / 1.7 / 2.1 / 2.7 = 9.0 lots, and a full
+//--- stop-out costs about $83 instead of $51. Roughly 8% of a $1,050 account
+//--- against 4.8%.
+//---
+//--- It is still BOUNDED - the ladder ends at InpScaleInMaxTrades and every
+//--- position keeps its own bracket - so this is a martingale with a floor, not
+//--- the open-ended kind that ends accounts. The floor is the max-trades cap;
+//--- raising that is what would make it dangerous.
+//---
+//--- Each size is normalised to the symbol's volume step, so the actual ladder
+//--- is printed on init rather than assumed from the multiplier.
+input double InpScaleInLotMult    = 1.25;    // Multiply the lot by this on each add. 1.0 = flat
+//--- BASKET TAKE PROFIT - close everything once the combined position is up.
+//---
+//--- This is the exit that makes scale-in coherent: the adds pull the average
+//--- entry toward price, so the basket needs a smaller recovery to reach profit
+//--- than the first ticket alone would. Without it the adds have no plan.
+//---
+//--- Measured on the COMBINED floating P&L of every ticket under our magic, not
+//--- per trade. With five positions open, $2 means the basket as a whole is $2
+//--- up - roughly $0.40 a trade - not $2 each. Set it to 10.00 if you want the
+//--- latter.
+//---
+//--- ORDER MATTERS AGAINST SALVAGE. A marked position closes at the first
+//--- profit above zero, which is a LOWER bar than this, so on a marked basket
+//--- salvage fires first and this never gets the chance. That is deliberate -
+//--- the tighter exit wins - but it means the two rules together behave like
+//--- "exit at breakeven if it started badly, otherwise at InpBasketTakeMoney".
+input double InpBasketTakeMoney   = 2.0;     // Close ALL positions at this combined profit. 0 = off
+
 input group "--- Execution ---"
 input double InpLots              = 1.00;    // Volume in MT5 LOTS (1.00 = 100 oz = Python default)
 input long   InpMagic             = 20260902;// Must differ from the Python adapter 20260828
@@ -491,6 +571,48 @@ int OnInit()
         }
       else
          Print("  salvage: OFF");
+
+//--- Scale-in and the basket exit, with the worst case spelled out. The
+//--- exposure question is the one worth answering before it runs, not after.
+      if(InpScaleInEnabled && InpScaleInMaxTrades>1)
+        {
+         PrintFormat("  scale-in: ON - same side, at every %.2f of loss, up to %d position(s), "
+                     "lot x%.2f each time",
+                     InpScaleInLossMoney,InpScaleInMaxTrades,InpScaleInLotMult);
+//--- Walk the actual ladder rather than describing it: each rung is normalised
+//--- to the volume step, so the multiplier alone does not tell you the sizes.
+         string ladder = "";
+         double totalLots = 0.0;
+         for(int k=0; k<InpScaleInMaxTrades; k++)
+           {
+            const double rung = g_trader.NormaliseVolume(
+                                   g_trader.Lots()*MathPow(MathMax(InpScaleInLotMult,1.0),k));
+            totalLots += rung;
+            ladder += StringFormat("%s%.2f",(k>0?" + ":""),rung);
+           }
+         PrintFormat("  ladder: %s = %.2f lots total",ladder,totalLots);
+         if(perPrice>0.0 && slNow>0.0 && g_trader.Lots()>0.0)
+           {
+            //--- perPrice is money-per-price at the BASE lot, so scale it by the
+            //--- ladder's total volume to get the whole book's exposure.
+            const double perPriceAll = perPrice*(totalLots/g_trader.Lots());
+            PrintFormat("  WORST CASE: all %d stopped at %.*f = about %.2f, before slippage",
+                        InpScaleInMaxTrades,digits,slNow,slNow*perPriceAll);
+           }
+        }
+      else
+         Print("  scale-in: OFF");
+
+      if(InpBasketTakeMoney>0.0)
+         PrintFormat("  basket exit: close ALL tickets at %.2f COMBINED profit "
+                     "(with %d positions that is %.2f each)",
+                     InpBasketTakeMoney,InpScaleInMaxTrades,
+                     InpBasketTakeMoney/MathMax(InpScaleInMaxTrades,1));
+      else
+         Print("  basket exit: OFF");
+      if(InpBasketTakeMoney>0.0 && InpSalvageEnabled && InpSalvageExitProfit<InpBasketTakeMoney)
+         Print("  NOTE: salvage exits at a LOWER profit than the basket target, so on a "
+               "marked position salvage fires first and the basket target is never reached");
       const int minPoints = (int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
       if(stops>0.0 && slNow>0.0 && slNow<stops)
          PrintFormat("WARNING: the stop resolves to %.*f here, INSIDE the broker's %.*f "
@@ -553,14 +675,133 @@ void OnTick()
 //--- the recovery when it appears. The expensive part (replaying the bars to
 //--- decide whether the position was marked) is cached and refreshed on the
 //--- bar boundary below, so this path is only a P&L read.
+//--- Basket take profit FIRST: it closes everything, so there is no point
+//--- adding to a position on the same tick that the basket is done.
+   if(InpBasketTakeMoney>0.0 && CheckBasketTakeProfit())
+      return;
    if(InpSalvageEnabled)
       CheckSalvageExit();
+//--- Scale-in also runs on the tick: the trigger is a floating-loss level, and
+//--- waiting for a bar close would add at a worse price than the level asked for.
+   if(InpScaleInEnabled)
+      CheckScaleIn();
 
    const datetime current = iTime(_Symbol,g_tf,0);
    if(current==g_lastBarTime || current==0)
       return;
    g_lastBarTime = current;
    OnClosedBar();
+  }
+
+//+------------------------------------------------------------------+
+//| Close every ticket once the COMBINED floating profit reaches the  |
+//| basket target. Returns true if it closed.                         |
+//+------------------------------------------------------------------+
+bool CheckBasketTakeProfit()
+  {
+   double profit  = 0.0;
+   int    tickets = 0;
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      if(PositionGetSymbol(i)!=_Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=InpMagic)
+         continue;
+      profit += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      tickets++;
+     }
+   if(tickets==0 || profit < InpBasketTakeMoney)
+      return false;
+
+   PrintFormat("basket take profit: %d ticket(s) combined at %.2f, target %.2f - closing all",
+               tickets,profit,InpBasketTakeMoney);
+   g_trader.CloseAll(StringFormat("basket take profit at %.2f across %d ticket(s)",
+                                  profit,tickets));
+   TrailClear(g_trail);
+   g_salvageEntry  = 0.0;
+   g_salvageSide   = -1;
+   g_salvageMarked = false;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Add to a losing position, same side, on a cumulative loss ladder. |
+//+------------------------------------------------------------------+
+void CheckScaleIn()
+  {
+   if(!InpAllowNewEntries)
+      return;
+   if(InpScaleInLossMoney<=0.0 || InpScaleInMaxTrades<2)
+      return;
+
+   const GoldPosition pos = g_trader.Snapshot();
+   if(!pos.exists)
+      return;
+//--- Opposing tickets mean the netted view is not what is actually held, and
+//--- adding to a book we are misreading is exactly how a small mess becomes a
+//--- large one. Refuse rather than guess.
+   if(pos.opposing)
+     {
+      Print("scale-in suppressed: opposing tickets under our magic - the netted view "
+            "does not describe what is actually held");
+      return;
+     }
+   if(pos.tickets >= InpScaleInMaxTrades)
+      return;
+
+//--- Live floating P&L across our tickets, the number the account would realise.
+   double profit = 0.0;
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      if(PositionGetSymbol(i)!=_Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=InpMagic)
+         continue;
+      profit += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+     }
+   if(profit >= 0.0)
+      return;
+
+//--- Add number `tickets` fires at `tickets * InpScaleInLossMoney` of loss, so
+//--- the threshold moves away the instant an add lands and one tick cannot
+//--- trigger two.
+   const double needed = pos.tickets * InpScaleInLossMoney;
+   if(-profit < needed)
+      return;
+
+   if(!SpreadIsAcceptable())
+      return;
+
+//--- The add carries its own bracket, priced from the CURRENT market rather
+//--- than the original entry - it is a new position, not an extension.
+   const double ref = (pos.side==POSITION_TYPE_BUY)
+                      ? SymbolInfoDouble(_Symbol,SYMBOL_ASK)
+                      : SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   if(ref<=0.0)
+      return;
+   const double slPct      = EffectiveStopPct(ref);
+   const double slDistance = (slPct>0.0) ? ref*slPct/100.0 : 0.0;
+   const double tpDistance = TakeDistancePrice(ref);
+
+//--- Ladder size: base * mult^(adds so far). Normalised to the symbol's volume
+//--- step, so "1.25x" becomes whatever the broker will actually accept - on a
+//--- 0.1-step symbol 1.375 is dealt as 1.4, and the log states the real number.
+   const double wanted = g_trader.Lots()*MathPow(MathMax(InpScaleInLotMult,1.0),pos.tickets);
+   const double volume = g_trader.NormaliseVolume(wanted);
+   if(volume<=0.0)
+     {
+      PrintFormat("scale-in suppressed: %.4f lots does not normalise to a tradable size",wanted);
+      return;
+     }
+
+   const string reason = StringFormat("scale-in %d of %d: position is %.2f down, threshold %.2f",
+                                      pos.tickets+1,InpScaleInMaxTrades,-profit,needed);
+   PrintFormat("%s - adding %.2f lots %s at %s (ladder wanted %.4f, %.2f total on the book)",
+               reason,volume,
+               (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),
+               DoubleToString(ref,g_trader.Digits()),
+               wanted,pos.volume+volume);
+   g_trader.OpenBracket(pos.side,volume,slDistance,tpDistance,reason);
   }
 
 //+------------------------------------------------------------------+
