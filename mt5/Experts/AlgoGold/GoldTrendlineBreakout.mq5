@@ -90,8 +90,8 @@ input bool   InpBracketAtEntry    = true;    // Attach SL/TP to the ENTRY order,
 //--- position's entry, because the bar-close management (ProtectiveExitsCheck /
 //--- ProtectiveStopPrice) is percentage-based and would otherwise overwrite a
 //--- point-based stop on the very next bar with a different level.
-input int    InpStopLossPoints    = 0;       // Stop in POINTS. >0 overrides InpStopLossPct
-input int    InpTakeProfitPoints  = 0;       // Target in POINTS. >0 overrides InpTakeProfitPct
+input int    InpStopLossPoints    = 0;       // Stop in POINTS. >0 overrides InpStopLossPct. 0 = use money below
+input int    InpTakeProfitPoints  = 0;       // Target in POINTS. >0 overrides InpTakeProfitPct. 0 = use money below
 //--- Target as a MONEY amount, in account currency. Highest precedence of all.
 //---
 //--- Precedence: money > points > percent. The first non-zero one wins, so the
@@ -109,8 +109,27 @@ input int    InpTakeProfitPoints  = 0;       // Target in POINTS. >0 overrides I
 //--- 0.001 give 1.0 per price per lot, so 1.2 per price. A $20 target is a
 //--- 16.67 price move. On XAUUSD at 0.05 lots it is (1.0/0.01)*0.05 = 5.0 per
 //--- price, so the same $20 is a 4.00 move. Same input, very different trade.
-input double InpStopLossMoney     = 0.0;     // Stop as LOSS in account currency. >0 overrides points and percent
-input double InpTakeProfitMoney   = 0.0;     // Target as PROFIT in account currency. >0 overrides both above
+input double InpStopLossMoney     = 0.0;     // Stop as LOSS in account currency. 0 = fall back to points/percent
+input double InpTakeProfitMoney   = 0.0;     // Target as PROFIT in account currency. 0 = fall back to points/percent
+//--- MONEY-BASED TRAILING STOP.
+//---
+//--- Arm the trail once open profit reaches InpTrailActivationMoney, then keep
+//--- the stop InpTrailMoney behind the best price seen. Both are in account
+//--- currency and both override the percentage equivalents above.
+//---
+//--- These convert to percentages against different references, which is not
+//--- arbitrary: ProtectiveExits measures activation from the ENTRY (how far
+//--- the position has travelled) and the give-back from the PEAK (how much of
+//--- the best price is surrendered). Converting both against entry would make
+//--- the give-back drift as the peak advanced.
+//---
+//--- The cost-to-cost clamp in TrailLevel still applies: an armed trail can
+//--- never sit worse than entry, so its floor is a scratch, not a loss.
+//---
+//--- NO PYTHON COUNTERPART. trailing_profit_stop.py is percentage-based; a
+//--- money trail is a live-only divergence the backtest has never scored.
+input double InpTrailActivationMoney = 5.0;  // Arm the trail at this PROFIT in account currency. 0 = use percent
+input double InpTrailMoney           = 1.0;  // Trail this many account-currency units behind the peak. 0 = use percent
 
 input group "--- Execution ---"
 input double InpLots              = 1.00;    // Volume in MT5 LOTS (1.00 = 100 oz = Python default)
@@ -204,6 +223,53 @@ double TakeDistancePrice(const double refPrice)
   }
 
 //+------------------------------------------------------------------+
+//| Trail activation as a PERCENTAGE, measured from ENTRY.            |
+//|                                                                   |
+//| TrailIsArmed compares against TrailFavourableMovePct, which is    |
+//| (peak - entry) / entry, so the money amount is divided by entry.  |
+//+------------------------------------------------------------------+
+double EffectiveTrailActivationPct(const double entry)
+  {
+   if(InpTrailActivationMoney > 0.0 && entry > 0.0)
+     {
+      const double perPrice = MoneyPerPrice();
+      if(perPrice > 0.0)
+         return (InpTrailActivationMoney/perPrice)/entry*100.0;
+     }
+   return InpTrailActivationPct;
+  }
+
+//+------------------------------------------------------------------+
+//| Trail distance as a PERCENTAGE, measured from the PEAK.           |
+//|                                                                   |
+//| TrailLevel computes give-back as peak * trailPct / 100, so to     |
+//| surrender a fixed money amount the percentage must be taken       |
+//| against the peak - not the entry. Using entry here would make the |
+//| give-back grow as the peak advanced, which is the opposite of a   |
+//| fixed-money trail.                                                |
+//|                                                                   |
+//| Falls back to entry when there is no peak yet (trail not started).|
+//+------------------------------------------------------------------+
+double EffectiveTrailPct(const double peakOrEntry)
+  {
+   if(InpTrailMoney > 0.0 && peakOrEntry > 0.0)
+     {
+      const double perPrice = MoneyPerPrice();
+      if(perPrice > 0.0)
+         return (InpTrailMoney/perPrice)/peakOrEntry*100.0;
+     }
+   return InpTrailPct;
+  }
+
+//+------------------------------------------------------------------+
+//| The peak to measure the trail give-back against.                  |
+//+------------------------------------------------------------------+
+double TrailReference(const double entry)
+  {
+   return (g_trail.active && g_trail.peak > 0.0) ? g_trail.peak : entry;
+  }
+
+//+------------------------------------------------------------------+
 //| Which unit is actually in force, for the init banner.             |
 //+------------------------------------------------------------------+
 string StopUnitName()
@@ -290,6 +356,25 @@ int OnInit()
       else
          Print("  WARNING: symbol reports no usable tick value - money-based "
                "stop/target cannot be converted and will fall back to points/percent");
+
+//--- The trail, in whatever unit it is configured in, with the resolved
+//--- distances so the money case can be checked rather than assumed.
+      if(InpTrailMoney > 0.0 || InpTrailPct > 0.0)
+        {
+         if(InpTrailMoney > 0.0 && perPrice > 0.0)
+            PrintFormat("  trail: arms at %.2f profit, then keeps the stop %.2f behind the "
+                        "peak (= %.*f and %.*f in price at %.2f lots)",
+                        InpTrailActivationMoney,InpTrailMoney,
+                        digits,InpTrailActivationMoney/perPrice,
+                        digits,InpTrailMoney/perPrice,g_trader.Lots());
+         else
+            PrintFormat("  trail: arms at %.2f%% profit, then %.2f%% behind the peak",
+                        InpTrailActivationPct,InpTrailPct);
+         Print("  the trail can never sit worse than entry (cost-to-cost clamp), so its "
+               "floor is a scratch rather than a loss");
+        }
+      else
+         Print("  trail: OFF (both InpTrailMoney and InpTrailPct are 0)");
       const int minPoints = (int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
       if(stops>0.0 && slNow>0.0 && slNow<stops)
          PrintFormat("WARNING: the stop resolves to %.*f here, INSIDE the broker's %.*f "
@@ -318,7 +403,9 @@ int OnInit()
      {
       RebuildTrail(g_trail,_Symbol,g_tf,pos);
       const double sl = ProtectiveStopPrice(g_trail,pos.side,pos.entry,
-                                            EffectiveStopPct(pos.entry),InpTrailActivationPct,InpTrailPct);
+                                            EffectiveStopPct(pos.entry),
+                                            EffectiveTrailActivationPct(pos.entry),
+                                            EffectiveTrailPct(TrailReference(pos.entry)));
       g_trader.ApplyStop(sl);
       PrintFormat("adopted an existing %s position of %.2f lots at %.2f (magic %d)",
                   (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),pos.volume,pos.entry,(int)InpMagic);
@@ -328,7 +415,9 @@ int OnInit()
    PrintFormat("Donchian(%d) on %s %s | stop %.2f%% | trail %.2f%% from %.2f%% | magic %d",
                InpLookback,_Symbol,EnumToString(g_tf),
                EffectiveStopPct(SymbolInfoDouble(_Symbol,SYMBOL_BID)),
-               InpTrailPct,InpTrailActivationPct,(int)InpMagic);
+               EffectiveTrailPct(SymbolInfoDouble(_Symbol,SYMBOL_BID)),
+               EffectiveTrailActivationPct(SymbolInfoDouble(_Symbol,SYMBOL_BID)),
+               (int)InpMagic);
    return INIT_SUCCEEDED;
   }
 
@@ -389,7 +478,8 @@ void OnClosedBar()
 //---    go unprotected because the channel has not been recomputed yet.
    const ExitKind fired = ProtectiveExitsCheck(g_trail,pos.exists,pos.side,pos.entry,
                                                high,low,EffectiveStopPct(pos.entry),
-                                               InpTrailActivationPct,InpTrailPct);
+                                               EffectiveTrailActivationPct(pos.entry),
+                                               EffectiveTrailPct(TrailReference(pos.entry)));
    if(fired!=EXIT_NONE)
      {
       //--- Normally the broker-side SL placed last bar has already fired
@@ -397,7 +487,8 @@ void OnClosedBar()
       //--- where the stop could not be placed.
       const string reason = StringFormat("%s: %.2f%% level against a %s position, entry %.2f",
                                          ExitKindName(fired),
-                                         (fired==EXIT_STOP?EffectiveStopPct(pos.entry):InpTrailPct),
+                                         (fired==EXIT_STOP?EffectiveStopPct(pos.entry)
+                                                          :EffectiveTrailPct(TrailReference(pos.entry))),
                                          (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),pos.entry);
       g_trader.CloseAll(reason);
       TrailClear(g_trail);
@@ -408,7 +499,9 @@ void OnClosedBar()
    if(pos.exists)
      {
       const double sl = ProtectiveStopPrice(g_trail,pos.side,pos.entry,
-                                            EffectiveStopPct(pos.entry),InpTrailActivationPct,InpTrailPct);
+                                            EffectiveStopPct(pos.entry),
+                                            EffectiveTrailActivationPct(pos.entry),
+                                            EffectiveTrailPct(TrailReference(pos.entry)));
       g_trader.ApplyStop(sl);
      }
 
