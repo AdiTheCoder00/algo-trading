@@ -58,6 +58,7 @@
 
 #include <AlgoGold\ProtectiveExits.mqh>
 #include <AlgoGold\Trader.mqh>
+#include <AlgoGold\Dashboard.mqh>
 
 //+------------------------------------------------------------------+
 //| Inputs. Every default is the Python default for the same name.   |
@@ -253,6 +254,11 @@ input double InpScaleInLotMult    = 1.25;    // Multiply the lot by this on each
 //--- "exit at breakeven if it started badly, otherwise at InpBasketTakeMoney".
 input double InpBasketTakeMoney   = 2.0;     // Close ALL positions at this combined profit. 0 = off
 
+input group "--- Dashboard ---"
+input bool   InpShowDashboard    = true;    // On-chart status panel
+input int    InpDashX            = 12;      // Panel X offset, pixels
+input int    InpDashY            = 18;      // Panel Y offset, pixels
+
 input group "--- Execution ---"
 input double InpLots              = 1.00;    // Volume in MT5 LOTS (1.00 = 100 oz = Python default)
 input long   InpMagic             = 20260902;// Must differ from the Python adapter 20260828
@@ -274,6 +280,10 @@ datetime         g_lastBarTime = 0;
 double           g_salvageEntry  = 0.0;
 int              g_salvageSide   = -1;
 bool             g_salvageMarked = false;
+CGoldDashboard   g_dash;
+datetime         g_lastDashPaint = 0;
+double           g_chanHigh      = 0.0;
+double           g_chanLow       = 0.0;
 
 //+------------------------------------------------------------------+
 //| trendline_breakout.warmup_bars(): lookback + 1. The channel needs |
@@ -649,6 +659,10 @@ int OnInit()
                   (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),pos.volume,pos.entry,(int)InpMagic);
      }
 
+   if(InpShowDashboard)
+      g_dash.Create("AGBrk_",StringFormat("ALGOGOLD BREAKOUT  (%d)",(int)InpMagic),
+                    InpDashX,InpDashY);
+
    g_lastBarTime = iTime(_Symbol,g_tf,0);
    PrintFormat("Donchian(%d) on %s %s | stop %.2f%% | trail %.2f%% from %.2f%% | magic %d",
                InpLookback,_Symbol,EnumToString(g_tf),
@@ -661,6 +675,7 @@ int OnInit()
 
 void OnDeinit(const int reason)
   {
+   g_dash.Destroy();
    PrintFormat("stopped (reason %d). Open positions are LEFT AS THEY ARE - removing an "
                "expert is not a flatten instruction.",reason);
   }
@@ -686,11 +701,121 @@ void OnTick()
    if(InpScaleInEnabled)
       CheckScaleIn();
 
+   PaintDashboard();
+
    const datetime current = iTime(_Symbol,g_tf,0);
    if(current==g_lastBarTime || current==0)
       return;
    g_lastBarTime = current;
    OnClosedBar();
+  }
+
+//+------------------------------------------------------------------+
+//| Realised P&L for our magic since a given time.                    |
+//+------------------------------------------------------------------+
+double RealisedSince(const datetime from)
+  {
+   if(!HistorySelect(from,TimeCurrent()+86400))
+      return 0.0;
+   double sum = 0.0;
+   const int total = HistoryDealsTotal();
+   for(int i=0; i<total; i++)
+     {
+      const ulong t = HistoryDealGetTicket(i);
+      if(t==0)
+         continue;
+      if(HistoryDealGetString(t,DEAL_SYMBOL)!=_Symbol)
+         continue;
+      if(HistoryDealGetInteger(t,DEAL_MAGIC)!=InpMagic)
+         continue;
+      sum += HistoryDealGetDouble(t,DEAL_PROFIT)
+             + HistoryDealGetDouble(t,DEAL_SWAP)
+             + HistoryDealGetDouble(t,DEAL_COMMISSION);
+     }
+   return sum;
+  }
+
+//+------------------------------------------------------------------+
+//| Repaint the panel. Throttled to once a second - chart objects are |
+//| not free and nothing here changes faster than a human can read.   |
+//+------------------------------------------------------------------+
+void PaintDashboard(void)
+  {
+   if(!g_dash.Active())
+      return;
+   const datetime now = TimeCurrent();
+   if(now==g_lastDashPaint)
+      return;
+   g_lastDashPaint = now;
+
+   const int    digits = (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+   const double bid    = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   const GoldPosition pos = g_trader.Snapshot();
+
+   const color cOk = C'120,220,140', cBad = C'240,110,110', cDim = C'150,160,180', cHot = C'255,200,90';
+
+   int r = 0;
+   g_dash.Set(r++,"SYMBOL / TF",
+              StringFormat("%s  %s",_Symbol,StringSubstr(EnumToString(g_tf),7)),clrWhite);
+
+   const bool canTrade = (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)
+                         && (bool)MQLInfoInteger(MQL_TRADE_ALLOWED);
+   g_dash.Set(r++,"STATUS",
+              (canTrade ? (InpAllowNewEntries ? "TRADING" : "MANAGE ONLY") : "ALGO OFF"),
+              (canTrade && InpAllowNewEntries) ? cOk : cHot);
+
+//--- The channel is the signal. Nothing else in MT5 shows it.
+   if(g_chanHigh>0.0)
+     {
+      g_dash.Set(r++,"CHANNEL HI",StringFormat("%.*f  (%+.*f)",digits,g_chanHigh,
+                                               digits,g_chanHigh-bid),cDim);
+      g_dash.Set(r++,"CHANNEL LO",StringFormat("%.*f  (%+.*f)",digits,g_chanLow,
+                                               digits,g_chanLow-bid),cDim);
+     }
+   else
+      g_dash.Set(r++,"CHANNEL","warming up",cDim);
+
+   g_dash.Set(r++,"SPREAD",StringFormat("%d pts",(int)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD)),cDim);
+
+   if(pos.exists)
+     {
+      double floating = 0.0;
+      for(int i=PositionsTotal()-1; i>=0; i--)
+        {
+         if(PositionGetSymbol(i)!=_Symbol) continue;
+         if(PositionGetInteger(POSITION_MAGIC)!=InpMagic) continue;
+         floating += PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
+        }
+      g_dash.Set(r++,"POSITION",
+                 StringFormat("%s %.2f @ %.*f",(pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),
+                              pos.volume,digits,pos.entry),
+                 (pos.side==POSITION_TYPE_BUY?cOk:cBad));
+      g_dash.Set(r++,"TICKETS",StringFormat("%d",pos.tickets),cDim);
+      g_dash.Set(r++,"FLOATING",StringFormat("%+.2f",floating),(floating>=0?cOk:cBad));
+      //--- Trail and salvage state exist nowhere else in the terminal.
+      const bool armed = TrailIsArmed(g_trail,EffectiveTrailActivationPct(pos.entry));
+      g_dash.Set(r++,"TRAIL",(armed?"ARMED":"not armed"),(armed?cOk:cDim));
+      g_dash.Set(r++,"SALVAGE",(g_salvageMarked?"MARKED":"clean"),(g_salvageMarked?cHot:cDim));
+     }
+   else
+     {
+      g_dash.Set(r++,"POSITION","flat",cDim);
+      g_dash.Set(r++,"TICKETS","0",cDim);
+      g_dash.Set(r++,"FLOATING","0.00",cDim);
+      g_dash.Set(r++,"TRAIL","-",cDim);
+      g_dash.Set(r++,"SALVAGE","-",cDim);
+     }
+
+   MqlDateTime t; TimeToStruct(TimeCurrent(),t);
+   t.hour=0; t.min=0; t.sec=0;
+   const datetime dayStart = StructToTime(t);
+   const double today = RealisedSince(dayStart);
+   const double week  = RealisedSince(dayStart-6*86400);
+   g_dash.Set(r++,"TODAY",StringFormat("%+.2f",today),(today>=0?cOk:cBad));
+   g_dash.Set(r++,"7 DAYS",StringFormat("%+.2f",week),(week>=0?cOk:cBad));
+   g_dash.Set(r++,"EQUITY",StringFormat("%.2f",AccountInfoDouble(ACCOUNT_EQUITY)),clrWhite);
+
+   ChartRedraw(0);
   }
 
 //+------------------------------------------------------------------+
@@ -940,6 +1065,9 @@ void OnClosedBar()
       PrintFormat("no entry: not enough closed bars for a %d-bar channel",InpLookback);
       return;
      }
+
+   g_chanHigh = channelHigh;
+   g_chanLow  = channelLow;
 
    const bool brokeUp   = (close>channelHigh);
    const bool brokeDown = (close<channelLow);
