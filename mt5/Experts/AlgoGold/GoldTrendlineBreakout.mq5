@@ -131,6 +131,48 @@ input double InpTakeProfitMoney   = 0.0;     // Target as PROFIT in account curr
 input double InpTrailActivationMoney = 5.0;  // Arm the trail at this PROFIT in account currency. 0 = use percent
 input double InpTrailMoney           = 1.0;  // Trail this many account-currency units behind the peak. 0 = use percent
 
+//+------------------------------------------------------------------+
+//| SALVAGE EXIT - take the first profit on a trade that started badly|
+//|                                                                   |
+//| If the position goes adverse within the first InpSalvageWindowMin |
+//| minutes, it is MARKED. A marked position is then closed at market |
+//| the moment its floating profit reaches InpSalvageExitProfit,      |
+//| instead of waiting for the target.                                |
+//|                                                                   |
+//| ====================================================================
+//| "IN LOSS" IS MEASURED AGAINST A THRESHOLD, NOT AGAINST ENTRY
+//| ====================================================================
+//| Every position is in loss the instant it opens: a buy fills at the|
+//| ask and is marked against the bid, so it starts down by the spread|
+//| before the market has done anything. Marking on "price went below |
+//| entry" would therefore mark EVERY trade and the rule would just   |
+//| mean "always exit at the first profit".                           |
+//|                                                                   |
+//| So the trigger is a real adverse excursion, measured in money and |
+//| required to exceed InpSalvageLossMoney. Left at 0 it defaults to  |
+//| one spread, which is the smallest move that is not just the cost  |
+//| of having opened.                                                 |
+//|                                                                   |
+//| ====================================================================
+//| MARKED IS REPLAYED, NOT REMEMBERED
+//| ====================================================================
+//| The adverse excursion is recomputed from the bars since entry, the|
+//| same way RebuildTrail works, so a recompile or restart cannot lose|
+//| the mark. It is cached per ticket so the replay runs once a bar    |
+//| rather than once a tick.                                          |
+//|                                                                   |
+//| The PROFIT test runs every tick, because "close at the first      |
+//| profit" is worth little if it only looks once a minute.           |
+//|                                                                   |
+//| NO PYTHON COUNTERPART - trendline_breakout.py has no such rule, so|
+//| enabling this makes live behaviour something no backtest scored.  |
+//+------------------------------------------------------------------+
+input group "--- Salvage exit (no Python counterpart) ---"
+input bool   InpSalvageEnabled    = true;    // Close a recovered trade at the first profit
+input int    InpSalvageWindowMin  = 5;       // Minutes after entry in which the adverse move must happen
+input double InpSalvageLossMoney  = 0.0;     // Must have been down at least this much. 0 = one spread
+input double InpSalvageExitProfit = 0.0;     // Close once profit reaches this. 0 = any profit above zero
+
 input group "--- Execution ---"
 input double InpLots              = 1.00;    // Volume in MT5 LOTS (1.00 = 100 oz = Python default)
 input long   InpMagic             = 20260902;// Must differ from the Python adapter 20260828
@@ -146,6 +188,12 @@ CGoldTrader      g_trader;
 TrailState       g_trail;
 ENUM_TIMEFRAMES  g_tf          = PERIOD_CURRENT;
 datetime         g_lastBarTime = 0;
+//--- Salvage state, cached per position so the bar replay runs once a bar
+//--- rather than once a tick. Keyed on entry+side, which is enough: this
+//--- expert never holds two positions and never reverses without a flat bar.
+double           g_salvageEntry  = 0.0;
+int              g_salvageSide   = -1;
+bool             g_salvageMarked = false;
 
 //+------------------------------------------------------------------+
 //| trendline_breakout.warmup_bars(): lookback + 1. The channel needs |
@@ -220,6 +268,56 @@ double TakeDistancePrice(const double refPrice)
    if(InpTakeProfitPct > 0.0 && refPrice > 0.0)
       return refPrice*InpTakeProfitPct/100.0;
    return 0.0;
+  }
+
+//+------------------------------------------------------------------+
+//| SALVAGE: was this position adverse enough, early enough?          |
+//|                                                                   |
+//| Replayed from the bars covering the first InpSalvageWindowMin      |
+//| minutes after entry. Returns the worst adverse excursion in MONEY,|
+//| 0.0 when there was none.                                          |
+//+------------------------------------------------------------------+
+double EarlyAdverseMoney(const GoldPosition &pos)
+  {
+   if(!pos.exists || pos.entry<=0.0)
+      return 0.0;
+   const int firstBar = iBarShift(_Symbol,g_tf,pos.openTime,false);
+   if(firstBar<0)
+      return 0.0;
+//--- how many bars cover the window; at least the entry bar itself
+   const int perBar = (int)PeriodSeconds(g_tf);
+   int windowBars = (perBar>0) ? (int)MathCeil(InpSalvageWindowMin*60.0/perBar) : 1;
+   if(windowBars<1)
+      windowBars = 1;
+//--- shifts firstBar (entry bar) down to firstBar-windowBars+1, never past 1
+   const int lastShift = MathMax(1, firstBar-windowBars+1);
+   double worst = 0.0;
+   for(int shift=firstBar; shift>=lastShift; shift--)
+     {
+      const double adverse = (pos.side==POSITION_TYPE_BUY)
+                             ? (pos.entry - iLow(_Symbol,g_tf,shift))
+                             : (iHigh(_Symbol,g_tf,shift) - pos.entry);
+      if(adverse>worst)
+         worst = adverse;
+     }
+   if(worst<=0.0)
+      return 0.0;
+   const double perPrice = MoneyPerPrice();
+   return (perPrice>0.0) ? worst*perPrice : 0.0;
+  }
+
+//+------------------------------------------------------------------+
+//| The adverse move that counts as "started badly".                  |
+//| 0 means one spread - the smallest move that is not just the cost  |
+//| of having opened the position.                                    |
+//+------------------------------------------------------------------+
+double SalvageLossTrigger()
+  {
+   if(InpSalvageLossMoney>0.0)
+      return InpSalvageLossMoney;
+   const double spread   = (double)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD)*SymbolInfoDouble(_Symbol,SYMBOL_POINT);
+   const double perPrice = MoneyPerPrice();
+   return (spread>0.0 && perPrice>0.0) ? spread*perPrice : 0.0;
   }
 
 //+------------------------------------------------------------------+
@@ -375,6 +473,24 @@ int OnInit()
         }
       else
          Print("  trail: OFF (both InpTrailMoney and InpTrailPct are 0)");
+
+//--- Salvage, with the resolved trigger so "0 = one spread" is a number
+//--- rather than a promise.
+      if(InpSalvageEnabled)
+        {
+         const double trig = SalvageLossTrigger();
+         PrintFormat("  salvage: ON - if the trade is %.2f down within its first %d minute(s), "
+                     "close it at the first %s",
+                     trig,InpSalvageWindowMin,
+                     (InpSalvageExitProfit>0.0
+                      ? StringFormat("%.2f of profit",InpSalvageExitProfit)
+                      : "profit above zero"));
+         if(trig<=0.0)
+            Print("  WARNING: salvage trigger resolved to 0 - no position can ever be marked. "
+                  "Set InpSalvageLossMoney explicitly.");
+        }
+      else
+         Print("  salvage: OFF");
       const int minPoints = (int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
       if(stops>0.0 && slNow>0.0 && slNow<stops)
          PrintFormat("WARNING: the stop resolves to %.*f here, INSIDE the broker's %.*f "
@@ -432,11 +548,82 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
+//--- Salvage runs on the TICK, not the bar. "Close at the first profit" is
+//--- worth little if it only looks once a minute; the whole point is to take
+//--- the recovery when it appears. The expensive part (replaying the bars to
+//--- decide whether the position was marked) is cached and refreshed on the
+//--- bar boundary below, so this path is only a P&L read.
+   if(InpSalvageEnabled)
+      CheckSalvageExit();
+
    const datetime current = iTime(_Symbol,g_tf,0);
    if(current==g_lastBarTime || current==0)
       return;
    g_lastBarTime = current;
    OnClosedBar();
+  }
+
+//+------------------------------------------------------------------+
+//| Close a marked position the moment it turns profitable enough.    |
+//+------------------------------------------------------------------+
+void CheckSalvageExit()
+  {
+   const GoldPosition pos = g_trader.Snapshot();
+   if(!pos.exists)
+     {
+      g_salvageEntry  = 0.0;
+      g_salvageSide   = -1;
+      g_salvageMarked = false;
+      return;
+     }
+
+//--- Re-decide only when the position changed, not every tick.
+   if(pos.entry!=g_salvageEntry || (int)pos.side!=g_salvageSide)
+     {
+      g_salvageEntry  = pos.entry;
+      g_salvageSide   = (int)pos.side;
+      const double adverse = EarlyAdverseMoney(pos);
+      const double trigger = SalvageLossTrigger();
+      g_salvageMarked = (trigger>0.0 && adverse>=trigger);
+      if(g_salvageMarked)
+         PrintFormat("salvage: MARKED - went %.2f against entry within the first %d minute(s), "
+                     "trigger %.2f. Will close at the first %.2f of profit.",
+                     adverse,InpSalvageWindowMin,trigger,InpSalvageExitProfit);
+     }
+
+   if(!g_salvageMarked)
+      return;
+
+//--- Live floating P&L, including swap and commission - the number the
+//--- account actually realises, not a price-derived approximation.
+   double profit = 0.0;
+   bool   found  = false;
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      if(PositionGetSymbol(i)!=_Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=InpMagic)
+         continue;
+      profit += PositionGetDouble(POSITION_PROFIT)
+                + PositionGetDouble(POSITION_SWAP);
+      found = true;
+     }
+   if(!found)
+      return;
+
+//--- 0 means "any profit above zero", so use a strict test there.
+   const bool hit = (InpSalvageExitProfit>0.0) ? (profit>=InpSalvageExitProfit) : (profit>0.0);
+   if(!hit)
+      return;
+
+   PrintFormat("salvage: closing at %.2f profit - this trade was adverse inside its first "
+               "%d minute(s), so it is taken on recovery rather than held for the target",
+               profit,InpSalvageWindowMin);
+   g_trader.CloseAll(StringFormat("salvage exit at %.2f profit",profit));
+   TrailClear(g_trail);
+   g_salvageEntry  = 0.0;
+   g_salvageSide   = -1;
+   g_salvageMarked = false;
   }
 
 //+------------------------------------------------------------------+
