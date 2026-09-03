@@ -69,6 +69,8 @@ input group "--- Protective exits (percent of price, NOT points) ---"
 input double InpStopLossPct       = 0.5;     // Flat stop, % of entry. 0 disables
 input double InpTrailActivationPct= 2.0;     // Profit % at which the trail arms
 input double InpTrailPct          = 0.0;     // Trail distance, % behind peak. 0 disables
+input double InpTakeProfitPct     = 0.0;     // Target, % of entry. 0 disables (no Python counterpart)
+input bool   InpBracketAtEntry    = true;    // Attach SL/TP to the ENTRY order, not the next bar
 
 input group "--- Execution ---"
 input double InpLots              = 1.00;    // Volume in MT5 LOTS (1.00 = 100 oz = Python default)
@@ -108,11 +110,45 @@ int OnInit()
       PrintFormat("FATAL: lookback must be at least 2, got %d",InpLookback);
       return INIT_PARAMETERS_INCORRECT;
      }
+   if(InpTakeProfitPct<0.0)
+     {
+      Print("FATAL: InpTakeProfitPct cannot be negative");
+      return INIT_PARAMETERS_INCORRECT;
+     }
    if(!GoldPreflight(InpMagic,InpStopLossPct,InpTrailActivationPct,InpTrailPct))
       return INIT_PARAMETERS_INCORRECT;
 
    if(!g_trader.Init(_Symbol,InpMagic,InpLots,InpSlippagePoints,InpComment))
       return INIT_FAILED;
+
+//--- A percentage stop resolves to a different PRICE distance on every symbol,
+//--- and the broker refuses anything inside SYMBOL_TRADE_STOPS_LEVEL. Measured
+//--- on this account: XAUUSD 0.20, BTCUSD 0.00, FixedVol100 7.123. A 0.5% stop
+//--- is comfortable on all three, but a 0.1% one is illegal on FixedVol100 -
+//--- and an expert configured that way sends orders that are ALL rejected while
+//--- looking perfectly healthy (D-141). Warned rather than refused, because the
+//--- distance moves with price and a level that is legal now may not be later.
+     {
+      const int    digits = (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+      const double point  = SymbolInfoDouble(_Symbol,SYMBOL_POINT);
+      const double stops  = (double)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL)*point;
+      const double price  = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      const double slNow  = (InpStopLossPct  >0.0) ? price*InpStopLossPct  /100.0 : 0.0;
+      const double tpNow  = (InpTakeProfitPct>0.0) ? price*InpTakeProfitPct/100.0 : 0.0;
+      PrintFormat("bracket at %.2f: stop %.*f, target %.*f, broker minimum %.*f",
+                  price,digits,slNow,digits,tpNow,digits,stops);
+      if(stops>0.0 && slNow>0.0 && slNow<stops)
+         PrintFormat("WARNING: a %.2f%% stop is %.*f here, INSIDE the broker's %.*f minimum. "
+                     "Entries will be rejected. Raise it to at least %.3f%%.",
+                     InpStopLossPct,digits,slNow,digits,stops,stops/price*100.0);
+      if(stops>0.0 && tpNow>0.0 && tpNow<stops)
+         PrintFormat("WARNING: a %.2f%% target is %.*f here, INSIDE the broker's %.*f minimum. "
+                     "Entries will be rejected. Raise it to at least %.3f%%.",
+                     InpTakeProfitPct,digits,tpNow,digits,stops,stops/price*100.0);
+      if(!InpBracketAtEntry)
+         Print("WARNING: InpBracketAtEntry is false - positions are opened with no stop and "
+               "stay naked until the next closed bar applies one.");
+     }
 
    const int available = Bars(_Symbol,g_tf);
    if(available < WarmupBars()+1)
@@ -270,7 +306,38 @@ void OnClosedBar()
                                         close,InpLookback,channelHigh)
                          : StringFormat("trendline breakout: close %.2f below the %d-bar low %.2f",
                                         close,InpLookback,channelLow);
-   g_trader.Open(brokeUp?POSITION_TYPE_BUY:POSITION_TYPE_SELL,reason);
+   const ENUM_POSITION_TYPE side = brokeUp ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+
+//--- 6. Send it, bracketed.
+//---
+//---    Open() sends sl=0 tp=0 and the stop is only applied on the NEXT closed
+//---    bar by ApplyStop. That leaves every position naked for a full bar -
+//---    an hour on H1 - and it is not theoretical: a live FixedVol100 position
+//---    under this magic was observed sitting with sl=0.0.
+//---
+//---    Attaching the stop to the entry order is also MORE faithful to the
+//---    Python, not less. price_stop.py checks the bar's low/high rather than
+//---    its close precisely because it is standing in for a broker-side stop
+//---    firing intrabar; a stop that does not exist until the next bar cannot
+//---    do that. The bar-close check in step 1 stays as the backstop for the
+//---    bar where the broker refuses the level.
+   if(!InpBracketAtEntry)
+     {
+      g_trader.Open(side,reason);
+      return;
+     }
+
+   const double ref = (side==POSITION_TYPE_BUY)
+                      ? SymbolInfoDouble(_Symbol,SYMBOL_ASK)
+                      : SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   if(ref<=0.0)
+     {
+      Print("entry suppressed: no two-sided quote to price the bracket against");
+      return;
+     }
+   const double slDistance = (InpStopLossPct  >0.0) ? ref*InpStopLossPct  /100.0 : 0.0;
+   const double tpDistance = (InpTakeProfitPct>0.0) ? ref*InpTakeProfitPct/100.0 : 0.0;
+   g_trader.OpenBracket(side,g_trader.Lots(),slDistance,tpDistance,reason);
   }
 
 //+------------------------------------------------------------------+
