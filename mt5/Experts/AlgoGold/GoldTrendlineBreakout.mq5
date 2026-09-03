@@ -71,6 +71,27 @@ input double InpTrailActivationPct= 2.0;     // Profit % at which the trail arms
 input double InpTrailPct          = 0.0;     // Trail distance, % behind peak. 0 disables
 input double InpTakeProfitPct     = 0.0;     // Target, % of entry. 0 disables (no Python counterpart)
 input bool   InpBracketAtEntry    = true;    // Attach SL/TP to the ENTRY order, not the next bar
+//--- Point-based overrides. Non-zero WINS over the percentage above.
+//---
+//--- A percentage is the Python's unit and is symbol-independent, but it is a
+//--- blunt instrument at these prices: 1% of FixedVol100 at 4,731 is 47 price
+//--- units, which on M1 is an enormous target. Points let the distance be
+//--- stated directly.
+//---
+//--- MIND THE SCALE. A point is SYMBOL_POINT, not a pip:
+//---   XAUUSD      2 digits, point 0.01  -> 100 points = 1.00 price
+//---   FixedVol100 3 digits, point 0.001 -> 100 points = 0.10 price
+//---   BTCUSD      2 digits, point 0.01  -> 100 points = 1.00 price
+//--- so the same number means a tenth as much on FixedVol100. The broker
+//--- minimum there is 7,123 POINTS (7.123 price); anything under that is
+//--- rejected, and init prints the resolved distance so it can be checked.
+//---
+//--- The stop is converted back into an equivalent percentage against the
+//--- position's entry, because the bar-close management (ProtectiveExitsCheck /
+//--- ProtectiveStopPrice) is percentage-based and would otherwise overwrite a
+//--- point-based stop on the very next bar with a different level.
+input int    InpStopLossPoints    = 0;       // Stop in POINTS. >0 overrides InpStopLossPct
+input int    InpTakeProfitPoints  = 0;       // Target in POINTS. >0 overrides InpTakeProfitPct
 
 input group "--- Execution ---"
 input double InpLots              = 1.00;    // Volume in MT5 LOTS (1.00 = 100 oz = Python default)
@@ -95,6 +116,36 @@ datetime         g_lastBarTime = 0;
 int WarmupBars()
   {
    return InpLookback + 1;
+  }
+
+//+------------------------------------------------------------------+
+//| The stop as a PERCENTAGE, whichever way it was configured.        |
+//|                                                                   |
+//| One source of truth. Everything downstream - the bar-close exit    |
+//| check, the broker-side stop level, the log line - is percentage-   |
+//| based, so a point setting is resolved against the reference price  |
+//| once and then behaves identically. Without this the entry would    |
+//| use points and the next bar would overwrite it with the percent.   |
+//+------------------------------------------------------------------+
+double EffectiveStopPct(const double refPrice)
+  {
+   if(InpStopLossPoints > 0 && refPrice > 0.0)
+      return InpStopLossPoints*_Point/refPrice*100.0;
+   return InpStopLossPct;
+  }
+
+//+------------------------------------------------------------------+
+//| Target distance in PRICE. Points win over percent when set.       |
+//| The target is attached once at entry and never re-derived, so it   |
+//| needs no percentage round trip.                                    |
+//+------------------------------------------------------------------+
+double TakeDistancePrice(const double refPrice)
+  {
+   if(InpTakeProfitPoints > 0)
+      return InpTakeProfitPoints*_Point;
+   if(InpTakeProfitPct > 0.0 && refPrice > 0.0)
+      return refPrice*InpTakeProfitPct/100.0;
+   return 0.0;
   }
 
 //+------------------------------------------------------------------+
@@ -133,18 +184,29 @@ int OnInit()
       const double point  = SymbolInfoDouble(_Symbol,SYMBOL_POINT);
       const double stops  = (double)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL)*point;
       const double price  = SymbolInfoDouble(_Symbol,SYMBOL_BID);
-      const double slNow  = (InpStopLossPct  >0.0) ? price*InpStopLossPct  /100.0 : 0.0;
-      const double tpNow  = (InpTakeProfitPct>0.0) ? price*InpTakeProfitPct/100.0 : 0.0;
-      PrintFormat("bracket at %.2f: stop %.*f, target %.*f, broker minimum %.*f",
-                  price,digits,slNow,digits,tpNow,digits,stops);
+      const double slPct  = EffectiveStopPct(price);
+      const double slNow  = (slPct>0.0) ? price*slPct/100.0 : 0.0;
+      const double tpNow  = TakeDistancePrice(price);
+      PrintFormat("bracket at %.2f: stop %.*f (%s), target %.*f (%s), broker minimum %.*f (%d points)",
+                  price,
+                  digits,slNow,(InpStopLossPoints>0
+                                ? StringFormat("%d points",InpStopLossPoints)
+                                : StringFormat("%.2f%%",InpStopLossPct)),
+                  digits,tpNow,(InpTakeProfitPoints>0
+                                ? StringFormat("%d points",InpTakeProfitPoints)
+                                : StringFormat("%.2f%%",InpTakeProfitPct)),
+                  digits,stops,(int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL));
+      PrintFormat("  1 point = %.*f price here, so the broker minimum is %d points",
+                  digits,point,(int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL));
+      const int minPoints = (int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
       if(stops>0.0 && slNow>0.0 && slNow<stops)
-         PrintFormat("WARNING: a %.2f%% stop is %.*f here, INSIDE the broker's %.*f minimum. "
-                     "Entries will be rejected. Raise it to at least %.3f%%.",
-                     InpStopLossPct,digits,slNow,digits,stops,stops/price*100.0);
+         PrintFormat("WARNING: the stop resolves to %.*f here, INSIDE the broker's %.*f "
+                     "minimum. Entries will be REJECTED. Raise it to at least %d points "
+                     "(or %.3f%%).",digits,slNow,digits,stops,minPoints,stops/price*100.0);
       if(stops>0.0 && tpNow>0.0 && tpNow<stops)
-         PrintFormat("WARNING: a %.2f%% target is %.*f here, INSIDE the broker's %.*f minimum. "
-                     "Entries will be rejected. Raise it to at least %.3f%%.",
-                     InpTakeProfitPct,digits,tpNow,digits,stops,stops/price*100.0);
+         PrintFormat("WARNING: the target resolves to %.*f here, INSIDE the broker's %.*f "
+                     "minimum. Entries will be REJECTED. Raise it to at least %d points "
+                     "(or %.3f%%).",digits,tpNow,digits,stops,minPoints,stops/price*100.0);
       if(!InpBracketAtEntry)
          Print("WARNING: InpBracketAtEntry is false - positions are opened with no stop and "
                "stay naked until the next closed bar applies one.");
@@ -164,7 +226,7 @@ int OnInit()
      {
       RebuildTrail(g_trail,_Symbol,g_tf,pos);
       const double sl = ProtectiveStopPrice(g_trail,pos.side,pos.entry,
-                                            InpStopLossPct,InpTrailActivationPct,InpTrailPct);
+                                            EffectiveStopPct(pos.entry),InpTrailActivationPct,InpTrailPct);
       g_trader.ApplyStop(sl);
       PrintFormat("adopted an existing %s position of %.2f lots at %.2f (magic %d)",
                   (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),pos.volume,pos.entry,(int)InpMagic);
@@ -173,7 +235,8 @@ int OnInit()
    g_lastBarTime = iTime(_Symbol,g_tf,0);
    PrintFormat("Donchian(%d) on %s %s | stop %.2f%% | trail %.2f%% from %.2f%% | magic %d",
                InpLookback,_Symbol,EnumToString(g_tf),
-               InpStopLossPct,InpTrailPct,InpTrailActivationPct,(int)InpMagic);
+               EffectiveStopPct(SymbolInfoDouble(_Symbol,SYMBOL_BID)),
+               InpTrailPct,InpTrailActivationPct,(int)InpMagic);
    return INIT_SUCCEEDED;
   }
 
@@ -233,7 +296,7 @@ void OnClosedBar()
 //--- 1. Protective exits, BEFORE the warmup gate - a held position must never
 //---    go unprotected because the channel has not been recomputed yet.
    const ExitKind fired = ProtectiveExitsCheck(g_trail,pos.exists,pos.side,pos.entry,
-                                               high,low,InpStopLossPct,
+                                               high,low,EffectiveStopPct(pos.entry),
                                                InpTrailActivationPct,InpTrailPct);
    if(fired!=EXIT_NONE)
      {
@@ -242,7 +305,7 @@ void OnClosedBar()
       //--- where the stop could not be placed.
       const string reason = StringFormat("%s: %.2f%% level against a %s position, entry %.2f",
                                          ExitKindName(fired),
-                                         (fired==EXIT_STOP?InpStopLossPct:InpTrailPct),
+                                         (fired==EXIT_STOP?EffectiveStopPct(pos.entry):InpTrailPct),
                                          (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),pos.entry);
       g_trader.CloseAll(reason);
       TrailClear(g_trail);
@@ -253,7 +316,7 @@ void OnClosedBar()
    if(pos.exists)
      {
       const double sl = ProtectiveStopPrice(g_trail,pos.side,pos.entry,
-                                            InpStopLossPct,InpTrailActivationPct,InpTrailPct);
+                                            EffectiveStopPct(pos.entry),InpTrailActivationPct,InpTrailPct);
       g_trader.ApplyStop(sl);
      }
 
@@ -335,8 +398,9 @@ void OnClosedBar()
       Print("entry suppressed: no two-sided quote to price the bracket against");
       return;
      }
-   const double slDistance = (InpStopLossPct  >0.0) ? ref*InpStopLossPct  /100.0 : 0.0;
-   const double tpDistance = (InpTakeProfitPct>0.0) ? ref*InpTakeProfitPct/100.0 : 0.0;
+   const double slPct      = EffectiveStopPct(ref);
+   const double slDistance = (slPct>0.0) ? ref*slPct/100.0 : 0.0;
+   const double tpDistance = TakeDistancePrice(ref);
    g_trader.OpenBracket(side,g_trader.Lots(),slDistance,tpDistance,reason);
   }
 
