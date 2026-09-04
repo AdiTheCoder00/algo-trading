@@ -209,7 +209,38 @@ EXECUTION AND COST ASSUMPTIONS
     column is where that shows.
 
 ====================================================================================================
-6. OUT OF SAMPLE  (chronological)
+6. THE EXIT RULE  (the specification's own deferred variant)
+====================================================================================================
+
+    Section 15 of the specification excludes an EMA exit from the baseline and marks it for
+    testing separately. This is that test. Removing the stop changes two things at once and both
+    have to be said: there is no longer a stop distance to size against, so every no-stop row
+    trades a flat one ounce rather than $10 of risk; and the four-hour cap becomes the only bound
+    on a single trade, and it bounds time rather than size.
+
+                                   trades    win%      net $      PF    exp $     maxDD  skipped
+    stop + 4h (baseline)             2566   18.7%  -5,425.57   0.716    -2.11 -5,780.07       54
+    stop off, 4h only                1431   47.3%     +36.61   1.007    +0.03   -303.33        0
+    stop off, close < EMA9           5239   21.9%  -2,156.14   0.670    -0.41 -2,163.13        0
+    stop off, close < EMA20          3318   22.8%  -1,185.12   0.778    -0.36 -1,211.04        0
+    stop off, EMA9/20 cross          1915   28.9%    -663.17   0.863    -0.35   -755.42        0
+    stop ON, close < EMA9            5385   20.5% -13,119.75   0.530    -2.44-13,298.79       77
+
+  WHAT THE NO-STOP ROWS COST IN RISK, WHICH THE NET COLUMN DOES NOT SHOW
+                                worst trade   worst MAE   avg hold   lots
+    stop + 4h (baseline)             -61.35     -118.02     1h 54m      4
+    stop off, 4h only                -67.19      -85.31     5h 33m      1
+    stop off, close < EMA9           -19.92      -29.66     0h 36m      1
+    stop off, close < EMA20          -20.26      -27.25     1h 07m      1
+    stop off, EMA9/20 cross          -25.24      -32.22     2h 29m      1
+    stop ON, close < EMA9            -78.02     -184.26     0h 34m      5
+
+    The one-ounce rows and the risk-sized baseline are not comparable on net P&L alone - they
+    trade different amounts. Compare them on expectancy per ounce, and on the worst-trade column,
+    which is the number the stop was there to bound.
+
+====================================================================================================
+7. OUT OF SAMPLE  (chronological)
 ====================================================================================================
 
   split at          2024-12-10 12:40 UTC
@@ -222,10 +253,10 @@ EXECUTION AND COST ASSUMPTIONS
   (flat D-121 spread - the terminal serves no tick history for this period)
 
                                    trades    win%      net $      PF    exp $     maxDD  skipped
-    MT5 holdout (unseen)             1211   18.1%    +867.74   1.108    +0.72   -726.22      632
+    MT5 holdout (unseen)             1210   18.1%    +873.55   1.109    +0.72   -726.22      632
 
 ====================================================================================================
-7. FINAL ASSESSMENT
+8. FINAL ASSESSMENT
 ====================================================================================================
 
   1. Does the baseline have positive expectancy?
@@ -255,7 +286,7 @@ EXECUTION AND COST ASSUMPTIONS
 
   6. Does it survive out of sample?
       In sample -4,181.95, out of sample -1,267.36 - negative in both halves. The MT5 holdout is
-      +867.74 at profit factor 1.108, but read it with two things in mind: 632 setups there were
+      +873.55 at profit factor 1.109, but read it with two things in mind: 632 setups there were
       skipped as unaffordable against 54 here, because that market's ranges are three times wider,
       and the signal study already showed that a four-hour position taken at random made money in
       that window.
@@ -286,11 +317,28 @@ EXECUTION AND COST ASSUMPTIONS
       neither is rescued by dropping the other. Reported rather than removed, as the specification
       asks.
 
+  THE EXIT TEST CHANGES THE ANSWER, AND NOT IN THE WAY IT LOOKS
+      Taking the stop off and trading a flat ounce turns -5,425.57 into +36.61 over 1431 trades, at
+      a win rate of 47.3% rather than 18.7%. That is the same finding the RSI strategy's stop study
+      produced, arrived at from a different direction: a stop tight enough to fire constantly, sized
+      so that tightness buys a larger position, converts noise into realised loss and pays the
+      spread on every ounce of it. But read what it actually is - +0.03 a trade at a profit factor
+      of 1.007. Removing the stop removes the loss; it does not produce a gain. And it buys that
+      with an unbounded single trade: the worst one here is -67.19 on one ounce, 6.7 times the risk
+      budget the stop existed to enforce, because the four-hour cap bounds time and not size.
+
+  THE EMA EXIT MAKES IT WORSE, CONSISTENTLY
+      Every EMA exit loses more than no exit at all: 4h only +36.61, close < EMA9 -2,156.14, close <
+      EMA20 -1,185.12, EMA9/20 cross -663.17. They are ordered by how often they fire - the faster
+      the exit, the worse the result - which is what it looks like when the exit is not selecting
+      anything and each firing is simply another round trip's spread. On this strategy the honest
+      exit is the clock.
+
   WHAT WOULD ACTUALLY TEST THE IDEA
-      Three changes, in order of how much they would tell you. Size in a way that does not scale
-      with the tightness of the stop - a fixed lot, or a risk budget with a floor on the stop
-      distance - so that the spread is not multiplied by the position. Take the trade at a venue
-      where the round trip is a fraction of this one's. And widen the horizon: the gross figure says
-      the pullback read is not worthless, and everything that destroys it is a cost that a longer
-      hold would amortise.
+      The exit test above already did the first of them - a flat size, which is what removed the
+      loss. What is left is the same two that ended the RSI study: a venue where the round trip is a
+      fraction of this one's, and a longer horizon, where the move available grows faster than the
+      cost of taking it. The break-even the no-stop row reaches is not an edge, but it is the first
+      arrangement of this strategy where costs are not larger than everything it earns - which is
+      the precondition for there being anything to find.
 

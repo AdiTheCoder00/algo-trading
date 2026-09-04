@@ -66,6 +66,11 @@ class ExitReason(Enum):
     STOP_LOSS = "stop loss"
     RSI_REVERSAL = "rsi reversal"
     MAX_HOLD = "max hold"
+    #: An exit the strategy itself asked for through the runner's `exit_signal`
+    #: hook - the 4-EMA strategy's "price closed back through the fast EMA", for
+    #: instance. Named for the mechanism rather than for any one rule, because
+    #: the runner does not know which rule asked.
+    SIGNAL = "signal exit"
     END_OF_DATA = "end of data"
 
 

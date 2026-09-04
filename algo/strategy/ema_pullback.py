@@ -52,6 +52,20 @@ from algo.core.bar import Bar
 from algo.core.enums import Side
 
 
+class ExitEma(Enum):
+    """Which average an EMA exit watches.
+
+    Named rather than passed as a period, because the rule is "the average this
+    strategy already uses", not "any average" - and offering an arbitrary period
+    here would be an invitation to fit one.
+    """
+
+    FAST = "fast"
+    PULLBACK = "pullback"
+    #: The stack itself un-stacking: EMA9 crossing back through EMA20.
+    CROSS = "cross"
+
+
 class Phase(Enum):
     """Where a setup has got to. `NO_SETUP` and `TREND` differ only in whether
     the trend filter passes right now, which is worth keeping separate: a setup
@@ -89,6 +103,23 @@ class EmaPullbackParams:
 
     allow_long: bool = True
     allow_short: bool = True
+
+    # --- exit rules
+    #: Place the structural stop at all. False removes the ONLY bound on a
+    #: single trade's loss inside the four-hour cap - the cap limits time, not
+    #: size - so a run with this off has to report its worst trade and its worst
+    #: excursion, and the study script does.
+    use_stop: bool = True
+    #: Close when price closes back through this EMA against the position.
+    #: `None` is the specified baseline, which exits only on the stop and the
+    #: clock. This is the §15 variant, kept out of the baseline exactly as the
+    #: specification directs.
+    ema_exit: ExitEma | None = None
+    #: When the stop is off, size cannot be derived from a stop distance. This
+    #: is what gets traded instead: one ounce, the instrument's minimum, which
+    #: is also what removes the position-size multiplier that the stopped
+    #: version's tight stops create.
+    fixed_lots: int = 1
 
     def label(self) -> str:
         directions = "long+short"
@@ -295,6 +326,32 @@ def advance(
         return Decision(setup=started)
 
     return Decision(setup=Setup(phase=Phase.TREND, side=side))
+
+
+def ema_exit_hit(
+    emas: Emas, close: float, side: Side, params: EmaPullbackParams = BASELINE
+) -> bool:
+    """Has price closed back through the chosen EMA, against the position?
+
+    The close, not the wick, for the same reason `holds_trend_ema` uses the
+    close: a candle that pokes through an average and closes back is noise, and
+    an exit that fires on it would close most positions within a candle or two
+    of entry.
+
+    `FAST` is the direct inverse of the entry: the confirmation candle closed
+    above EMA9, and this closes the trade when one closes back below it.
+    `PULLBACK` is the same idea with more room. `CROSS` waits for the stack
+    itself to break, which is slower still and does not depend on where price
+    sits relative to either line.
+    """
+    if params.ema_exit is None or not emas.usable:
+        return False
+    if params.ema_exit is ExitEma.CROSS:
+        return (
+            emas.fast < emas.pullback if side is Side.BUY else emas.fast > emas.pullback
+        )
+    level = emas.fast if params.ema_exit is ExitEma.FAST else emas.pullback
+    return close < level if side is Side.BUY else close > level
 
 
 def _start(side: Side | None) -> Setup:

@@ -88,9 +88,11 @@ from algo.strategy.ema_pullback import (
     Decision,
     EmaPullbackParams,
     Emas,
+    ExitEma,
     Phase,
     Setup,
     advance,
+    ema_exit_hit,
 )
 from algo.strategy.rsi_stoch_reversal import ScalperParams
 
@@ -160,6 +162,9 @@ def build_signals(
                 "ema_pullback": emas.pullback,
                 "ema_trend": emas.trend,
                 "ema_major": emas.major,
+                # Carried alongside so the exit hook needs only this row - it is
+                # this candle's own close, never a later one.
+                "close": float(bar.close),
             }
         )
         decision = advance(setup, bar, emas, params)
@@ -175,12 +180,19 @@ def entry_hook(decisions: list[Decision], params: EmaPullbackParams):
     Reads `decisions[i]` and nothing else, which is the causality guarantee the
     runner cannot check for itself - `decisions` was built strictly in order and
     entry `i` was decided from candles 0..i.
+
+    With `use_stop` off there is no stop distance to size against, so the intent
+    carries a flat one-ounce size and no stop price. That is not a detail: risk
+    per trade stops being $10 and becomes "whatever four hours of gold does",
+    and the report has to say so.
     """
 
     def entry(i: int) -> EntryIntent | None:
         decision = decisions[i]
         if decision.entry is None or decision.stop_price is None:
             return None
+        if not params.use_stop:
+            return EntryIntent(side=decision.entry, lots=params.fixed_lots)
         return EntryIntent(
             side=decision.entry,
             stop_price=decision.stop_price,
@@ -188,6 +200,24 @@ def entry_hook(decisions: list[Decision], params: EmaPullbackParams):
         )
 
     return entry
+
+
+def exit_hook(readings: list[dict[str, float]], params: EmaPullbackParams):
+    """The runner's `exit_signal` callable, or None when no EMA exit is set."""
+    if params.ema_exit is None:
+        return None
+
+    def should_exit(i: int, side) -> bool:
+        reading = readings[i]
+        emas = Emas(
+            fast=reading["ema_fast"],
+            pullback=reading["ema_pullback"],
+            trend=reading["ema_trend"],
+            major=reading["ema_major"],
+        )
+        return ema_exit_hit(emas, reading["close"], side, params)
+
+    return should_exit
 
 
 def telemetry_hook(decisions: list[Decision], readings: list[dict[str, float]]):
@@ -208,6 +238,12 @@ def telemetry_hook(decisions: list[Decision], readings: list[dict[str, float]]):
     return telemetry
 
 
+#: A stop so far away it can never fire. Not an absent stop: the runner should
+#: never grow a code path where a position has no stop at all, because that path
+#: would eventually be reachable from the live loop.
+NO_STOP = Decimal("100000")
+
+
 def run(
     m5: list[Bar],
     h1: list[Bar],
@@ -219,6 +255,8 @@ def run(
     indicators=None,
 ) -> ScalperResult:
     """One run of the 4-EMA strategy through the shared execution harness."""
+    if not params.use_stop:
+        execution = replace(execution, stop_loss=NO_STOP)
     decisions, readings = build_signals(m5, params)
     return run_scalper(
         m5,
@@ -231,6 +269,7 @@ def run(
         starting_equity=ACCOUNT,
         indicators=indicators,
         entry=entry_hook(decisions, params),
+        exit_signal=exit_hook(readings, params),
         telemetry=telemetry_hook(decisions, readings),
         warmup_bars=WARMUP,
     )
@@ -631,7 +670,60 @@ def variants(m5, h1, dataset, costs, slippage, indicators, baseline, baseline_re
     say()
 
     say("=" * 100)
-    say("6. OUT OF SAMPLE  (chronological)")
+    say("6. THE EXIT RULE  (the specification's own deferred variant)")
+    say("=" * 100)
+    say()
+    for row in wrap(
+        "Section 15 of the specification excludes an EMA exit from the baseline and marks "
+        "it for testing separately. This is that test. Removing the stop changes two "
+        "things at once and both have to be said: there is no longer a stop distance to "
+        "size against, so every no-stop row trades a flat one ounce rather than $10 of "
+        "risk; and the four-hour cap becomes the only bound on a single trade, and it "
+        "bounds time rather than size.",
+        94,
+    ):
+        say(f"    {row}")
+    say()
+    say(HEADER)
+    exit_rows: dict[str, tuple[Summary, ScalperResult]] = {}
+    for label, params in (
+        ("stop + 4h (baseline)", BASELINE),
+        ("stop off, 4h only", replace(BASELINE, use_stop=False)),
+        ("stop off, close < EMA9", replace(BASELINE, use_stop=False, ema_exit=ExitEma.FAST)),
+        (
+            "stop off, close < EMA20",
+            replace(BASELINE, use_stop=False, ema_exit=ExitEma.PULLBACK),
+        ),
+        ("stop off, EMA9/20 cross", replace(BASELINE, use_stop=False, ema_exit=ExitEma.CROSS)),
+        ("stop ON, close < EMA9", replace(BASELINE, ema_exit=ExitEma.FAST)),
+    ):
+        result = run(m5, h1, params, costs, slippage, indicators=indicators)
+        item = summarise(result, EXECUTION, label=label, starting_equity=ACCOUNT)
+        exit_rows[label] = (item, result)
+        say(line(item, result))
+    say()
+    say("  WHAT THE NO-STOP ROWS COST IN RISK, WHICH THE NET COLUMN DOES NOT SHOW")
+    say(f"    {'':<26}{'worst trade':>13}{'worst MAE':>12}{'avg hold':>11}{'lots':>7}")
+    for label, (item, result) in exit_rows.items():
+        if not result.trades:
+            continue
+        sizes = sorted(t.lots for t in result.trades)
+        say(
+            f"    {label:<26}{money(item.largest_loss):>13}{money(item.worst_mae):>12}"
+            f"{_hold(item.average_hold):>11}{sizes[len(sizes) // 2]:>7}"
+        )
+    say()
+    for row in wrap(
+        "The one-ounce rows and the risk-sized baseline are not comparable on net P&L "
+        "alone - they trade different amounts. Compare them on expectancy per ounce, and "
+        "on the worst-trade column, which is the number the stop was there to bound.",
+        94,
+    ):
+        say(f"    {row}")
+    say()
+
+    say("=" * 100)
+    say("7. OUT OF SAMPLE  (chronological)")
     say("=" * 100)
     say()
     split = int(len(m5) * 0.7)
@@ -669,11 +761,18 @@ def variants(m5, h1, dataset, costs, slippage, indicators, baseline, baseline_re
         say()
 
     say("=" * 100)
-    say("7. FINAL ASSESSMENT")
+    say("8. FINAL ASSESSMENT")
     say("=" * 100)
     say()
     for text in assess(
-        baseline, baseline_result, by_cost, sensitivity, halves, holdout, holdout_skipped
+        baseline,
+        baseline_result,
+        by_cost,
+        sensitivity,
+        halves,
+        holdout,
+        holdout_skipped,
+        exit_rows,
     ):
         say(text)
 
@@ -686,6 +785,7 @@ def assess(
     halves: dict[str, Summary],
     holdout: Summary | None,
     holdout_skipped: int,
+    exit_rows: dict[str, tuple[Summary, ScalperResult]],
 ) -> list[str]:
     """The specification's eight closing questions, each answered from a number.
 
@@ -798,14 +898,51 @@ def assess(
             "removed, as the specification asks.",
         )
 
+    no_stop = exit_rows.get("stop off, 4h only")
+    ema_exit = exit_rows.get("stop off, close < EMA9")
+    if no_stop:
+        item, result = no_stop
+        worst = item.largest_loss
+        add(
+            "THE EXIT TEST CHANGES THE ANSWER, AND NOT IN THE WAY IT LOOKS",
+            f"Taking the stop off and trading a flat ounce turns {money(s.net_pnl)} into "
+            f"{money(item.net_pnl)} over {item.trades} trades, at a win rate of "
+            f"{pct(item.win_rate)} rather than {pct(s.win_rate)}. That is the same finding "
+            "the RSI strategy's stop study produced, arrived at from a different direction: "
+            "a stop tight enough to fire constantly, sized so that tightness buys a larger "
+            "position, converts noise into realised loss and pays the spread on every "
+            f"ounce of it. But read what it actually is - {money(item.expectancy)} a trade "
+            f"at a profit factor of {num(item.profit_factor)}. Removing the stop removes "
+            "the loss; it does not produce a gain. And it buys that with an unbounded "
+            f"single trade: the worst one here is {money(worst)} on one ounce, "
+            f"{abs(worst / BASELINE.risk_per_trade):.1f} times the risk budget the stop "
+            "existed to enforce, because the four-hour cap bounds time and not size.",
+        )
+    if ema_exit:
+        item, _result = ema_exit
+        add(
+            "THE EMA EXIT MAKES IT WORSE, CONSISTENTLY",
+            "Every EMA exit loses more than no exit at all: "
+            + ", ".join(
+                f"{label.replace('stop off, ', '')} {money(row.net_pnl)}"
+                for label, (row, _r) in exit_rows.items()
+                if label.startswith("stop off")
+            )
+            + ". They are ordered by how often they fire - the faster the exit, the worse "
+            "the result - which is what it looks like when the exit is not selecting "
+            "anything and each firing is simply another round trip's spread. On this "
+            "strategy the honest exit is the clock.",
+        )
+
     add(
         "WHAT WOULD ACTUALLY TEST THE IDEA",
-        "Three changes, in order of how much they would tell you. Size in a way that does "
-        "not scale with the tightness of the stop - a fixed lot, or a risk budget with a "
-        "floor on the stop distance - so that the spread is not multiplied by the position. "
-        "Take the trade at a venue where the round trip is a fraction of this one's. And "
-        "widen the horizon: the gross figure says the pullback read is not worthless, and "
-        "everything that destroys it is a cost that a longer hold would amortise.",
+        "The exit test above already did the first of them - a flat size, which is what "
+        "removed the loss. What is left is the same two that ended the RSI study: a venue "
+        "where the round trip is a fraction of this one's, and a longer horizon, where the "
+        "move available grows faster than the cost of taking it. The break-even the "
+        "no-stop row reaches is not an edge, but it is the first arrangement of this "
+        "strategy where costs are not larger than everything it earns - which is the "
+        "precondition for there being anything to find.",
     )
     return lines
 

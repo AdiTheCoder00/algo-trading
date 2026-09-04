@@ -396,6 +396,7 @@ def run_scalper(
     entry: Callable[[int], Side | EntryIntent | None] | None = None,
     telemetry: Callable[[int], dict[str, str]] | None = None,
     warmup_bars: int | None = None,
+    exit_signal: Callable[[int, Side], bool] | None = None,
 ) -> ScalperResult:
     """Walk `m5` once, trading the baseline rules and charging real costs.
 
@@ -413,6 +414,12 @@ def run_scalper(
     `telemetry` is asked for the strategy's own log fields at each signal bar.
     The runner records the RSI readings regardless - it computes them anyway -
     and a different strategy adds its own here rather than growing the record.
+
+    `exit_signal` adds one more close-based exit, asked at each closed candle
+    whether the open position should be closed. It sits alongside the RSI
+    reversal rather than replacing it - a strategy that wants only its own exit
+    turns the reversal off in `params` - and it is checked after the stop, so a
+    candle containing both still resolves as the stop.
 
     `entry` replaces the specified entry rule with an arbitrary one, taking the
     index of a closed M5 bar and returning a side or `None`. Everything else -
@@ -595,13 +602,18 @@ def run_scalper(
                 )
                 state.observe(ind.m5_rsi[i], params)
                 trade.rsi_extreme_activated = state.extreme_activated
+                signalled = (
+                    exit_signal(i, trade.side) if exit_signal is not None else False
+                )
                 expired = bar.ts - trade.entry_ts >= params.max_hold
                 last_bar = i == len(m5) - 1
 
-                if reversal or expired or last_bar:
+                if reversal or signalled or expired or last_bar:
                     reason = (
                         ExitReason.RSI_REVERSAL
                         if reversal
+                        else ExitReason.SIGNAL
+                        if signalled
                         else ExitReason.MAX_HOLD
                         if expired
                         else ExitReason.END_OF_DATA

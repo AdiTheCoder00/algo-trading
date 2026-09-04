@@ -618,3 +618,188 @@ def test_signals_are_causal() -> None:
     for i in range(900):
         assert full[i].entry == partial[i].entry
         assert full[i].stop_price == partial[i].stop_price
+
+
+# --------------------------------------------------------------- the EMA exit
+
+
+def test_the_baseline_has_no_ema_exit_and_keeps_its_stop() -> None:
+    """§15: the EMA exit is a variant, not part of the hypothesis."""
+    assert BASELINE.ema_exit is None
+    assert BASELINE.use_stop is True
+
+
+def test_the_ema_exit_uses_the_close_not_the_wick() -> None:
+    from dataclasses import replace
+
+    from algo.strategy.ema_pullback import ExitEma, ema_exit_hit
+
+    fast = replace(BASELINE, ema_exit=ExitEma.FAST)
+    # EMA9 is 2010. A long is closed when a candle CLOSES below it.
+    assert ema_exit_hit(BULL, 2009.0, Side.BUY, fast)
+    assert not ema_exit_hit(BULL, 2011.0, Side.BUY, fast)
+    # The mirror for a short: EMA9 is 1990.
+    assert ema_exit_hit(BEAR, 1991.0, Side.SELL, fast)
+    assert not ema_exit_hit(BEAR, 1989.0, Side.SELL, fast)
+
+
+def test_the_pullback_ema_exit_gives_more_room_than_the_fast_one() -> None:
+    from dataclasses import replace
+
+    from algo.strategy.ema_pullback import ExitEma, ema_exit_hit
+
+    fast = replace(BASELINE, ema_exit=ExitEma.FAST)
+    slow = replace(BASELINE, ema_exit=ExitEma.PULLBACK)
+    # 2009 is below EMA9 (2010) but above EMA20 (2008).
+    assert ema_exit_hit(BULL, 2009.0, Side.BUY, fast)
+    assert not ema_exit_hit(BULL, 2009.0, Side.BUY, slow)
+
+
+def test_the_cross_exit_ignores_price_and_watches_the_stack() -> None:
+    from dataclasses import replace
+
+    from algo.strategy.ema_pullback import ExitEma, ema_exit_hit
+
+    cross = replace(BASELINE, ema_exit=ExitEma.CROSS)
+    assert not ema_exit_hit(BULL, 1000.0, Side.BUY, cross), "price is not the test"
+    unstacked = Emas(fast=2007.0, pullback=2008.0, trend=2005.0, major=2000.0)
+    assert ema_exit_hit(unstacked, 2011.0, Side.BUY, cross)
+
+
+def test_no_ema_exit_fires_while_the_emas_are_warming_up() -> None:
+    from dataclasses import replace
+
+    from algo.strategy.ema_pullback import ExitEma, ema_exit_hit
+
+    nan = float("nan")
+    for mode in (ExitEma.FAST, ExitEma.PULLBACK, ExitEma.CROSS):
+        params = replace(BASELINE, ema_exit=mode)
+        assert not ema_exit_hit(Emas(nan, nan, nan, nan), 2000.0, Side.BUY, params)
+
+
+def test_the_exit_hook_closes_the_position_and_is_reported_as_a_signal_exit() -> None:
+    m5 = _rising(300)
+    h1 = [
+        Bar(
+            ts=BASE + timedelta(hours=i + 1),
+            timeframe=H1,
+            open=Decimal("2000"),
+            high=Decimal("2001"),
+            low=Decimal("1999"),
+            close=Decimal("2000"),
+            volume=1,
+        )
+        for i in range(30)
+    ]
+
+    def entry(i: int):
+        if i != 100:
+            return None
+        return EntryIntent(side=Side.BUY, lots=1)
+
+    def should_exit(i: int, side) -> bool:
+        return i >= 110
+
+    result = run_scalper(
+        m5,
+        h1,
+        params=EXECUTION,
+        costs=FREE,
+        calendar=None,
+        entry=entry,
+        exit_signal=should_exit,
+        warmup_bars=50,
+    )
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.exit_reason.value == "signal exit"
+    assert trade.exit_ts == m5[110].ts, "closed on the first candle that asked"
+
+
+def test_the_stop_still_wins_a_candle_that_contains_both() -> None:
+    """A signal exit is decided at the close; the stop can fire at any point
+    inside the candle. The engine's pessimistic convention must survive the new
+    hook, or a losing trade could be booked as a tidy signal exit."""
+    falling: list[Bar] = []
+    price = Decimal("2000")
+    for i in range(300):
+        nxt = price - Decimal("0.50")
+        falling.append(
+            Bar(
+                ts=BASE + timedelta(minutes=5 * (i + 1)),
+                timeframe=M5,
+                open=price,
+                high=price + Decimal("0.05"),
+                low=nxt - Decimal("0.05"),
+                close=nxt,
+                volume=1,
+            )
+        )
+        price = nxt
+    h1 = [
+        Bar(
+            ts=BASE + timedelta(hours=i + 1),
+            timeframe=H1,
+            open=Decimal("2000"),
+            high=Decimal("2001"),
+            low=Decimal("1999"),
+            close=Decimal("2000"),
+            volume=1,
+        )
+        for i in range(30)
+    ]
+
+    def entry(i: int):
+        if i != 100:
+            return None
+        # Close enough that the very first candle the position exists on
+        # trades through it - so the stop and the signal are both true on the
+        # same candle, which is the case being tested.
+        return EntryIntent(
+            side=Side.BUY, stop_price=falling[i].close - Decimal("0.2"), risk=Decimal("10")
+        )
+
+    result = run_scalper(
+        falling,
+        h1,
+        params=EXECUTION,
+        costs=FREE,
+        calendar=None,
+        entry=entry,
+        exit_signal=lambda i, side: True,  # asks to exit on every candle
+        warmup_bars=50,
+    )
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.entry_ts == falling[100].ts
+    # The entry candle's own low is more than the stop distance below entry, so
+    # the stop was reachable on the same candle the signal fired on.
+    assert falling[101].low < trade.entry_price - trade.stop_distance
+    assert trade.exit_reason.value == "stop loss"
+
+
+def test_turning_the_stop_off_trades_a_flat_size_and_has_no_stop_exit() -> None:
+    """The property that makes the no-stop rows readable: one ounce every time,
+    so the comparison is about the rule and not about the size."""
+    import sys
+    from dataclasses import replace
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from backtest_xauusd_ema_pullback import entry_hook
+
+    from algo.strategy.ema_pullback import Decision, Phase, Setup
+
+    params = replace(BASELINE, use_stop=False)
+    decisions = [
+        Decision(
+            setup=Setup(phase=Phase.TREND, side=Side.BUY),
+            entry=Side.BUY,
+            stop_price=Decimal("1990"),
+        )
+    ]
+    intent = entry_hook(decisions, params)(0)
+    assert intent is not None
+    assert intent.stop_price is None, "no stop means no stop price travels with the order"
+    assert intent.risk is None, "and nothing to size against"
+    assert intent.lots == params.fixed_lots == 1
