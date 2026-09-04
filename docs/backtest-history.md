@@ -41,7 +41,7 @@ real deals), financing charged nightly. One MT5 lot fixed, no risk scaling.
 | D-131 | walk-forward, Breakout H1, optimising channel length | 13 windows, 89 out-of-sample trades | in-sample $471,556 · **out-of-sample $31,288** · *never touching the parameter* **$91,075** |
 | D-132 | parameter sweep tooling | — | built with a robustness verdict above the grid, because a heatmap invites reading off the greenest square, which is the D-131 mistake |
 | D-148 | flat stop **and** trail together — the cell D-127 named and never ran | 2024-07-24 → 2026-08-28 | **all twelve trail-bearing cells negative.** The stop bounds losers as predicted (10 of 12 beat trail-only) and every cell the stop alone left positive turns negative |
-| D-149 | start-date sensitivity, 2×2 | same bars, start shifted 0–28 days | unstopped `MacdCrossover` swings **$160k** on M15 and flips sign on H1. Stopped MACD, and `TrendlineBreakout` either way, move 1–5% |
+| D-149 | start-date sensitivity, 2×2 | same bars, start shifted 0–28 days | unstopped `MacdCrossover` spreads **$163,588** on M15 and **$147,831 with a sign flip** on H1. The other three combinations spread $3.4k–$9.3k and never change sign |
 
 > **D-149 caveat on the rows above.** The two unstopped `MacdCrossover` figures in
 > D-124 (M15 -$230,052 and H1 +$190,186) are artefacts of that window's start

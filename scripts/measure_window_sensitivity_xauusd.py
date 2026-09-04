@@ -135,7 +135,8 @@ def scan(strategy: str, label: str, bars_all: list[Bar]) -> None:
     for shift in SHIFTS:
         cut = base + timedelta(days=shift)
         bars = [b for b in bars_all if b.ts >= cut]
-        row = f"{'+' + str(shift) + 'd':>8}{bars[0].ts:%Y-%m-%d}{len(bars):>9,}"
+        first = f"{bars[0].ts:%Y-%m-%d}"
+        row = f"{'+' + str(shift) + 'd':>8}{first:>13}{len(bars):>9,}"
         for stop in STOPS:
             trades, net = net_for(bars, tf, strategy, stop)
             spreads[stop].append(net)

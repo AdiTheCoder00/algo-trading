@@ -3627,41 +3627,49 @@ Every *stopped* MACD row reproduced within a few thousand, and so did every
 by more than the result itself.
 
 **It is not a harness bug. It is the window - but only for one of the four
-combinations.** Holding the bars fixed and sliding only the start date:
+combinations.** `scripts/measure_window_sensitivity_xauusd.py` fetches once,
+fixes the end, and slides only the first bar, so every run sees a strict subset
+of the same history priced by the same costs:
 
 ```
-  MacdCrossover        no stop      0.5% stop
-   M15  +0d           -$60,720       -$81,192
-   M15  +7d           -$56,550       -$76,593
-   M15 +21d          -$213,722       -$81,723
-   M15 +28d           -$58,143       -$80,578
-   H1   +0d           -$54,190        $22,857
-   H1   +7d            $93,584        $23,376
-   H1  +21d           -$54,205        $23,891
+    measure_window_sensitivity_xauusd.py --strategy macd --timeframes M15 H1 --end 2026-08-28
 
-  TrendlineBreakout    no stop      0.5% stop
-   M30  +0d            $77,993        $36,490
-   M30 +21d            $85,495        $44,668
-   H1   +0d           $142,713        $89,308
-   H1  +21d           $141,165        $86,040
+  MacdCrossover M15          no stop      0.5% stop      MacdCrossover H1     no stop    0.5% stop
+    +0d   2024-07-24        -$60,720       -$81,192        +0d  2018-03-20   -$54,190      $22,857
+    +3d   2024-07-28        -$58,136       -$79,944        +3d  2018-03-23   -$52,317      $25,585
+    +7d   2024-07-31        -$55,672       -$75,715        +7d  2018-03-27    $93,626      $23,418
+   +14d   2024-08-07        -$53,229       -$75,664       +14d  2018-04-03    $92,757      $22,549
+   +21d   2024-08-14       -$216,817       -$84,818       +21d  2018-04-10   -$54,205      $23,891
+   +28d   2024-08-21       -$211,740       -$79,741       +28d  2018-04-17   -$54,170      $23,926
+  spread                   $163,588         $9,153       spread              $147,831 SIGN FLIP  $3,035
+
+    measure_window_sensitivity_xauusd.py --strategy breakout --timeframes M30 H1 --end 2026-08-28
+
+  TrendlineBreakout M30      no stop      0.5% stop      TrendlineBreakout H1 no stop    0.5% stop
+    +0d   2022-06-13         $77,993        $36,490        +0d  2018-03-20  $142,713      $89,308
+   +21d   2022-07-04         $86,603        $45,784       +21d  2018-04-10  $141,165      $86,040
+   +28d   2022-07-11         $81,104        $40,935       +28d  2018-04-17  $142,719      $87,570
+  spread                      $8,610         $9,294       spread               $3,392      $3,554
 ```
 
-(These runs use each timeframe's full 50,000-bar history rather than D-148's
-common window, so levels are not comparable to that table - only the spread
-within each column is.)
+(Each timeframe uses its own full 50,000-bar history rather than D-148's common
+window, so levels are not comparable to that table - only the spread within each
+column is.)
 
 **The 2x2 is the finding.**
 
 | | no stop | 0.5% stop |
 |---|---|---|
-| `MacdCrossover` - incremental EMAs | **unstable**: $160k swing on M15, sign flip on H1 | stable, a few percent |
-| `TrendlineBreakout` - stateless Donchian | stable, 1-5% | stable, 1-5% |
+| `MacdCrossover` - incremental EMAs | **unstable**: $163,588 spread on M15, $147,831 and a sign flip on H1 | stable: $9,153 and $3,035 |
+| `TrendlineBreakout` - stateless Donchian | stable: $8,610 and $3,392 | stable: $9,294 and $3,554 |
 
-Three of four cells are stable. **Instability needs both ingredients, and
-neither is sufficient alone.** Unbounded holding time is not the cause -
-`TrendlineBreakout` holds until the opposing channel break and is the steadiest
-thing in the table. Incremental state is not the cause either - stopped MACD
-carries the same EMAs and is fine.
+Three of four cells are stable, all of them within roughly $3,000-$9,000 across
+the whole sweep and none changing sign. Unstopped MACD is two orders of
+magnitude worse in absolute terms and larger than its own result.
+**Instability needs both ingredients, and neither is sufficient alone.**
+Unbounded holding time is not the cause - `TrendlineBreakout` holds until the
+opposing channel break and is the steadiest thing in the table. Incremental
+state is not the cause either - stopped MACD carries the same EMAs and is fine.
 
 **The mechanism, and why the two must meet.** `MacdCrossover`'s three EMAs are
 running state seeded at the window's first bar (D-123 chose that deliberately,
@@ -3686,6 +3694,13 @@ was an unstopped MACD row, because that baseline was a coin flip. Every
 which is now the better-supported of the two strategies for a reason that has
 nothing to do with its P&L.
 
+**One correction worth recording.** The first version of this check was a
+throwaway script whose start-date arithmetic snapped each cut to midnight
+instead of preserving the base timestamp, so its edge rows landed on different
+bar counts and two of its numbers were wrong. The qualitative finding was
+unaffected - the spread was six figures either way - but the entry above quotes
+the committed script, which is the point of committing it.
+
 **The rule this establishes.** A strategy carrying incremental indicator state
 *and* unbounded holding time must report its sensitivity to the window edges, or
 it is not reporting a result. The test is a start-date shift of a few weeks, it
@@ -3693,3 +3708,57 @@ costs one extra run, and it should come before walk-forward rather than after -
 D-131 caught this class of problem the expensive way. A strategy with either
 ingredient alone does not need it, which is what makes the check cheap to
 target.
+
+### D-150 - Gold Sniping's inputs can stop the wipeout but cannot create an edge
+
+You asked whether the EA can be refined through its input settings. It ships
+with every risk control disabled - `InpMaxPositions=0` (unlimited ladder depth),
+`InpMaxFloatingDrawdown=0.0`, `InpDailyLossLimit=0.0`, `InpRestMinutes=0` - so
+D-145's wipeout was the defaults with no brake connected. Four variants tested
+against the same killer window (XAUUSD M15, 2024.01.01-2026.08.31, $10,000).
+Each run is verified by parsing the parameters back out of MT5's own report, so
+a variant whose settings failed to apply would be flagged, not counted.
+
+| variant | trades | net | PF | balance DD | equity DD | win rate | last deal |
+|---|---|---|---|---|---|---|---|
+| defaults (D-145) | 340 | -$10,145 | 0.49 | 101.35% | 101.43% | 62.65% | **2024.02.26** |
+| A `MaxPositions=5` | 417 | -$4,057 | 0.88 | 144.58% | 54.91% | **94.00%** | 2026.08.28 |
+| B `MaxFloatingDD=$500` | 23,856 | -$9,990 | 0.95 | 102.01% | 100.39% | 84.86% | **2026.01.09** |
+| C combo | 4,510 | -$5,515 | **0.89** | **63.09%** | 58.40% | 85.94% | 2026.08.28 |
+| D `LotMultiplier=1.0` | 340 | -$10,145 | 0.49 | 101.35% | 101.43% | 62.65% | 2024.02.26 |
+
+C = MaxPositions 5 + MaxFloatingDrawdown $500 + DailyLossLimit $300 + RestMinutes 60.
+
+**Refinement works, up to a point.** Variant C converts a fatal EA into a merely
+losing one: it survives all 32 months and holds drawdown to 63% instead of going
+through zero. Capping ladder depth is the single most effective change, which
+matches the diagnosis - unbounded depth, not lot escalation, was the killer.
+
+**No setting reaches profitability.** Every variant sits below PF 1.0. The
+restraints reduce the *rate* of loss; they do not manufacture an edge, because
+there was none to uncover. The tail was truncated and what remained was a
+negative-expectancy system paying spread on every basket.
+
+**Two results worth keeping.**
+
+*D is byte-identical to the defaults.* Setting `InpLotMultiplier=1.0` changed
+nothing at all, which under a multiplier-driven ladder would be a drastic
+change. So `InpLotMode=1` selects *step* mode and the multiplier input is inert;
+escalation is additive via `InpLotStep=0.01`, capped by `InpMaxLot=0.1`. The
+"2.0 multiplier" in the default set is decoration. An input that appears
+dangerous and does nothing is worth more than a guess about what it does - this
+is why D was run rather than reasoned about.
+
+*A reaches a 94% win rate while losing $4,057.* The single cleanest illustration
+in this project that win rate carries no information about profitability. B is
+the mirror image: capping floating loss alone converts one fatal basket into
+23,856 small realised losses and still ends at 102% drawdown - death by a
+thousand cuts rather than one.
+
+**Scope limit, stated deliberately.** This tested the risk-control inputs, not
+the entry logic (`InpEMAPeriod`, `InpDistancePoints`, `InpBasketProfit`). A
+sweep of those on this one window would very likely find a profitable
+combination, and it would be curve-fitting: with 32 months and a handful of free
+parameters, some setting always fits. Any such result would need walk-forward
+across separate periods before it meant anything. Cross-reference D-145 on
+single-window evidence.
