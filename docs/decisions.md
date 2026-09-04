@@ -3482,3 +3482,67 @@ quote updates, not traded volume, because a CFD feed has no traded volume. Every
 value area here is a distribution of quotes. It will not match a value area
 drawn on a futures feed, and that is a different measurement wearing the same
 name rather than an approximation that improves with more data.
+
+### D-147 - no stop placement rescues the value-area fade; win rate and reward:risk move together
+
+D-146 ended with one open question: its reward:risk of 0.76 came from the
+liquidity-wick stop, and the obvious next move was to ask whether a different
+stop fixes the geometry. Six stop rules, both bias directions, same 74 sessions,
+same measured spread. The entry rule is untouched, so every variant takes the
+same 55 trades (59 inverted) and only the exit level differs.
+
+```
+stop rule                      n   win%   b/e%    R:R       gross     spread         net     PF      t
+wick (as described)           55   45.5   56.7   0.76  -$2,775.00 -$1,196.00  -$3,971.00   0.65  -1.22
+wick, capped at 1.0x width    55   38.2   46.0   1.18  -$5,793.00 -$1,196.00  -$6,989.00   0.43  -2.39
+fixed 0.25x width             55   38.2   38.0   1.63    -$993.00 -$1,196.00  -$2,189.00   0.74  -0.92
+fixed 0.50x width             55   45.5   48.3   1.07  -$2,123.00 -$1,196.00  -$3,319.00   0.70  -1.08
+fixed 0.75x width             55   50.9   55.7   0.79  -$3,450.50 -$1,196.00  -$4,646.50   0.66  -1.27
+fixed 1.00x width             55   56.4   61.3   0.63  -$3,643.00 -$1,196.00  -$4,839.00   0.68  -1.13
+```
+
+Bias inverted, the same six rules run -$1,808 to -$8,000, profit factor 0.57 to
+0.82. **Twelve cells, twelve losses, gross and net.**
+
+**The see-saw is the finding.** `b/e%` is the win rate each geometry needs
+simply to stand still, `risk / (risk + reward)` from the averages. Read the
+sweep down the two win-rate columns:
+
+```
+stop            0.25x   0.50x   0.75x   1.00x   wick
+achieved win%    38.2    45.5    50.9    56.4    45.5
+required  b/e%   38.0    48.3    55.7    61.3    56.7
+```
+
+Widening the stop buys win rate at almost exactly the price the geometry charges
+for it. **The achieved rate never gets above the required one.** That is not a
+statement about this sample - it is what it looks like when the entry carries no
+directional information: you can move where the loss is taken, and the market
+gives back precisely the difference. There is no stop distance to be found by
+searching, because the two numbers are the same number seen twice.
+
+**The best row is flat before costs and loses because of spread.** `fixed 0.25x`
+achieves 38.2% against a required 38.0% - a fifth of a point of margin, which is
+another way of writing zero - and its gross is -$993 over 55 trades. Spread on
+those trades is $1,196, at $22 a round trip (half of the measured $0.22 median,
+100 ounces, two legs). So the least-bad geometry in the sweep is a coin flip
+that pays a toll, which is the same shape D-123 found on M5 and D-142 on the
+bracketed EA.
+
+**Two things this run must not be read as saying.**
+
+- **It does not select `fixed 0.25x`.** Choosing the best of six rules on 74
+  sessions is curve-fitting with a table for a face. The sweep bounds the family
+  - nothing in it clears break-even - and that is all it does.
+- **`wick capped at 1.0x` is not "significantly worse".** Its |t| = 2.39 is the
+  only cell past 2 out of twelve, which is roughly what twelve draws produce by
+  chance. Reading it as a result would be the multiple-comparisons version of
+  the D-144 error.
+
+**Where this leaves the strategy.** D-146 said no EA on that evidence and left
+the stop as the open door. The door is shut: the deficit is in the entry, not
+in the exit. Anything further would have to change what the trade is - a
+different bias formula, a different profile window, a filter on which days to
+skip - and each of those is another parameter searched against the same 74
+sessions, which is how D-143's grid came to look good on the win rate while
+being five times worse. **Stopping here is the finding.**

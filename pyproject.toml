@@ -156,3 +156,7 @@ ignore = [
 # Same again for the Asia value-area study: a report written to stdout for a
 # human, imported by nothing.
 "scripts/measure_asia_value_area_xauusd.py" = ["T201"]
+# And `ask_nemotron.py`, which is a REPL: the printed stream IS the interface,
+# there is no engine here to keep clean, and routing a chat reply through a
+# structlog line would make it unreadable.
+"scripts/ask_nemotron.py" = ["T201"]
