@@ -364,6 +364,8 @@ substitute until then.
   the corrections
 - [`docs/backtest-assumptions.md`](docs/backtest-assumptions.md) — every modelling
   assumption, marked SETTLED / PROVISIONAL / UNRESOLVED
+- [`docs/backtest-history.md`](docs/backtest-history.md) — every strategy measured and what
+  it returned, and the four patterns the whole record shows
 - [`docs/open-questions.md`](docs/open-questions.md) — what is still blocking, and on what
 
 ## A note on what this can and cannot tell you
