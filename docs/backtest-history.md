@@ -41,6 +41,13 @@ real deals), financing charged nightly. One MT5 lot fixed, no risk scaling.
 | D-131 | walk-forward, Breakout H1, optimising channel length | 13 windows, 89 out-of-sample trades | in-sample $471,556 · **out-of-sample $31,288** · *never touching the parameter* **$91,075** |
 | D-132 | parameter sweep tooling | — | built with a robustness verdict above the grid, because a heatmap invites reading off the greenest square, which is the D-131 mistake |
 | D-148 | flat stop **and** trail together — the cell D-127 named and never ran | 2024-07-24 → 2026-08-28 | **all twelve trail-bearing cells negative.** The stop bounds losers as predicted (10 of 12 beat trail-only) and every cell the stop alone left positive turns negative |
+| D-149 | start-date sensitivity, 2×2 | same bars, start shifted 0–28 days | unstopped `MacdCrossover` swings **$160k** on M15 and flips sign on H1. Stopped MACD, and `TrendlineBreakout` either way, move 1–5% |
+
+> **D-149 caveat on the rows above.** The two unstopped `MacdCrossover` figures in
+> D-124 (M15 -$230,052 and H1 +$190,186) are artefacts of that window's start
+> date, not properties of the strategy. Read D-125's and D-126's comparisons
+> against them accordingly. Every `TrendlineBreakout` row is unaffected and
+> stands as published.
 
 Buy-and-hold over the D-124 window: **≈ +$199,700**. Over D-123's M5 window:
 +$15,682.
@@ -103,6 +110,14 @@ cell that turned negative the moment two other windows were run. D-145 took two
 profitable months and found the account death that had been sitting just outside
 them.
 
+D-149 is the cheapest version of this and the one to run first: **the same
+window, started seven days later.** Unstopped `MacdCrossover` changes by more
+than its own result. It needs two ingredients to happen — incremental indicator
+state, so the start date perturbs the signal, and unbounded holding time, so the
+perturbation lands on the wrong side of a six-figure trend leg. Three of the
+four combinations tested are stable, which is what makes the check cheap to
+target rather than something to run on everything.
+
 Nothing in this project has ever been rescued by a longer look. Several things
 have been destroyed by one.
 
@@ -152,9 +167,9 @@ Ranked by information gained per unit of work, on the evidence above.
 1. **Get more history** (open question 4). It is the binding constraint on
    everything intraday, it is infrastructure rather than strategy, and it turns
    the 74-session studies into something that can answer its own question.
-2. ~~Run the untested exit combination.~~ **Done — D-148.** The code already
-   existed on `run_cfd_backtest`; it closes the one configuration D-127
-   explicitly left open.
+2. ~~Run the untested exit combination.~~ **Done — D-148.** It also produced
+   D-149 for free, via the reproduction check, which is an argument for quoting
+   published figures beside every re-run cell as a matter of course.
 3. **Make walk-forward a gate rather than an exhibit.** `cfd_walkforward.py` has
    been run essentially once and immediately falsified the best strategy here.
    D-138 built an expert in a regime the measurements already said loses.

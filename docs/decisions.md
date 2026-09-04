@@ -3608,3 +3608,88 @@ The question is closed. Not "the trail needs a different activation or
 distance" - that is a parameter search against one window, and D-131 already
 showed what those produce here.
 
+### D-149 - an incremental indicator plus unbounded holds; either alone is stable
+
+D-148's script quotes each published figure beside the cell that reproduces it,
+because a new harness agreeing with the old one is what makes its new cells
+worth reading. Twenty-two of twenty-four reproduced within 2-4%, consistent with
+the window starting a week later than D-124's. **Two did not**, and chasing that
+gap is this entry.
+
+```
+                            this run    D-124 published      delta
+  MacdCrossover M15, no stop  -$60,720       -$230,052    +$169,333
+  MacdCrossover H1,  no stop   $18,713        $190,186    -$171,472
+```
+
+Every *stopped* MACD row reproduced within a few thousand, and so did every
+`TrendlineBreakout` row, stopped or not. Only unstopped MACD moved, and it moved
+by more than the result itself.
+
+**It is not a harness bug. It is the window - but only for one of the four
+combinations.** Holding the bars fixed and sliding only the start date:
+
+```
+  MacdCrossover        no stop      0.5% stop
+   M15  +0d           -$60,720       -$81,192
+   M15  +7d           -$56,550       -$76,593
+   M15 +21d          -$213,722       -$81,723
+   M15 +28d           -$58,143       -$80,578
+   H1   +0d           -$54,190        $22,857
+   H1   +7d            $93,584        $23,376
+   H1  +21d           -$54,205        $23,891
+
+  TrendlineBreakout    no stop      0.5% stop
+   M30  +0d            $77,993        $36,490
+   M30 +21d            $85,495        $44,668
+   H1   +0d           $142,713        $89,308
+   H1  +21d           $141,165        $86,040
+```
+
+(These runs use each timeframe's full 50,000-bar history rather than D-148's
+common window, so levels are not comparable to that table - only the spread
+within each column is.)
+
+**The 2x2 is the finding.**
+
+| | no stop | 0.5% stop |
+|---|---|---|
+| `MacdCrossover` - incremental EMAs | **unstable**: $160k swing on M15, sign flip on H1 | stable, a few percent |
+| `TrendlineBreakout` - stateless Donchian | stable, 1-5% | stable, 1-5% |
+
+Three of four cells are stable. **Instability needs both ingredients, and
+neither is sufficient alone.** Unbounded holding time is not the cause -
+`TrendlineBreakout` holds until the opposing channel break and is the steadiest
+thing in the table. Incremental state is not the cause either - stopped MACD
+carries the same EMAs and is fine.
+
+**The mechanism, and why the two must meet.** `MacdCrossover`'s three EMAs are
+running state seeded at the window's first bar (D-123 chose that deliberately,
+for live/backtest parity). Move the start and the whole indicator path moves
+slightly, so a marginal crossover fires on a different bar - a small
+perturbation. A Donchian channel has no such memory: it is the max and min of
+the last twenty bars, identical after twenty bars regardless of where the series
+began, which is why its rows do not move. What turns MACD's small perturbation
+into six figures is the unbounded hold: at 100 ounces a $1,000 move in gold is
+$100,000, gold ran from roughly $2,400 to $4,470 across this window, and an
+unstopped crossover holds until the opposing signal - so a shifted entry decides
+which side of an enormous trend leg the position sits on. The flat stop cuts
+those holds short and the amplifier is gone.
+
+**What this costs us.** D-124's unstopped MACD figures - the -$230,052 that made
+M15 look catastrophic and the +$190,186 that made H1 look like one of the best
+cells in the project - are **not properties of `MacdCrossover`.** They are
+properties of 2024-07-17. D-125's and D-126's readings of "the stop makes it
+worse on rows that were positive" need re-reading wherever the positive baseline
+was an unstopped MACD row, because that baseline was a coin flip. Every
+`TrendlineBreakout` comparison stands unchanged, including D-124's H1 result,
+which is now the better-supported of the two strategies for a reason that has
+nothing to do with its P&L.
+
+**The rule this establishes.** A strategy carrying incremental indicator state
+*and* unbounded holding time must report its sensitivity to the window edges, or
+it is not reporting a result. The test is a start-date shift of a few weeks, it
+costs one extra run, and it should come before walk-forward rather than after -
+D-131 caught this class of problem the expensive way. A strategy with either
+ingredient alone does not need it, which is what makes the check cheap to
+target.

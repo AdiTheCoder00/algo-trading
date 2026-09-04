@@ -161,3 +161,4 @@ ignore = [
 # structlog line would make it unreadable.
 "scripts/ask_nemotron.py" = ["T201"]
 "scripts/measure_stop_trail_matrix_xauusd.py" = ["T201"]
+"scripts/measure_window_sensitivity_xauusd.py" = ["T201"]
