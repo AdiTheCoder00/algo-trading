@@ -224,6 +224,7 @@ def fetch_history_range(
     start: datetime,
     end: datetime,
     offset: timedelta,
+    now: datetime | None = None,
 ) -> list[Bar]:
     """Closed bars between two **UTC** instants, oldest first.
 
@@ -270,5 +271,8 @@ def fetch_history_range(
     # whose open is within one interval of now. Dropping it is the same rule
     # `fetch_history` gets from start_pos=1.
     duration = timedelta(minutes=timeframe.minutes)
-    newest_closed = datetime.now(UTC) - duration
+    # `now` is injectable for the same two reasons it is on
+    # `resolve_server_offset`: the still-forming-bar cutoff is testable, and
+    # the wall clock is read only through the clock module (D-015).
+    newest_closed = (now or SystemClock().now()) - duration
     return [b for b in bars if b.ts <= newest_closed]

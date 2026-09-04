@@ -3482,3 +3482,283 @@ quote updates, not traded volume, because a CFD feed has no traded volume. Every
 value area here is a distribution of quotes. It will not match a value area
 drawn on a futures feed, and that is a different measurement wearing the same
 name rather than an approximation that improves with more data.
+
+### D-147 - no stop placement rescues the value-area fade; win rate and reward:risk move together
+
+D-146 ended with one open question: its reward:risk of 0.76 came from the
+liquidity-wick stop, and the obvious next move was to ask whether a different
+stop fixes the geometry. Six stop rules, both bias directions, same 74 sessions,
+same measured spread. The entry rule is untouched, so every variant takes the
+same 55 trades (59 inverted) and only the exit level differs.
+
+```
+stop rule                      n   win%   b/e%    R:R       gross     spread         net     PF      t
+wick (as described)           55   45.5   56.7   0.76  -$2,775.00 -$1,196.00  -$3,971.00   0.65  -1.22
+wick, capped at 1.0x width    55   38.2   46.0   1.18  -$5,793.00 -$1,196.00  -$6,989.00   0.43  -2.39
+fixed 0.25x width             55   38.2   38.0   1.63    -$993.00 -$1,196.00  -$2,189.00   0.74  -0.92
+fixed 0.50x width             55   45.5   48.3   1.07  -$2,123.00 -$1,196.00  -$3,319.00   0.70  -1.08
+fixed 0.75x width             55   50.9   55.7   0.79  -$3,450.50 -$1,196.00  -$4,646.50   0.66  -1.27
+fixed 1.00x width             55   56.4   61.3   0.63  -$3,643.00 -$1,196.00  -$4,839.00   0.68  -1.13
+```
+
+Bias inverted, the same six rules run -$1,808 to -$8,000, profit factor 0.57 to
+0.82. **Twelve cells, twelve losses, gross and net.**
+
+**The see-saw is the finding.** `b/e%` is the win rate each geometry needs
+simply to stand still, `risk / (risk + reward)` from the averages. Read the
+sweep down the two win-rate columns:
+
+```
+stop            0.25x   0.50x   0.75x   1.00x   wick
+achieved win%    38.2    45.5    50.9    56.4    45.5
+required  b/e%   38.0    48.3    55.7    61.3    56.7
+```
+
+Widening the stop buys win rate at almost exactly the price the geometry charges
+for it. **The achieved rate never gets above the required one.** That is not a
+statement about this sample - it is what it looks like when the entry carries no
+directional information: you can move where the loss is taken, and the market
+gives back precisely the difference. There is no stop distance to be found by
+searching, because the two numbers are the same number seen twice.
+
+**The best row is flat before costs and loses because of spread.** `fixed 0.25x`
+achieves 38.2% against a required 38.0% - a fifth of a point of margin, which is
+another way of writing zero - and its gross is -$993 over 55 trades. Spread on
+those trades is $1,196, at $22 a round trip (half of the measured $0.22 median,
+100 ounces, two legs). So the least-bad geometry in the sweep is a coin flip
+that pays a toll, which is the same shape D-123 found on M5 and D-142 on the
+bracketed EA.
+
+**Two things this run must not be read as saying.**
+
+- **It does not select `fixed 0.25x`.** Choosing the best of six rules on 74
+  sessions is curve-fitting with a table for a face. The sweep bounds the family
+  - nothing in it clears break-even - and that is all it does.
+- **`wick capped at 1.0x` is not "significantly worse".** Its |t| = 2.39 is the
+  only cell past 2 out of twelve, which is roughly what twelve draws produce by
+  chance. Reading it as a result would be the multiple-comparisons version of
+  the D-144 error.
+
+**Where this leaves the strategy.** D-146 said no EA on that evidence and left
+the stop as the open door. The door is shut: the deficit is in the entry, not
+in the exit. Anything further would have to change what the trade is - a
+different bias formula, a different profile window, a filter on which days to
+skip - and each of those is another parameter searched against the same 74
+sessions, which is how D-143's grid came to look good on the win rate while
+being five times worse. **Stopping here is the finding.**
+
+### D-148 - a flat stop under the trail does exactly what D-127 predicted, and it is not enough
+
+D-127 measured a 2%-armed, 0.5% trailing exit with the flat stop switched off,
+found all six cells negative, and closed by naming the configuration it had not
+run: the flat stop bounding the loser side the trail leaves open, *and* the
+trail locking the winner side, together. That question is now answered. It is
+no.
+
+`scripts/measure_stop_trail_matrix_xauusd.py` runs six exit configurations x
+three timeframes x two strategies from one code path - `run_cfd_backtest`,
+which has taken `stop_loss_pct`, `trail_activation_pct` and `trail_pct` as
+arguments since D-130, so no module constant is edited and all thirty-six cells
+are directly comparable. Window 2024-07-24 to 2026-08-28 (2.09 yr), 100 engine
+lots, measured Vantage costs.
+
+```
+MacdCrossover net              M15          M30           H1
+  0.5% stop only           -$81,192     $81,739     $131,272
+  2%/0.5% trail only      -$402,757   -$241,608    -$137,628
+  0.5% stop + trail       -$206,552    -$76,947     -$21,616
+  1.0% stop + trail       -$244,050   -$108,482    -$103,353
+
+TrendlineBreakout net          M15          M30           H1
+  0.5% stop only           -$17,974     $48,714     $133,039
+  2%/0.5% trail only      -$165,841   -$147,443     -$52,759
+  0.5% stop + trail       -$133,029    -$86,243     -$47,914
+  1.0% stop + trail       -$102,872   -$147,574    -$136,622
+```
+
+**The stop does its job.** D-127's hypothesis was that the flat stop would bound
+the losers the trail leaves uncovered, and it does: **ten of the twelve
+stop-plus-trail cells beat their trail-only counterpart**, several by a lot -
+MACD H1 goes from -$137,628 to -$21,616, MACD M30 from -$241,608 to -$76,947.
+The two exceptions are both `TrendlineBreakout` with the 1.0% stop: M30 is
+marginally worse (-$147,574 against -$147,443) and H1 substantially so
+(-$136,622 against -$52,759), the same non-monotonicity in stop width D-126
+recorded.
+
+**And it is irrelevant, because the damage is on the other side.** Every cell
+that was *positive* with the stop alone turns negative the moment the trail is
+added:
+
+```
+  MACD M30        +$81,739  ->  -$76,947
+  MACD H1        +$131,272  ->  -$21,616
+  Breakout M30    +$48,714  ->  -$86,243
+  Breakout H1    +$133,039  ->  -$47,914
+```
+
+**All twelve trail-bearing cells are negative**, at both stop widths, on both
+strategies, at every timeframe. That is D-127's own mechanism read confirmed
+from the other direction: these strategies' returns on this window come from a
+small number of large trend-following holds, a 2%-armed 0.5% trail caps exactly
+those, and bounding the loser side does not give back what capping the winner
+side takes away. **A stop cannot rescue an exit that is cutting the trades the
+edge lives in.**
+
+The question is closed. Not "the trail needs a different activation or
+distance" - that is a parameter search against one window, and D-131 already
+showed what those produce here.
+
+### D-149 - an incremental indicator plus unbounded holds; either alone is stable
+
+D-148's script quotes each published figure beside the cell that reproduces it,
+because a new harness agreeing with the old one is what makes its new cells
+worth reading. Twenty-two of twenty-four reproduced within 2-4%, consistent with
+the window starting a week later than D-124's. **Two did not**, and chasing that
+gap is this entry.
+
+```
+                            this run    D-124 published      delta
+  MacdCrossover M15, no stop  -$60,720       -$230,052    +$169,333
+  MacdCrossover H1,  no stop   $18,713        $190,186    -$171,472
+```
+
+Every *stopped* MACD row reproduced within a few thousand, and so did every
+`TrendlineBreakout` row, stopped or not. Only unstopped MACD moved, and it moved
+by more than the result itself.
+
+**It is not a harness bug. It is the window - but only for one of the four
+combinations.** `scripts/measure_window_sensitivity_xauusd.py` fetches once,
+fixes the end, and slides only the first bar, so every run sees a strict subset
+of the same history priced by the same costs:
+
+```
+    measure_window_sensitivity_xauusd.py --strategy macd --timeframes M15 H1 --end 2026-08-28
+
+  MacdCrossover M15          no stop      0.5% stop      MacdCrossover H1     no stop    0.5% stop
+    +0d   2024-07-24        -$60,720       -$81,192        +0d  2018-03-20   -$54,190      $22,857
+    +3d   2024-07-28        -$58,136       -$79,944        +3d  2018-03-23   -$52,317      $25,585
+    +7d   2024-07-31        -$55,672       -$75,715        +7d  2018-03-27    $93,626      $23,418
+   +14d   2024-08-07        -$53,229       -$75,664       +14d  2018-04-03    $92,757      $22,549
+   +21d   2024-08-14       -$216,817       -$84,818       +21d  2018-04-10   -$54,205      $23,891
+   +28d   2024-08-21       -$211,740       -$79,741       +28d  2018-04-17   -$54,170      $23,926
+  spread                   $163,588         $9,153       spread              $147,831 SIGN FLIP  $3,035
+
+    measure_window_sensitivity_xauusd.py --strategy breakout --timeframes M30 H1 --end 2026-08-28
+
+  TrendlineBreakout M30      no stop      0.5% stop      TrendlineBreakout H1 no stop    0.5% stop
+    +0d   2022-06-13         $77,993        $36,490        +0d  2018-03-20  $142,713      $89,308
+   +21d   2022-07-04         $86,603        $45,784       +21d  2018-04-10  $141,165      $86,040
+   +28d   2022-07-11         $81,104        $40,935       +28d  2018-04-17  $142,719      $87,570
+  spread                      $8,610         $9,294       spread               $3,392      $3,554
+```
+
+(Each timeframe uses its own full 50,000-bar history rather than D-148's common
+window, so levels are not comparable to that table - only the spread within each
+column is.)
+
+**The 2x2 is the finding.**
+
+| | no stop | 0.5% stop |
+|---|---|---|
+| `MacdCrossover` - incremental EMAs | **unstable**: $163,588 spread on M15, $147,831 and a sign flip on H1 | stable: $9,153 and $3,035 |
+| `TrendlineBreakout` - stateless Donchian | stable: $8,610 and $3,392 | stable: $9,294 and $3,554 |
+
+Three of four cells are stable, all of them within roughly $3,000-$9,000 across
+the whole sweep and none changing sign. Unstopped MACD is two orders of
+magnitude worse in absolute terms and larger than its own result.
+**Instability needs both ingredients, and neither is sufficient alone.**
+Unbounded holding time is not the cause - `TrendlineBreakout` holds until the
+opposing channel break and is the steadiest thing in the table. Incremental
+state is not the cause either - stopped MACD carries the same EMAs and is fine.
+
+**The mechanism, and why the two must meet.** `MacdCrossover`'s three EMAs are
+running state seeded at the window's first bar (D-123 chose that deliberately,
+for live/backtest parity). Move the start and the whole indicator path moves
+slightly, so a marginal crossover fires on a different bar - a small
+perturbation. A Donchian channel has no such memory: it is the max and min of
+the last twenty bars, identical after twenty bars regardless of where the series
+began, which is why its rows do not move. What turns MACD's small perturbation
+into six figures is the unbounded hold: at 100 ounces a $1,000 move in gold is
+$100,000, gold ran from roughly $2,400 to $4,470 across this window, and an
+unstopped crossover holds until the opposing signal - so a shifted entry decides
+which side of an enormous trend leg the position sits on. The flat stop cuts
+those holds short and the amplifier is gone.
+
+**What this costs us.** D-124's unstopped MACD figures - the -$230,052 that made
+M15 look catastrophic and the +$190,186 that made H1 look like one of the best
+cells in the project - are **not properties of `MacdCrossover`.** They are
+properties of 2024-07-17. D-125's and D-126's readings of "the stop makes it
+worse on rows that were positive" need re-reading wherever the positive baseline
+was an unstopped MACD row, because that baseline was a coin flip. Every
+`TrendlineBreakout` comparison stands unchanged, including D-124's H1 result,
+which is now the better-supported of the two strategies for a reason that has
+nothing to do with its P&L.
+
+**One correction worth recording.** The first version of this check was a
+throwaway script whose start-date arithmetic snapped each cut to midnight
+instead of preserving the base timestamp, so its edge rows landed on different
+bar counts and two of its numbers were wrong. The qualitative finding was
+unaffected - the spread was six figures either way - but the entry above quotes
+the committed script, which is the point of committing it.
+
+**The rule this establishes.** A strategy carrying incremental indicator state
+*and* unbounded holding time must report its sensitivity to the window edges, or
+it is not reporting a result. The test is a start-date shift of a few weeks, it
+costs one extra run, and it should come before walk-forward rather than after -
+D-131 caught this class of problem the expensive way. A strategy with either
+ingredient alone does not need it, which is what makes the check cheap to
+target.
+
+### D-150 - Gold Sniping's inputs can stop the wipeout but cannot create an edge
+
+You asked whether the EA can be refined through its input settings. It ships
+with every risk control disabled - `InpMaxPositions=0` (unlimited ladder depth),
+`InpMaxFloatingDrawdown=0.0`, `InpDailyLossLimit=0.0`, `InpRestMinutes=0` - so
+D-145's wipeout was the defaults with no brake connected. Four variants tested
+against the same killer window (XAUUSD M15, 2024.01.01-2026.08.31, $10,000).
+Each run is verified by parsing the parameters back out of MT5's own report, so
+a variant whose settings failed to apply would be flagged, not counted.
+
+| variant | trades | net | PF | balance DD | equity DD | win rate | last deal |
+|---|---|---|---|---|---|---|---|
+| defaults (D-145) | 340 | -$10,145 | 0.49 | 101.35% | 101.43% | 62.65% | **2024.02.26** |
+| A `MaxPositions=5` | 417 | -$4,057 | 0.88 | 144.58% | 54.91% | **94.00%** | 2026.08.28 |
+| B `MaxFloatingDD=$500` | 23,856 | -$9,990 | 0.95 | 102.01% | 100.39% | 84.86% | **2026.01.09** |
+| C combo | 4,510 | -$5,515 | **0.89** | **63.09%** | 58.40% | 85.94% | 2026.08.28 |
+| D `LotMultiplier=1.0` | 340 | -$10,145 | 0.49 | 101.35% | 101.43% | 62.65% | 2024.02.26 |
+
+C = MaxPositions 5 + MaxFloatingDrawdown $500 + DailyLossLimit $300 + RestMinutes 60.
+
+**Refinement works, up to a point.** Variant C converts a fatal EA into a merely
+losing one: it survives all 32 months and holds drawdown to 63% instead of going
+through zero. Capping ladder depth is the single most effective change, which
+matches the diagnosis - unbounded depth, not lot escalation, was the killer.
+
+**No setting reaches profitability.** Every variant sits below PF 1.0. The
+restraints reduce the *rate* of loss; they do not manufacture an edge, because
+there was none to uncover. The tail was truncated and what remained was a
+negative-expectancy system paying spread on every basket.
+
+**Two results worth keeping.**
+
+*D is byte-identical to the defaults.* Setting `InpLotMultiplier=1.0` changed
+nothing at all, which under a multiplier-driven ladder would be a drastic
+change. So `InpLotMode=1` selects *step* mode and the multiplier input is inert;
+escalation is additive via `InpLotStep=0.01`, capped by `InpMaxLot=0.1`. The
+"2.0 multiplier" in the default set is decoration. An input that appears
+dangerous and does nothing is worth more than a guess about what it does - this
+is why D was run rather than reasoned about.
+
+*A reaches a 94% win rate while losing $4,057.* The single cleanest illustration
+in this project that win rate carries no information about profitability. B is
+the mirror image: capping floating loss alone converts one fatal basket into
+23,856 small realised losses and still ends at 102% drawdown - death by a
+thousand cuts rather than one.
+
+**Scope limit, stated deliberately.** This tested the risk-control inputs, not
+the entry logic (`InpEMAPeriod`, `InpDistancePoints`, `InpBasketProfit`). A
+sweep of those on this one window would very likely find a profitable
+combination, and it would be curve-fitting: with 32 months and a handful of free
+parameters, some setting always fits. Any such result would need walk-forward
+across separate periods before it meant anything. Cross-reference D-145 on
+single-window evidence.

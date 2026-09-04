@@ -63,7 +63,9 @@ def ask(client: OpenAI, messages: list[dict]) -> str:
 def repl() -> None:
     client = make_client()
     messages: list[dict] = []
-    print(f"Nemotron REPL ({MODEL}). Type 'exit', 'quit', or Ctrl+C to leave, 'reset' to clear history.\n")
+    print(f"Nemotron REPL ({MODEL}).")
+    print("Type 'exit', 'quit', or Ctrl+C to leave, 'reset' to clear history.")
+    print()
 
     while True:
         try:

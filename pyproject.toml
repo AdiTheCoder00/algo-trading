@@ -37,6 +37,14 @@ dev = [
     # httpx. filterwarnings=error turns that into a collection failure, so the
     # transport it actually wants is declared rather than inherited by luck.
     "httpx2",
+    # Same class of problem, one layer down. starlette's TestClient still
+    # annotates its portal factory with `anyio.abc.BlockingPortal`, and anyio
+    # 4.15 turned that alias into a DeprecationWarning, which filterwarnings=
+    # error makes a collection failure of tests/test_api.py. Pinned rather than
+    # filtered: the warning is accurate, it is starlette's to fix, and silencing
+    # it here would also hide the day our own code reaches for the dead alias.
+    # Verified against starlette 1.6.0 / fastapi 0.141.1, the current resolution.
+    "anyio<4.15",
     # tools/macd_telegram_alert/mt5_xauusd_alert.py imports macd_alert.py's
     # shared MACD/Telegram/state code, and that unconditionally imports ccxt
     # at module level. The tool has its own isolated venv + requirements.txt
@@ -169,3 +177,9 @@ ignore = [
 # Same again for the Asia value-area study: a report written to stdout for a
 # human, imported by nothing.
 "scripts/measure_asia_value_area_xauusd.py" = ["T201"]
+# And `ask_nemotron.py`, which is a REPL: the printed stream IS the interface,
+# there is no engine here to keep clean, and routing a chat reply through a
+# structlog line would make it unreadable.
+"scripts/ask_nemotron.py" = ["T201"]
+"scripts/measure_stop_trail_matrix_xauusd.py" = ["T201"]
+"scripts/measure_window_sensitivity_xauusd.py" = ["T201"]

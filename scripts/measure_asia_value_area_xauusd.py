@@ -140,6 +140,54 @@ class ValueArea:
         return self.high - self.low
 
 
+@dataclass(frozen=True, slots=True)
+class StopRule:
+    """Where the stop goes.
+
+    The source rule supplies none, so the baseline here is the reading taken in
+    D-146 - the liquidity wick - and the alternatives exist to answer the one
+    question D-146 left open: whether the setup's reward-to-risk is negative
+    *because of the wick*, or negative whatever the stop is.
+
+    A `width_multiple` of k puts the stop k value-area widths beyond the faded
+    edge. Since the target is the opposite edge, that fixes reward:risk at
+    roughly 1/k by construction - the geometry becomes a choice rather than
+    something the market hands you. `cap_multiple` instead keeps the wick but
+    refuses to sit further than k widths from the fill, which asks whether the
+    occasional enormous wick is what sinks the average.
+    """
+
+    label: str
+    width_multiple: Decimal | None = None
+    cap_multiple: Decimal | None = None
+
+    def level(
+        self, *, area: ValueArea, entry: Decimal, excursion: Decimal, short: bool
+    ) -> Decimal:
+        width = area.width
+        if self.width_multiple is not None:
+            edge = area.high if short else area.low
+            offset = width * self.width_multiple
+            return edge + offset if short else edge - offset
+        if self.cap_multiple is None:
+            return excursion
+        limit = width * self.cap_multiple
+        return min(excursion, entry + limit) if short else max(excursion, entry - limit)
+
+
+#: The baseline is first and is the rule as D-146 measured it; nothing below it
+#: was chosen by looking at a result. The multiples are a plain geometric
+#: sweep - quarter, half, three-quarters, one width - not a search.
+STOP_RULES: tuple[StopRule, ...] = (
+    StopRule("wick (as described)"),
+    StopRule("wick, capped at 1.0x width", cap_multiple=Decimal("1.0")),
+    StopRule("fixed 0.25x width", width_multiple=Decimal("0.25")),
+    StopRule("fixed 0.50x width", width_multiple=Decimal("0.50")),
+    StopRule("fixed 0.75x width", width_multiple=Decimal("0.75")),
+    StopRule("fixed 1.00x width", width_multiple=Decimal("1.00")),
+)
+
+
 @dataclass
 class Trade:
     """One round trip. Spread is the only cost that can apply intraday."""
@@ -319,6 +367,7 @@ def simulate_session(
     day_bars: list[Bar],
     *,
     invert_bias: bool,
+    stop_rule: StopRule,
     spread: SpreadProfile,
     skips: Skips,
 ) -> Trade | None:
@@ -380,7 +429,8 @@ def simulate_session(
         if (short and entry <= target) or (not short and entry >= target):
             skips.note("target already passed at the fill")
             return None
-        if (short and excursion <= entry) or (not short and excursion >= entry):
+        stop = stop_rule.level(area=area, entry=entry, excursion=excursion, short=short)
+        if (short and stop <= entry) or (not short and stop >= entry):
             skips.note("stop on the wrong side of the fill")
             return None
         return _walk_out(
@@ -389,7 +439,7 @@ def simulate_session(
                 side=Side.SELL if short else Side.BUY,
                 entry_ts=entry_bar.ts,
                 entry_price=entry,
-                stop=excursion,
+                stop=stop,
                 target=target,
                 value_area=area,
             ),
@@ -463,6 +513,39 @@ class Summary:
         won = sum((t.net_pnl for t in self.wins), Decimal("0"))
         lost = -sum((t.net_pnl for t in self.trades if t.net_pnl <= 0), Decimal("0"))
         return None if lost == 0 else won / lost
+
+    @property
+    def avg_reward(self) -> Decimal | None:
+        if not self.trades:
+            return None
+        return sum((t.reward for t in self.trades), Decimal("0")) / Decimal(len(self.trades))
+
+    @property
+    def avg_risk(self) -> Decimal | None:
+        if not self.trades:
+            return None
+        return sum((t.risk for t in self.trades), Decimal("0")) / Decimal(len(self.trades))
+
+    @property
+    def reward_risk(self) -> Decimal | None:
+        reward, risk = self.avg_reward, self.avg_risk
+        if reward is None or risk is None or risk == 0:
+            return None
+        return reward / risk
+
+    @property
+    def break_even_win_rate(self) -> Decimal | None:
+        """The win rate this geometry needs just to stand still, in percent.
+
+        From the averages, so it is a description of the shape of the trade
+        rather than of this particular sequence of outcomes: risk / (risk +
+        reward). Printed beside the achieved win rate because the gap between
+        the two is the only number in the sweep that is not mostly noise.
+        """
+        reward, risk = self.avg_reward, self.avg_risk
+        if reward is None or risk is None or reward + risk == 0:
+            return None
+        return risk / (reward + risk) * Decimal("100")
 
     @property
     def per_trade_sd(self) -> Decimal | None:
@@ -558,6 +641,55 @@ def report(summary: Summary, *, started: date, ended: date, spread_note: str, cl
         print(f"  {count:>3}  {reason}")
 
 
+def print_sweep(title: str, summaries: list[Summary]) -> None:
+    """One line a stop rule, so the geometry can be compared at a glance."""
+    print()
+    print(f"=== {title} ===")
+    print(
+        f"{'stop rule':<28}{'n':>4}{'win%':>7}{'b/e%':>7}{'R:R':>7}"
+        f"{'gross':>12}{'spread':>11}{'net':>12}{'exp':>9}{'PF':>7}{'t':>7}"
+    )
+    for s in summaries:
+        rr, be, pf, t = s.reward_risk, s.break_even_win_rate, s.profit_factor, s.t_stat
+        n = len(s.trades)
+        win = Decimal(len(s.wins)) / Decimal(n) * Decimal("100") if n else Decimal("0")
+        print(
+            f"{s.label:<28}{n:>4}{win:>7.1f}{'  n/a' if be is None else f'{be:>7.1f}'}"
+            f"{'  n/a' if rr is None else f'{rr:>7.2f}'}"
+            f"{_money(s.gross):>12}{_money(-s.spread):>11}{_money(s.net):>12}"
+            f"{_money(s.net / Decimal(n)) if n else '-':>9}"
+            f"{'  n/a' if pf is None else f'{pf:>7.2f}'}"
+            f"{'  n/a' if t is None else f'{t:>7.2f}'}"
+        )
+
+
+def run_variant(
+    days: list[date],
+    grouped: dict[date, list[Bar]],
+    *,
+    label: str,
+    stop_rule: StopRule,
+    invert_bias: bool,
+    spread: SpreadProfile,
+) -> Summary:
+    skips = Skips()
+    trades = [
+        trade
+        for day in days
+        if (
+            trade := simulate_session(
+                day,
+                grouped[day],
+                invert_bias=invert_bias,
+                stop_rule=stop_rule,
+                spread=spread,
+                skips=skips,
+            )
+        )
+    ]
+    return Summary(label=label, trades=trades, skips=skips, sessions=len(days))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Asia value-area fade, measured")
     parser.add_argument("--months", type=int, default=8, help="how far back to ask MT5")
@@ -575,25 +707,46 @@ def main() -> None:
     days = sorted(grouped)
     print(f"M1 bars: {len(bars):,} from {bars[0].ts} to {bars[-1].ts}")
 
+    baseline = STOP_RULES[0]
     runs = (("value-area fade, as described", False), ("control: same rules, bias inverted", True))
     for label, invert in runs:
-        skips = Skips()
-        trades = [
-            trade
-            for day in days
-            if (
-                trade := simulate_session(
-                    day, grouped[day], invert_bias=invert, spread=profile, skips=skips
-                )
-            )
-        ]
         report(
-            Summary(label=label, trades=trades, skips=skips, sessions=len(days)),
+            run_variant(
+                days,
+                grouped,
+                label=label,
+                stop_rule=baseline,
+                invert_bias=invert,
+                spread=profile,
+            ),
             started=days[0],
             ended=days[-1],
             spread_note=profile.describe(),
             clock=clock,
         )
+
+    for title, invert in (("stop sweep", False), ("stop sweep, bias inverted", True)):
+        print_sweep(
+            title,
+            [
+                run_variant(
+                    days,
+                    grouped,
+                    label=rule.label,
+                    stop_rule=rule,
+                    invert_bias=invert,
+                    spread=profile,
+                )
+                for rule in STOP_RULES
+            ],
+        )
+    print()
+    print("b/e% is the win rate each geometry needs to break even.")
+    print(
+        f"A sweep over {len(days)} sessions cannot select a stop rule - see D-146 on "
+        "the sample. It can only"
+    )
+    print("show whether any of them gets the achieved win rate above the one the shape requires.")
 
 
 if __name__ == "__main__":
