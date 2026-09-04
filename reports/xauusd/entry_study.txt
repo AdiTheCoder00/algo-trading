@@ -1,0 +1,104 @@
+====================================================================================================
+TIGHTENING THE ENTRY: FIVE HYPOTHESES, ONE CONTROL, THREE WINDOWS
+====================================================================================================
+
+  Everything before this measured the strategy as specified. This goes looking for a better one,
+  which is a different and much less trustworthy activity. Read the control rows first: they
+  take fewer trades for no reason at all, and whatever they achieve is what taking fewer trades
+  achieves by itself.
+
+  window            Dukascopy 2024-01 .. 2025-05  (95,071 M5 bars)
+  costs             realistic: per-bar measured spread, measured swap,
+                    zero commission, $0.05 slippage on a stop
+  'kept' column     trades as a share of the unfiltered baseline's
+
+====================================================================================================
+1. IN SAMPLE  (first 70% - the window a filter is at risk of being fitted to)
+====================================================================================================
+
+  in sample  2024-01 .. 2024-12
+                                 trades    win%      net $      PF    exp $     maxDD   kept
+    baseline (no filter)            331   48.6%     -34.03   0.966    -0.10   -105.29 100.0%
+    1. ATR >= 8x spread              25   72.0%    +108.72   2.427    +4.35    -33.89   7.6%
+    1b. ATR >= 12x spread             0     n/a      +0.00     n/a      n/a     +0.00   0.0%
+    2. EMA gap >= 0.5 H1 ATR        206   51.5%    +110.19   1.198    +0.53    -43.71  62.2%
+    3. MACD hist expanding          129   43.4%    -178.46   0.659    -1.38   -190.06  39.0%
+    4. stoch beyond 70/30           268   47.4%     -26.83   0.965    -0.10   -111.75  81.0%
+    5. all four                       6   66.7%     +13.86   1.496    +2.31    -20.69   1.8%
+
+    control: drop 25% at random     280   47.1%     +16.24   1.020    +0.06    -65.02  84.6%
+
+    control: drop 50% at random     215   47.9%      -4.05   0.994    -0.02    -78.76  65.0%
+
+    control: drop 75% at random     117   50.4%     +57.92   1.184    +0.50    -50.67  35.3%
+
+====================================================================================================
+2. OUT OF SAMPLE  (last 30%, chronological)
+====================================================================================================
+
+  out of sample  2024-12 .. 2025-05
+                                 trades    win%      net $      PF    exp $     maxDD   kept
+    baseline (no filter)            125   50.4%     +14.25   1.023    +0.11   -163.75 100.0%
+    1. ATR >= 8x spread               7   28.6%     -56.56   0.457    -8.08    -71.23   5.6%
+    1b. ATR >= 12x spread             1    0.0%      -6.06   0.000    -6.06     -6.06   0.8%
+    2. EMA gap >= 0.5 H1 ATR         86   51.2%     -49.93   0.884    -0.58   -160.37  68.8%
+    3. MACD hist expanding           45   44.4%     -78.43   0.684    -1.74   -147.95  36.0%
+    4. stoch beyond 70/30           106   50.9%     +18.88   1.036    +0.18   -130.22  84.8%
+    5. all four                       1    0.0%     -33.71   0.000   -33.71    -33.71   0.8%
+
+    control: drop 25% at random     107   53.3%     +72.61   1.142    +0.68   -128.47  85.6%
+
+    control: drop 50% at random      79   54.4%    +130.62   1.397    +1.65    -85.86  63.2%
+
+    control: drop 75% at random      42   52.4%     +83.88   1.463    +2.00    -48.20  33.6%
+
+====================================================================================================
+3. THE MT5 HOLDOUT  (eight later months, different feed, no overlap)
+====================================================================================================
+
+  Flat D-121 spread here - the terminal serves no tick history for this
+  period - so the ATR/spread filter is measured against a constant rather
+  than a per-bar reading. That weakens hypothesis 1 specifically.
+
+  holdout  2025-12 .. 2026-09
+                                 trades    win%      net $      PF    exp $     maxDD   kept
+    baseline (no filter)            244   54.1%    +872.67   1.420    +3.58   -305.21 100.0%
+    1. ATR >= 8x spread             241   53.9%    +871.57   1.424    +3.62   -305.21  98.8%
+    1b. ATR >= 12x spread           210   54.8%    +891.31   1.479    +4.24   -299.53  86.1%
+    2. EMA gap >= 0.5 H1 ATR        174   56.3%    +719.00   1.464    +4.13   -290.84  71.3%
+    3. MACD hist expanding           88   58.0%    +492.63   1.793    +5.60   -142.67  36.1%
+    4. stoch beyond 70/30           212   53.8%    +783.30   1.451    +3.69   -196.36  86.9%
+    5. all four                      36   63.9%    +332.06   2.764    +9.22    -52.94  14.8%
+
+    control: drop 25% at random     201   54.7%    +916.34   1.604    +4.56   -211.42  82.4%
+
+    control: drop 50% at random     166   54.2%    +546.96   1.402    +3.29   -246.43  68.0%
+
+    control: drop 75% at random      91   53.8%    +345.17   1.564    +3.79   -127.80  37.3%
+
+====================================================================================================
+VERDICT
+====================================================================================================
+
+  Nothing survived all three tests.
+      No filter beat both the unfiltered baseline and every random control in both out-of-sample
+      windows while leaving enough trades to matter. Read that as the result it is: the entry's
+      problem is not that it is insufficiently selective. Being more selective removes trades
+      roughly at random, which is exactly what the control rows do on purpose.
+
+  What the in-sample column would have told you, and why not to listen.
+      The best filter in sample is '1. ATR >= 8x spread' at +4.35 a trade against the baseline's
+      -0.10. Out of sample the same filter makes -8.08 against a baseline of +0.11. That gap is the
+      entire argument for why the in-sample table is in this report only as a warning.
+
+  How much a filter can 'earn' by doing nothing.
+      Throwing away 25%, 50% and 75% of signals at random moves expectancy across out of sample
+      +0.68 to +2.00; holdout +3.29 to +4.56. Any real filter has to clear that band before its
+      number means anything, and several of the filters above do not.
+
+  The finding this does not change.
+      None of these rows makes the strategy profitable out of sample after costs. Filtering
+      redistributes a zero-expectancy process; it does not create an edge in one. If the entry is to
+      be fixed, it needs a different signal rather than a stricter reading of this one - and that is
+      a new strategy, not a variant of this one, and should be measured as such from scratch.
+

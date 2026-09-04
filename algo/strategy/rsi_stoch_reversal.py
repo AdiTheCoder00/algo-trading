@@ -120,6 +120,35 @@ class ScalperParams:
     allow_buy: bool = True
     allow_sell: bool = True
 
+    # --- optional entry filters, all off by default
+    #
+    # These are NOT part of the specified strategy and every one of them is
+    # `None` in `BASELINE` and in `SPEC_BASELINE`. They exist so that
+    # `study_xauusd_entry.py` can ask whether the entry can be made more
+    # selective, and each is stated as a hypothesis before it is measured -
+    # see that script's docstring for what each one claims and why.
+    #
+    #: Require ATR(14) at the signal to be at least this many times the full
+    #: spread quoted in that bar. The strategy's own result says costs and edge
+    #: are the same size, so the first hypothesis worth testing is "only trade
+    #: when the move available is large relative to what it costs to take".
+    min_atr_per_spread: Decimal | None = None
+    #: Require |EMA20 - EMA50| on the H1 candle to be at least this many H1
+    #: ATRs. A trend filter that only checks the SIGN of the gap fires on two
+    #: EMAs a cent apart, which is not a trend; this asks for separation.
+    min_trend_separation: Decimal | None = None
+    #: Require the H1 MACD histogram to be growing in magnitude - momentum
+    #: accelerating rather than fading. Adds no constant to fit.
+    require_expanding_macd: bool = False
+    #: Trade only in these UTC hours. The most dangerous of the filters, and it
+    #: is here to be *measured* as dangerous: hour-of-day is exactly the sort of
+    #: cut that fits beautifully in sample and means nothing out of it.
+    allowed_hours: tuple[int, ...] | None = None
+    #: Drop this fraction of otherwise-valid signals, deterministically and for
+    #: no reason at all. The control: any filter that does not beat this is
+    #: selecting, not filtering.
+    drop_fraction: Decimal | None = None
+
     #: Engine lots. One engine lot is one ounce, so 0.01 MT5 lots (the brief's
     #: size) is 1 here and a $1 move in gold is $1 of P&L. Spelled out because
     #: "0.01 lot" means different things on different platforms, and the stop
@@ -169,6 +198,66 @@ SPEC_BASELINE = ScalperParams()
 #: It does not make the strategy profitable and was not adopted for that. Every
 #: ATR row in both windows sits in the same band as every dollar row.
 BASELINE = ScalperParams(stop_atr_multiple=Decimal("6"))
+
+
+@dataclass(frozen=True, slots=True)
+class EntryContext:
+    """What the optional filters read, beyond what `entry_side` already sees.
+
+    A separate object so `entry_side` keeps its narrow signature - the specified
+    rule needs none of this - and so the runner has one obvious place to assemble
+    it. Every field is what was true on the **confirmation candle**, never later.
+    """
+
+    m5_atr: float
+    full_spread: Decimal
+    h1_ema_gap: float
+    h1_atr: float
+    h1_hist: float
+    h1_hist_previous: float
+    hour: int
+    signal_index: int
+
+
+def passes_filters(context: EntryContext, params: ScalperParams = BASELINE) -> str | None:
+    """`None` if the signal survives every filter, else the name of the one that
+    rejected it.
+
+    Returns the name rather than a bool so a run can report *which* filter did
+    the work - with several of them on at once, "the filters rejected 400
+    signals" says nothing about whether one of them is doing everything.
+    """
+    if params.allowed_hours is not None and context.hour not in params.allowed_hours:
+        return "hour"
+
+    if params.min_atr_per_spread is not None:
+        if context.m5_atr != context.m5_atr or context.full_spread <= 0:
+            return "atr/spread"
+        ratio = Decimal(str(context.m5_atr)) / context.full_spread
+        if ratio < params.min_atr_per_spread:
+            return "atr/spread"
+
+    if params.min_trend_separation is not None:
+        if context.h1_atr != context.h1_atr or context.h1_atr <= 0:
+            return "trend separation"
+        if abs(context.h1_ema_gap) / context.h1_atr < float(params.min_trend_separation):
+            return "trend separation"
+
+    if params.require_expanding_macd:
+        now, before = context.h1_hist, context.h1_hist_previous
+        if now != now or before != before:
+            return "macd expanding"
+        if abs(now) <= abs(before):
+            return "macd expanding"
+
+    if params.drop_fraction is not None:
+        # A fixed multiplier rather than `random`: the control has to give the
+        # same answer on every run, or comparing against it is meaningless.
+        bucket = (context.signal_index * 2654435761) % 1000
+        if bucket < int(params.drop_fraction * 1000):
+            return "control drop"
+
+    return None
 
 
 def trend_of(*, ema_fast: float, ema_slow: float, macd_line: float, macd_signal: float) -> Trend:

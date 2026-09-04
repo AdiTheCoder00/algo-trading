@@ -703,3 +703,113 @@ def test_the_atr_baseline_risks_a_different_amount_on_every_trade() -> None:
     assert len(distances) > 1, "an ATR stop that never varies is not an ATR stop"
     for trade in result.trades:
         assert trade.stop_distance > 0
+
+
+# ------------------------------------------------------------- the entry filters
+
+
+def _context(**overrides):
+    from algo.strategy.rsi_stoch_reversal import EntryContext
+
+    base = {
+        "m5_atr": 2.0,
+        "full_spread": Decimal("0.40"),
+        "h1_ema_gap": 5.0,
+        "h1_atr": 4.0,
+        "h1_hist": 1.5,
+        "h1_hist_previous": 1.0,
+        "hour": 10,
+        "signal_index": 0,
+    }
+    return EntryContext(**{**base, **overrides})
+
+
+def test_no_filter_is_on_in_either_baseline() -> None:
+    """The filters exist to be studied, not to be shipped on by accident."""
+    from algo.strategy.rsi_stoch_reversal import passes_filters
+
+    for params in (BASELINE, SPEC_BASELINE):
+        assert params.min_atr_per_spread is None
+        assert params.min_trend_separation is None
+        assert params.require_expanding_macd is False
+        assert params.allowed_hours is None
+        assert params.drop_fraction is None
+        assert passes_filters(_context(), params) is None
+
+
+def test_each_filter_rejects_for_its_own_reason() -> None:
+    from dataclasses import replace
+
+    from algo.strategy.rsi_stoch_reversal import passes_filters
+
+    cost = replace(BASELINE, min_atr_per_spread=Decimal("8"))
+    # ATR 2.0 against a 0.40 spread is a ratio of 5 - under the bar.
+    assert passes_filters(_context(), cost) == "atr/spread"
+    assert passes_filters(_context(m5_atr=4.0), cost) is None
+
+    trend = replace(BASELINE, min_trend_separation=Decimal("0.5"))
+    assert passes_filters(_context(h1_ema_gap=1.0), trend) == "trend separation"
+    assert passes_filters(_context(h1_ema_gap=3.0), trend) is None
+    # Sign must not matter - a bearish trend is just as separated.
+    assert passes_filters(_context(h1_ema_gap=-3.0), trend) is None
+
+    macd = replace(BASELINE, require_expanding_macd=True)
+    assert passes_filters(_context(h1_hist=1.0, h1_hist_previous=1.5), macd) == "macd expanding"
+    assert passes_filters(_context(h1_hist=1.5, h1_hist_previous=1.0), macd) is None
+    # Expanding downward is expanding.
+    assert passes_filters(_context(h1_hist=-1.5, h1_hist_previous=-1.0), macd) is None
+
+    hours = replace(BASELINE, allowed_hours=(8, 9, 10))
+    assert passes_filters(_context(hour=11), hours) == "hour"
+    assert passes_filters(_context(hour=9), hours) is None
+
+
+def test_a_missing_measurement_rejects_rather_than_passes() -> None:
+    """A filter that cannot be evaluated must not wave the trade through - that
+    would make its coverage depend silently on the indicator warmup."""
+    from dataclasses import replace
+
+    from algo.strategy.rsi_stoch_reversal import passes_filters
+
+    nan = float("nan")
+    cost = replace(BASELINE, min_atr_per_spread=Decimal("8"))
+    assert passes_filters(_context(m5_atr=nan), cost) == "atr/spread"
+    assert passes_filters(_context(full_spread=Decimal("0")), cost) == "atr/spread"
+
+    trend = replace(BASELINE, min_trend_separation=Decimal("0.5"))
+    assert passes_filters(_context(h1_atr=nan), trend) == "trend separation"
+
+    macd = replace(BASELINE, require_expanding_macd=True)
+    assert passes_filters(_context(h1_hist=nan), macd) == "macd expanding"
+
+
+def test_the_random_control_drops_about_its_fraction_and_does_so_repeatably() -> None:
+    """The control is only a control if it is stable across runs - otherwise
+    comparing a filter against it compares two different things."""
+    from dataclasses import replace
+
+    from algo.strategy.rsi_stoch_reversal import passes_filters
+
+    control = replace(BASELINE, drop_fraction=Decimal("0.5"))
+    verdicts = [
+        passes_filters(_context(signal_index=i), control) is not None for i in range(1000)
+    ]
+    dropped = sum(verdicts)
+    assert 400 < dropped < 600, f"expected roughly half dropped, got {dropped}"
+
+    again = [
+        passes_filters(_context(signal_index=i), control) is not None for i in range(1000)
+    ]
+    assert verdicts == again, "the control must give the same answer every run"
+
+
+def test_a_filter_reduces_trades_and_is_counted_by_name() -> None:
+    from dataclasses import replace
+
+    strict = replace(BASELINE, min_trend_separation=Decimal("0.5"))
+    _m5, _h1, unfiltered = _forced_run()
+    _m5, _h1, filtered = _forced_run(params=strict)
+
+    assert len(filtered.trades) < len(unfiltered.trades)
+    assert filtered.blocked_by_filter.get("trend separation", 0) > 0
+    assert not unfiltered.blocked_by_filter, "the baseline blocks nothing by filter"

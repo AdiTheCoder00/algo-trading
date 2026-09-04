@@ -78,11 +78,13 @@ from algo.exchange.forex_calendar import ForexCalendar
 from algo.pricing.indicators import atr, ema, macd, rsi, stoch_rsi
 from algo.strategy.rsi_stoch_reversal import (
     BASELINE,
+    EntryContext,
     ExitReason,
     ExitState,
     ScalperParams,
     Trend,
     entry_side,
+    passes_filters,
     rsi_reversal_exit,
     stop_distance,
     stop_level,
@@ -195,6 +197,9 @@ class ScalperResult:
     blocked_by_news: int = 0
     blocked_by_daily_limit: int = 0
     blocked_while_in_position: int = 0
+    #: filter name -> how many signals it rejected. Empty on the baseline, which
+    #: has no filters; per-name so one filter cannot hide behind another.
+    blocked_by_filter: dict[str, int] = field(default_factory=dict)
     #: Trading days on which realised P&L reached the limit, and the day's total.
     limit_days: dict[date, Decimal] = field(default_factory=dict)
     daily_realised: dict[date, Decimal] = field(default_factory=dict)
@@ -228,6 +233,7 @@ class Indicators:
     stoch_k: list[float]
     stoch_d: list[float]
     m5_atr: list[float]
+    h1_atr: list[float]
     #: For M5 bar i, the index of the last **completed** H1 bar, or -1.
     h1_index: list[int]
 
@@ -274,6 +280,13 @@ def compute_indicators(
         params.atr_period,
     )
 
+    h1_ranges = atr(
+        [float(b.high) for b in h1],
+        [float(b.low) for b in h1],
+        h1_close,
+        params.atr_period,
+    )
+
     mapping: list[int] = []
     pointer = -1
     for bar in m5:
@@ -292,6 +305,7 @@ def compute_indicators(
         stoch_k=stoch.k,
         stoch_d=stoch.d,
         m5_atr=ranges,
+        h1_atr=h1_ranges,
         h1_index=mapping,
     )
 
@@ -508,7 +522,26 @@ def run_scalper(
                         if params.news_filter and calendar is not None
                         else None
                     )
-                    if event is not None:
+                    rejected = passes_filters(
+                        EntryContext(
+                            m5_atr=ind.m5_atr[i],
+                            full_spread=half * 2,
+                            h1_ema_gap=ind.h1_ema_fast[h1_index] - ind.h1_ema_slow[h1_index],
+                            h1_atr=ind.h1_atr[h1_index],
+                            h1_hist=ind.h1_hist[h1_index],
+                            h1_hist_previous=(
+                                ind.h1_hist[h1_index - 1] if h1_index else float("nan")
+                            ),
+                            hour=bar.ts.hour,
+                            signal_index=i,
+                        ),
+                        params,
+                    )
+                    if rejected is not None:
+                        result.blocked_by_filter[rejected] = (
+                            result.blocked_by_filter.get(rejected, 0) + 1
+                        )
+                    elif event is not None:
                         result.blocked_by_news += 1
                     elif day in result.limit_days:
                         # A latch, not a running comparison. "Block all new
