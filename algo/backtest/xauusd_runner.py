@@ -75,7 +75,7 @@ from algo.core.instrument import CfdId
 from algo.costs.slippage import NoSlippage, SlippageModel
 from algo.data.econ_calendar import EconomicCalendar
 from algo.exchange.forex_calendar import ForexCalendar
-from algo.pricing.indicators import ema, macd, rsi, stoch_rsi
+from algo.pricing.indicators import atr, ema, macd, rsi, stoch_rsi
 from algo.strategy.rsi_stoch_reversal import (
     BASELINE,
     ExitReason,
@@ -84,6 +84,7 @@ from algo.strategy.rsi_stoch_reversal import (
     Trend,
     entry_side,
     rsi_reversal_exit,
+    stop_distance,
     stop_level,
     trend_of,
 )
@@ -144,6 +145,11 @@ class ScalperTrade:
     stoch_d: float = float("nan")
 
     daily_realised_before: Decimal = Decimal("0")
+    #: How far the stop sat from entry, in price. Recorded per trade because
+    #: under an ATR stop it differs from one trade to the next, and a log that
+    #: does not say where the stop was cannot be checked.
+    stop_distance: Decimal = Decimal("0")
+    m5_atr: float = float("nan")
     news_status: str = "clear"
     rsi_extreme_activated: bool = False
     bars_held: int = 0
@@ -221,6 +227,7 @@ class Indicators:
     m5_rsi: list[float]
     stoch_k: list[float]
     stoch_d: list[float]
+    m5_atr: list[float]
     #: For M5 bar i, the index of the last **completed** H1 bar, or -1.
     h1_index: list[int]
 
@@ -260,6 +267,13 @@ def compute_indicators(
         smooth_d=params.stoch_smooth_d,
     )
 
+    ranges = atr(
+        [float(b.high) for b in m5],
+        [float(b.low) for b in m5],
+        m5_close,
+        params.atr_period,
+    )
+
     mapping: list[int] = []
     pointer = -1
     for bar in m5:
@@ -277,6 +291,7 @@ def compute_indicators(
         m5_rsi=strength,
         stoch_k=stoch.k,
         stoch_d=stoch.d,
+        m5_atr=ranges,
         h1_index=mapping,
     )
 
@@ -374,6 +389,10 @@ def run_scalper(
                 stoch_k=ind.stoch_k[signal_index],
                 stoch_d=ind.stoch_d[signal_index],
                 daily_realised_before=result.daily_realised.get(entry_day, Decimal("0")),
+                stop_distance=stop_distance(
+                    params, atr_at_entry=ind.m5_atr[signal_index]
+                ),
+                m5_atr=ind.m5_atr[signal_index],
                 # Recorded whether or not the filter is on, so a run with it off
                 # can still be asked how many of its trades were news trades.
                 news_status=_news_status(calendar, signal_bar.ts, params),
@@ -398,7 +417,9 @@ def run_scalper(
             trade.bars_held += 1
             _mark(trade, bar, half)
 
-            level = stop_level(trade.side, trade.entry_price, params)
+            level = stop_level(
+                trade.side, trade.entry_price, params, distance=trade.stop_distance
+            )
             open_exec = _exit_exec(trade.side, bar.open, half)
             worst_exec = _exit_exec(
                 trade.side, bar.low if trade.side is Side.BUY else bar.high, half

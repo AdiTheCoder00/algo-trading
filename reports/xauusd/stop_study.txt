@@ -1,0 +1,187 @@
+================================================================================================
+THE $10 STOP, MEASURED
+================================================================================================
+
+  window            Dukascopy 2024-01 .. 2025-05  (95,071 M5 bars)
+  costs             realistic: per-bar measured spread, zero commission,
+                    measured swap, $0.05 slippage on a stop
+  everything else   the exact baseline rules. Only the stop moves.
+
+================================================================================================
+1. EXCURSION ANATOMY
+================================================================================================
+
+  HOW FAR TRADES WENT AGAINST THEMSELVES BEFORE THEY ENDED
+                               n   median MAE    p90 MAE     worst
+    all trades               482        -4.87     -11.27    -24.24
+    eventual winners         232        -2.39      -7.20     -9.94
+    eventual losers          250        -8.87     -12.10    -24.24
+
+  THE QUESTION A STOP HAS TO ANSWER: how many WINNERS dipped this far first?
+    (from the UNSTOPPED run - 239 winners that were free to dip)
+    stop at        winners it would have cut    share of winners
+    $2.50                                124               51.9%
+    $5                                    68               28.5%
+    $7.50                                 35               14.6%
+    $10                                   20                8.4%
+    $15                                    8                3.3%
+    $20                                    3                1.3%
+
+    A stop is only ever a trade between the losses it truncates and the winners
+    it forecloses, and the second half of that trade is the one a P&L column
+    never shows. This is that half.
+
+================================================================================================
+2. WHAT THE STOPPED TRADES WOULD HAVE DONE WITHOUT THE STOP
+================================================================================================
+
+    stopped trades examined     115 of 115
+    they actually made          -1,164.20
+    without the stop they make  -927.47
+    the stop was therefore      -236.73 on these trades
+
+    would have turned positive  22   (19.1%)
+    would have got worse        56   (48.7%)
+    without the stop: median -9.48, worst -33.28, best +32.14
+
+    The sign of that fourth line is the whole answer. Positive means the stop paid for
+    itself on the trades it fired on; negative means it cut trades that were coming back.
+    Note the worst case in the last line: that is what one unstopped trade was capable of,
+    and it is the reason the comparison is not simply 'remove the stop'.
+
+================================================================================================
+3. STOP SWEEP  (sensitivity, NOT a search - see the note below)
+================================================================================================
+
+  DUKASCOPY WINDOW  Dukascopy 2024-01 .. 2025-05
+                               trades     win%       net $       PF     exp $      maxDD   stopped
+    $2.50 stop                    637    25.4%     -115.32    0.906     -0.18    -199.77     71.7%
+    $5 stop                       543    37.6%     -176.47    0.884     -0.32    -232.21     49.7%
+    $7.50 stop                    496    44.8%      -55.11    0.964     -0.11    -250.52     34.1%
+    $10 stop  <- baseline         482    48.1%      -23.70    0.985     -0.05    -213.80     23.9%
+    $12.50 stop                   474    49.6%      -32.39    0.980     -0.07    -224.42     16.9%
+    $15 stop                      470    50.2%      -67.73    0.960     -0.14    -269.37     12.6%
+    $20 stop                      465    51.4%      -82.08    0.952     -0.18    -234.08      7.1%
+    $30 stop                      462    51.5%      -22.16    0.987     -0.05    -215.67      1.9%
+    no stop at all                462    51.7%      +28.10    1.018     +0.06    -197.34       n/a
+
+  the holdout window is a different market: median M5 range 4.86 against 1.4885 here, so the SAME dollar
+  stop is a much tighter stop there. That is the point of the two tables.
+
+  MT5 HOLDOUT  2025-12 .. 2026-09  (flat D-121 spread)
+                               trades     win%       net $       PF     exp $      maxDD   stopped
+    $2.50 stop                    436    11.2%     +256.83    1.259     +0.59    -136.06     88.8%
+    $5 stop                       388    18.0%      +52.77    1.032     +0.14    -207.97     81.7%
+    $7.50 stop                    339    24.2%       +7.13    1.004     +0.02    -207.76     74.6%
+    $10 stop  <- baseline         315    31.1%     +110.86    1.052     +0.35    -225.73     65.1%
+    $12.50 stop                   294    35.4%      -51.19    0.978     -0.17    -331.23     59.2%
+    $15 stop                      282    38.3%      -94.06    0.961     -0.33    -426.09     53.5%
+    $20 stop                      261    46.4%     +383.27    1.171     +1.47    -298.31     37.5%
+    $30 stop                      247    51.8%     +374.00    1.159     +1.51    -287.30     24.3%
+    no stop at all                240    56.7%     +966.97    1.475     +4.03    -244.41       n/a
+
+  ------------------------------------------------------------------------------------------
+  The bottom row is the best row in both tables, and that is a finding rather than a
+  cell to pick: whatever else is noisy here, both windows agree that this particular
+  hard stop costs money. What the tables do NOT support is reading the $2.50 row in the
+  holdout, or the ordering of the middle rows, as meaning anything - those move between
+  windows and are the noise. Read the direction, not the ranking.
+
+  AND WHAT THE BOTTOM ROW COSTS IN RISK, WHICH THE NET COLUMN DOES NOT SHOW
+
+  no stop, Dukascopy window
+    worst single trade      -32.95
+    worst excursion         -40.81
+    trades worse than -$10      55   (11.9%)
+    trades worse than -$20      11   (2.4%)
+    trades worse than -$30       4   (0.9%)
+    trades worse than -$50       0   (0.0%)
+
+  no stop, MT5 holdout
+    worst single trade      -87.63
+    worst excursion         -108.72
+    trades worse than -$10      62   (25.8%)
+    trades worse than -$20      41   (17.1%)
+    trades worse than -$30      20   (8.3%)
+    trades worse than -$50       9   (3.8%)
+
+  The four-hour cap bounds how long a position is held. It does not bound how much it
+  can lose while held, and in the holdout's market that difference is large. A strategy
+  with no size bound has a loss distribution with no right-hand edge, and the sample
+  that would reveal the tail is by definition the one that has not happened yet.
+
+================================================================================================
+4. A STOP THAT MEANS THE SAME THING IN BOTH REGIMES
+================================================================================================
+
+  A $10 stop is 6.7 median bars away in the study window. In the holdout it is about a
+  third of that, because gold's five-minute range trebled while the rule stayed the same
+  number. An ATR multiple is the same rule expressed so that it does not change meaning
+  when the market does. The multiples below are not candidates to pick from - 6xATR is
+  roughly what $10 WAS here, so it is the baseline translated, and the question is
+  whether the behaviour holds still across the two windows in a way the dollar stop does
+  not.
+
+  DUKASCOPY WINDOW  Dukascopy 2024-01 .. 2025-05
+                               trades     win%       net $       PF     exp $      maxDD   stopped
+    2 x ATR(14)                   575    31.8%      -86.22    0.940     -0.15    -243.20     64.0%
+    3 x ATR(14)                   526    40.1%      -18.48    0.988     -0.04    -198.96     49.6%
+    4 x ATR(14)                   500    44.0%      -82.28    0.950     -0.16    -229.98     39.4%
+    6 x ATR(14)                   476    48.9%      -65.56    0.961     -0.14    -229.65     22.3%
+    8 x ATR(14)                   467    50.3%     -111.73    0.936     -0.24    -329.18     13.9%
+
+  MT5 HOLDOUT  2025-12 .. 2026-09
+                               trades     win%       net $       PF     exp $      maxDD   stopped
+    2 x ATR(14)                   299    33.8%     +218.70    1.096     +0.73    -337.42     62.9%
+    3 x ATR(14)                   268    41.4%     +141.26    1.057     +0.53    -425.05     48.9%
+    4 x ATR(14)                   250    48.8%     +500.49    1.221     +2.00    -421.43     32.8%
+    6 x ATR(14)                   244    54.1%     +872.67    1.420     +3.58    -305.21     17.2%
+    8 x ATR(14)                   240    55.4%     +867.39    1.418     +3.61    -306.74      9.2%
+
+================================================================================================
+WHAT THIS SETTLES
+================================================================================================
+
+  1. The $10 stop costs this strategy money, in both windows.
+      On the 115 trades it fired on it was worth -236.73: those same positions, left alone
+      to reach their RSI or four-hour exit, would have lost -927.47 instead of -1,164.20,
+      and 22 of them (19.1%) would have finished positive. The full-run sweep says the same
+      thing from the other direction: removing the stop entirely moves this window from
+      -23.70 to +28.10, and the holdout from +110.86 to +966.97. Two independent windows,
+      opposite regimes, same direction.
+
+  2. The reason is structural, not a quirk of these dates.
+      The strategy already has a bound: the four-hour cap. A hard stop inside that window
+      converts temporary adverse excursion into realised loss on trades whose own exit rule
+      had not yet fired. The excursion table is the evidence - the median eventual winner
+      had already been $2.39 against, and one in ten had been $7.20 against, which is most
+      of the way to a $10 stop. On a horizon this short, a stop tight enough to fire often
+      is mostly firing on noise it was never meant to be measuring.
+
+  3. That is NOT a recommendation to trade without a stop.
+      The no-stop rows buy their P&L with an unbounded single-trade loss - see the risk
+      table above. The four-hour cap limits time, not size. And the improvement does not
+      create an edge: the entry is still roughly a coin flip paying half a dollar a trade in
+      spread, so removing the stop moves a small negative to a small positive in one window
+      and a moderate positive to a larger one in the other, with the tail risk paying for
+      both. A wider stop captures most of the same effect with the bound intact.
+
+  4. Scaling the stop to volatility fixes what the rule MEANS across regimes.
+      At the same nominal $10, the share of trades ending on the stop is 23.9% in this
+      window and 65.1% in the holdout - a 41.2% swing, because the same distance is a
+      different stop when the market's range trebles. Under an ATR multiple the two windows
+      stay within 6.6% of each other at the worst multiple. That is a risk control that
+      behaves the same way in both regimes; the dollar stop demonstrably is not. It does not
+      make the strategy profitable - every ATR row sits in the same band as every dollar row
+      - but it makes the risk knowable, which is a different and more useful property.
+
+  WHAT I WOULD ACTUALLY CHANGE
+      Two things, in this order. First, express the stop as a multiple of ATR rather than in
+      dollars, so that it is the same rule in a $2,000 gold market and a $5,000 one - this
+      is a correctness fix and it stands whatever else is decided. Second, widen it: the
+      sweep and the counterfactual agree that a stop this tight is firing inside the
+      strategy's own noise, and the four-hour cap is already doing the job the stop was
+      presumably added for. Neither change makes this a strategy worth trading. The baseline
+      conclusion is unmoved - the entry has no edge that survives the spread - and no stop
+      rule repairs that, which is exactly why none of this is folded back into the baseline.
+

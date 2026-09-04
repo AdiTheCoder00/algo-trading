@@ -40,20 +40,29 @@ import argparse
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from itertools import pairwise
 from pathlib import Path
 
-from algo.backtest.cfd_runner import CfdCosts
-from algo.backtest.xauusd_runner import ScalperResult, compute_indicators, run_scalper
-from algo.core.bar import Bar, Timeframe
-from algo.core.errors import DataError
-from algo.costs.cfd import CfdChargeModel, SwapModel
+from algo.backtest.xauusd_runner import compute_indicators
+from algo.backtest.xauusd_study import (
+    ACCOUNT,
+    BARS_PER_YEAR,
+    HEADER,
+    amount,
+    bar_range,
+    cost_scenarios,
+    free_costs,
+    line,
+    load_dataset,
+    money,
+    mt5_costs,
+    mt5_m5_bars,
+    num,
+    pct,
+    run,
+    wrap,
+)
 from algo.costs.slippage import TickSlippage
-from algo.data.dukascopy import MeasuredSpread, load_spread_series, regrid_bars
 from algo.data.econ_calendar import EconomicCalendar
-from algo.data.mt5_history import fetch_history, resolve_server_offset
-from algo.data.mt5_spread import load_profile
-from algo.data.parquet_feed import read_parquet_bars
 from algo.reporting import export, metrics, tearsheet
 from algo.reporting.scalper_report import (
     CONTEXT_COLUMNS,
@@ -66,157 +75,6 @@ from algo.reporting.scalper_report import (
     to_trades,
 )
 from algo.strategy.rsi_stoch_reversal import BASELINE, ScalperParams
-
-M5 = Timeframe(minutes=5)
-H1 = Timeframe(minutes=60)
-TICK = Decimal("0.001")
-
-#: A plausible account for 0.01 lots. Only the drawdown *percentage* and the
-#: return depend on it; every dollar figure does not.
-ACCOUNT = Decimal("1000")
-
-#: Bars per year on a 24/5 five-minute grid - 288 a day, five days a week. Used
-#: only to annualise Sharpe and Sortino, which are computed on the bar-resolution
-#: equity curve.
-BARS_PER_YEAR = Decimal(288 * 5 * 52)
-
-
-def cost_scenarios(half: MeasuredSpread) -> dict[str, tuple[CfdCosts, TickSlippage]]:
-    """The three cost levels. See the module docstring for what each claims."""
-    swap = SwapModel.vantage_xauusd()
-    return {
-        "realistic": (
-            CfdCosts(
-                half_spread_at=half,
-                swap=swap,
-                commission=CfdChargeModel.vantage_standard(),
-            ),
-            TickSlippage(market_ticks=0, stop_ticks=50),  # $0.05 on a stop
-        ),
-        "moderate": (
-            CfdCosts(
-                half_spread_at=MeasuredSpread(
-                    half.by_ts, half.profile, multiplier=Decimal("1.5")
-                ),
-                swap=swap,
-                commission=CfdChargeModel.vantage_standard(),
-            ),
-            TickSlippage(market_ticks=100, stop_ticks=250),
-        ),
-        "conservative": (
-            CfdCosts(
-                half_spread_at=MeasuredSpread(
-                    half.by_ts, half.profile, multiplier=Decimal("2.5")
-                ),
-                swap=swap,
-                commission=CfdChargeModel(commission_per_lot=Decimal("0.03")),
-            ),
-            TickSlippage(market_ticks=200, stop_ticks=500),
-        ),
-    }
-
-
-def contiguous(bars: list[Bar], *, tolerance: timedelta = timedelta(days=7)) -> list[Bar]:
-    """The longest run of bars with no gap wider than `tolerance`.
-
-    A weekend is 2 days and the two Easter closes in this archive are 3, so a
-    week's tolerance keeps every real market closure and cuts only a hole in the
-    data. Reported by the caller either way - a silently shortened study is a
-    study about a period nobody chose.
-    """
-    if not bars:
-        return []
-    runs: list[list[Bar]] = [[bars[0]]]
-    for previous, bar in pairwise(bars):
-        if bar.ts - previous.ts > tolerance:
-            runs.append([])
-        runs[-1].append(bar)
-    return max(runs, key=len)
-
-
-def run(
-    m5: list[Bar],
-    h1: list[Bar],
-    params: ScalperParams,
-    costs: CfdCosts,
-    slippage: TickSlippage,
-    calendar: EconomicCalendar,
-    indicators=None,
-) -> ScalperResult:
-    return run_scalper(
-        m5,
-        h1,
-        params=params,
-        costs=costs,
-        calendar=calendar,
-        slippage=slippage,
-        tick=TICK,
-        starting_equity=ACCOUNT,
-        indicators=indicators,
-    )
-
-
-def line(summary: Summary) -> str:
-    """One row of a comparison table. Deliberately the same fields every time."""
-    return (
-        f"    {summary.label:<26}{summary.trades:>7}"
-        f"{_pct(summary.win_rate):>9}"
-        f"{_money(summary.net_pnl):>12}"
-        f"{_num(summary.profit_factor):>9}"
-        f"{_money(summary.expectancy):>10}"
-        f"{_money(-summary.max_drawdown):>11}"
-    )
-
-
-HEADER = (
-    f"    {'':<26}{'trades':>7}{'win%':>9}{'net $':>12}{'PF':>9}{'exp $':>10}{'maxDD':>11}"
-)
-
-
-def _pct(value):
-    return "n/a" if value is None else f"{value:.1f}%"
-
-
-def _num(value):
-    return "n/a" if value is None else f"{value:.3f}"
-
-
-def _money(value):
-    return "n/a" if value is None else f"{value:+,.2f}"
-
-
-def bar_range(bars: list[Bar]) -> Decimal:
-    """The median high-to-low of a bar series - the yardstick a fixed stop is
-    measured against.
-
-    A $10 stop is not a fixed amount of risk; it is a fixed *distance*, and what
-    that distance means depends entirely on how far the market moves in five
-    minutes. This is the number that makes that comparable across windows.
-    """
-    ranges = sorted(bar.high - bar.low for bar in bars)
-    return ranges[len(ranges) // 2]
-
-
-def close_labelled(bars: list[Bar]) -> list[Bar]:
-    """Shift MT5's open-stamped bars onto the engine's close-stamped convention.
-
-    `algo.core.bar.Bar` states its rule plainly: "a bar with `ts = 09:30` covers
-    the half-open interval (09:00, 09:30]". MT5's `time` field is the bar's
-    **opening** instant - confirmed against this archive, where an MT5 H1 bar
-    stamped 09:00 matches the Dukascopy bar covering 09:00-10:00. Feeding those
-    straight in would put every bar one interval early, and the H1 trend would
-    then be read from an hour that had not closed yet. That is precisely the
-    look-ahead the rest of this study is arranged to make impossible, so the
-    conversion is explicit and here rather than assumed anywhere.
-
-    Done locally rather than in `algo/data/mt5_history.py`: that module also
-    feeds the live loop, and changing what a timestamp means there is a change
-    to trading behaviour that nobody asked for in this study.
-    """
-    return [
-        bar.model_copy(update={"ts": bar.ts + timedelta(minutes=bar.timeframe.minutes)})
-        for bar in bars
-    ]
 
 
 def mt5_holdout(
@@ -247,29 +105,12 @@ def mt5_holdout(
     stated rather than corrected because correcting it would need the spread
     this window does not have.
     """
-    try:
-        import MetaTrader5 as terminal
-    except ImportError:
-        say("  MetaTrader5 is not importable here - holdout skipped.")
+    fetched = mt5_m5_bars()
+    if fetched is None:
+        say("  the terminal served no bars - holdout skipped. No bars rather than bars")
+        say("  on a guessed clock.")
         return None
-
-    if not terminal.initialize():
-        say(f"  the MT5 terminal did not start: {terminal.last_error()} - holdout skipped.")
-        return None
-    terminal.symbol_select("XAUUSD", True)
-
-    try:
-        resolved = resolve_server_offset(terminal, "XAUUSD")
-        bars = fetch_history(
-            terminal, symbol="XAUUSD", timeframe=M5, count=50_000, offset=resolved.offset
-        )
-    except DataError as exc:
-        say(f"  {exc}")
-        say("  holdout skipped - no bars rather than bars on a guessed clock.")
-        return None
-
-    bars = close_labelled(bars)
-    hours = regrid_bars(bars, H1)
+    bars, hours, resolved = fetched
     say(f"  server clock      {resolved.describe()}")
     say("  labelling         MT5 stamps a bar with its OPEN time; `algo.core.bar` labels by")
     say("                    CLOSE. Shifted by one bar here, or the H1 trend would be read")
@@ -294,12 +135,7 @@ def mt5_holdout(
     say("    read before comparing the row below to anything above it.")
     say()
 
-    costs = CfdCosts(
-        half_spread=Decimal("0.145"),
-        swap=SwapModel.vantage_xauusd(),
-        commission=CfdChargeModel.vantage_standard(),
-    )
-    result = run(bars, hours, BASELINE, costs, slippage, calendar)
+    result = run(bars, hours, BASELINE, mt5_costs(), slippage, calendar)
     summary = summarise(
         result, BASELINE, label="MT5 holdout (unseen)", starting_equity=ACCOUNT
     )
@@ -344,22 +180,22 @@ def evaluate(
     answers: list[tuple[str, str]] = [
         (
             "1. Is it profitable after realistic transaction costs?",
-            f"No. Net {_money(baseline.net_pnl)} over {baseline.trades} trades: profit factor "
-            f"{_num(baseline.profit_factor)}, expectancy {_money(baseline.expectancy)} a trade. "
-            f"Before costs the same trades made {_money(baseline.gross_pnl_before_costs)} and "
-            f"costs took {_amount(costs_total)}. The strategy is not losing to the market; it "
+            f"No. Net {money(baseline.net_pnl)} over {baseline.trades} trades: profit factor "
+            f"{num(baseline.profit_factor)}, expectancy {money(baseline.expectancy)} a trade. "
+            f"Before costs the same trades made {money(baseline.gross_pnl_before_costs)} and "
+            f"costs took {amount(costs_total)}. The strategy is not losing to the market; it "
             "is losing to the spread.",
         ),
         (
             "2. Is it profitable out of sample?",
-            f"No. In sample {_money(inside.net_pnl) if inside else 'n/a'} on "
+            f"No. In sample {money(inside.net_pnl) if inside else 'n/a'} on "
             f"{inside.trades if inside else 0} trades, out of sample "
-            f"{_money(outside.net_pnl) if outside else 'n/a'} on "
+            f"{money(outside.net_pnl) if outside else 'n/a'} on "
             f"{outside.trades if outside else 0}; the change is {gap(outside, inside)}. "
             + (
                 f"On the second holdout - {holdout.trades} trades on the broker's own bars "
                 f"over eight months the archive does not cover - it made "
-                f"{_money(holdout.net_pnl)}, profit factor {_num(holdout.profit_factor)}. "
+                f"{money(holdout.net_pnl)}, profit factor {num(holdout.profit_factor)}. "
                 if holdout
                 else ""
             )
@@ -368,34 +204,34 @@ def evaluate(
         ),
         (
             "3. Is the edge present on both BUY and SELL?",
-            f"No. BUY {_money(baseline.by_side[0].net)} over {baseline.by_side[0].trades} "
-            f"trades; SELL {_money(baseline.by_side[-1].net)} over "
+            f"No. BUY {money(baseline.by_side[0].net)} over {baseline.by_side[0].trades} "
+            f"trades; SELL {money(baseline.by_side[-1].net)} over "
             f"{baseline.by_side[-1].trades}. They point opposite ways, and with gold trending "
             "up through most of this window that is at least as likely to be the trend as an "
             "edge in one direction.",
         ),
         (
             "4. What percentage of trades hit the $10 stop?",
-            f"{_pct(share.get('stop loss'))} - {baseline.exits.get('stop loss', 0)} trades.",
+            f"{pct(share.get('stop loss'))} - {baseline.exits.get('stop loss', 0)} trades.",
         ),
         (
             "5. What percentage exit through the RSI reversal?",
-            f"{_pct(share.get('rsi reversal'))} - {baseline.exits.get('rsi reversal', 0)} "
+            f"{pct(share.get('rsi reversal'))} - {baseline.exits.get('rsi reversal', 0)} "
             "trades. Note what that means: in three quarters of trades RSI never reached its "
             "extreme at all, so the exit the rules describe most carefully is the one that "
             "fires least.",
         ),
         (
             "6. What percentage reach the 4-hour maximum hold?",
-            f"{_pct(share.get('max hold'))} - {baseline.exits.get('max hold', 0)} trades, the "
+            f"{pct(share.get('max hold'))} - {baseline.exits.get('max hold', 0)} trades, the "
             "most common ending by a wide margin. The clock, not either signal, is what "
             "actually closes this strategy's positions.",
         ),
         (
             "7. Does the RSI reversal exit improve results?",
             f"No. Switching it off is {gap(rsi_off, baseline)} on net P&L. It raises the win "
-            f"rate ({_pct(baseline.win_rate)} with it, "
-            f"{_pct(rsi_off.win_rate) if rsi_off else 'n/a'} without) and loses money doing "
+            f"rate ({pct(baseline.win_rate)} with it, "
+            f"{pct(rsi_off.win_rate) if rsi_off else 'n/a'} without) and loses money doing "
             "so, which is the signature of an exit that closes winners early.",
         ),
         (
@@ -414,8 +250,8 @@ def evaluate(
         ),
         (
             "10. What is the maximum drawdown?",
-            f"{_amount(baseline.max_drawdown)} on realised equity - "
-            f"{_pct(baseline.max_drawdown_pct)} of a {_amount(baseline.starting_equity)} "
+            f"{amount(baseline.max_drawdown)} on realised equity - "
+            f"{pct(baseline.max_drawdown_pct)} of a {amount(baseline.starting_equity)} "
             f"account, and about {baseline.max_drawdown / baseline.params.stop_loss:.0f} full "
             "stops deep. Against a net result of roughly zero, that is the whole point: the "
             "path is far larger than the destination.",
@@ -427,30 +263,30 @@ def evaluate(
         ),
         (
             "12. What is the largest single-trade loss?",
-            f"{_money(baseline.largest_loss)}. Larger than the $10 stop because "
+            f"{money(baseline.largest_loss)}. Larger than the $10 stop because "
             f"{baseline.stops_gapped} bars opened past the level and were filled at the open, "
             "and because every exit still crosses the spread on the way out.",
         ),
         (
             "13. How sensitive is it to transaction costs?",
             "Completely - costs are the result. "
-            + ", ".join(f"{name} {_money(item.net_pnl)}" for name, item in by_cost.items())
+            + ", ".join(f"{name} {money(item.net_pnl)}" for name, item in by_cost.items())
             + f". At {costs_total / baseline.trades:,.2f} a trade against an average win of "
-            f"{_money(baseline.average_win)}, the cost and the edge are the same size, so the "
+            f"{money(baseline.average_win)}, the cost and the edge are the same size, so the "
             "venue decides the sign.",
         ),
         (
             "14. Is performance reasonably stable across years?",
             f"There is only one full year here plus a stub, so the honest unit is the fold: "
             f"{positive_folds} of {len(folds)} are positive, spanning "
-            f"{_money(min((f.net_pnl for f in folds), default=None))} to "
-            f"{_money(max((f.net_pnl for f in folds), default=None))} on 55-76 trades each. "
+            f"{money(min((f.net_pnl for f in folds), default=None))} to "
+            f"{money(max((f.net_pnl for f in folds), default=None))} on 55-76 trades each. "
             "That spread is what a zero-expectancy process looks like cut six ways. The "
             "sharper answer comes from the holdout: gold's median five-minute range is more "
             "than three times larger there than in the study window, so the $10 stop - a "
             "fixed distance, not a fixed fraction of anything - is a materially tighter stop "
             "in the later period. The win rate falls from "
-            + (f"{_pct(baseline.win_rate)} to {_pct(holdout.win_rate)} " if holdout else "")
+            + (f"{pct(baseline.win_rate)} to {pct(holdout.win_rate)} " if holdout else "")
             + "for that reason alone. A rule set whose risk changes with the price of gold "
             "is not stable across regimes even when its P&L happens to be.",
         ),
@@ -468,43 +304,23 @@ def evaluate(
     lines: list[str] = []
     for question, answer in answers:
         lines.append(f"  {question}")
-        lines.extend(f"      {row}" for row in _wrap(answer, 86))
+        lines.extend(f"      {row}" for row in wrap(answer))
         lines.append("")
     lines.append("  WHAT THIS SAMPLE CANNOT TELL YOU")
     lines.extend(
         f"      {row}"
-        for row in _wrap(
+        for row in wrap(
             f"{baseline.trades} trades over sixteen months is a small sample for a difference "
-            f"this small. An expectancy of {_money(baseline.expectancy)} against an average "
-            f"win of {_money(baseline.average_win)} is well inside the noise a few hundred "
+            f"this small. An expectancy of {money(baseline.expectancy)} against an average "
+            f"win of {money(baseline.average_win)} is well inside the noise a few hundred "
             "coin flips would produce, so the reading is not 'this loses slightly' but 'this "
             "has no edge that this data can measure, and it pays the spread to find out'. "
             "The result is also from a Dukascopy tick archive, not from the broker this would "
             "trade on; a different spread would move the number, though not far enough to "
             "change the conclusion.",
-            86,
         )
     )
     return lines
-
-
-def _wrap(text: str, width: int) -> list[str]:
-    rows: list[str] = []
-    current = ""
-    for word in text.split():
-        if current and len(current) + len(word) + 1 > width:
-            rows.append(current)
-            current = word
-        else:
-            current = f"{current} {word}".strip()
-    if current:
-        rows.append(current)
-    return rows
-
-
-def _amount(value) -> str:
-    """A magnitude - a cost, a drawdown depth. A forced `+` on those reads wrong."""
-    return "n/a" if value is None else f"{value:,.2f}"
 
 
 def main() -> None:
@@ -521,16 +337,9 @@ def main() -> None:
         out.append(text)
 
     # ------------------------------------------------------------------- data
-    m5_all = read_parquet_bars(args.data / "m5.parquet", M5)
-    h1_all = read_parquet_bars(args.data / "h1.parquet", H1)
-    m5 = contiguous(m5_all)
+    dataset = load_dataset(args.data)
+    m5, h1, half = dataset.m5, dataset.h1, dataset.half_spread
     window_end = m5[-1].ts
-    h1 = [b for b in h1_all if m5[0].ts <= b.ts <= window_end]
-
-    profile = load_profile("XAUUSD", args.data / "spread.json")
-    if profile is None:
-        raise SystemExit(f"no spread profile at {args.data / 'spread.json'}")
-    half = MeasuredSpread(load_spread_series(args.data / "m5_spread.csv"), profile)
     calendar = EconomicCalendar.load()
     events = calendar.within(m5[0].ts, window_end)
 
@@ -540,12 +349,10 @@ def main() -> None:
     say()
     say("DATA")
     say("  source            Dukascopy tick archive, bid/ask, decoded to mid bars")
-    say(f"  full archive      {m5_all[0].ts:%Y-%m-%d} .. {m5_all[-1].ts:%Y-%m-%d}"
-        f"  ({len(m5_all):,} M5 bars)")
     say(f"  study window      {m5[0].ts:%Y-%m-%d} .. {window_end:%Y-%m-%d}"
         f"  ({len(m5):,} M5 bars, {len(h1):,} H1 bars)")
-    if len(m5) != len(m5_all):
-        say(f"  truncated         {len(m5_all) - len(m5):,} bars dropped past a gap in the "
+    if dataset.dropped:
+        say(f"  truncated         {dataset.dropped:,} bars dropped past a gap in the "
             "archive wider than a week")
     say(f"  spread            {half.describe()}")
     say("  cross-check       against the Vantage terminal's own H1 bars on 2024-03-12: 23")
@@ -641,6 +448,12 @@ def main() -> None:
                 "would trade on. Spreads and fills on Vantage would differ.",
             ],
             dataset_hash=f"{len(m5)} M5 bars {m5[0].ts:%Y%m%d}-{window_end:%Y%m%d}",
+            distribution_note=(
+                "Losses are capped near -1R by the $10 stop, which is the stop working. "
+                "The right tail runs further but is thin, and the left shoulder is the "
+                "fattest part of the chart — a hard stop bounds what a bad trade "
+                "costs, it does not create anything for the good ones to win."
+            ),
             config_hash=BASELINE.label(),
             generated_at=datetime.now(UTC),
         ),
@@ -660,21 +473,8 @@ def main() -> None:
         result = run(m5, h1, BASELINE, scenario_costs, scenario_slip, calendar, indicators)
         cost_summaries[name] = summarise(result, BASELINE, label=name, starting_equity=ACCOUNT)
         say(line(cost_summaries[name]))
-    zero = run(
-        m5,
-        h1,
-        BASELINE,
-        CfdCosts(
-            half_spread=Decimal("0"),
-            swap=SwapModel(
-                long_points=Decimal("0"), short_points=Decimal("0"), point_value=Decimal("0.01")
-            ),
-            commission=CfdChargeModel(),
-        ),
-        TickSlippage(market_ticks=0, stop_ticks=0),
-        calendar,
-        indicators,
-    )
+    zero_costs, zero_slip = free_costs()
+    zero = run(m5, h1, BASELINE, zero_costs, zero_slip, calendar, indicators)
     say(
         line(
             summarise(

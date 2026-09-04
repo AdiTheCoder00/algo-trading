@@ -24,6 +24,16 @@ from algo.core.trade import Trade
 from algo.portfolio.book import EquityPoint
 from algo.reporting.metrics import Metrics
 
+#: The caption under the R-multiple histogram when a caller does not supply one.
+#: Deliberately a statement about the chart rather than about the strategy - two
+#: rule sets with identical expectancy can have opposite distributions, and only
+#: the caller knows which one it has.
+DEFAULT_DISTRIBUTION_NOTE = (
+    "The distribution, not the average. Two strategies with the same expectancy "
+    "can have opposite shapes, and the shape is what decides whether a bad run "
+    "is survivable."
+)
+
 _CSS = """
 :root{--ground:#0f1218;--panel:#171b23;--panel2:#1d222b;--line:#2b323e;
 --text:#e3e7ed;--muted:#8e97a6;--faint:#6b7484;--brass:#cfa255;--ice:#7fb6d9;
@@ -81,8 +91,18 @@ def render(
     dataset_hash: str = "",
     config_hash: str = "",
     generated_at: datetime | None = None,
+    distribution_note: str = DEFAULT_DISTRIBUTION_NOTE,
 ) -> str:
-    """Build the tearsheet as a single self-contained HTML string."""
+    """Build the tearsheet as a single self-contained HTML string.
+
+    `distribution_note` is the sentence under the R-multiple histogram. It is a
+    parameter because the shape of that distribution is a fact about the
+    strategy, not about the tearsheet: a short strangle's many-small-wins
+    profile and a hard-stopped scalper's capped-loss profile are opposites, and
+    a caption describing one of them sits under the other as a plain untruth.
+    The default says only what the chart is for, which is true of every
+    strategy; a caller that knows its own shape should say so.
+    """
     stamp = iso(generated_at) if generated_at else "not stamped"
     parts = [
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>",
@@ -103,7 +123,7 @@ def render(
     parts.append(_underwater_section(curve))
 
     if metrics.trade is not None and metrics.trade.trades:
-        parts.append(_r_distribution_section(metrics))
+        parts.append(_r_distribution_section(metrics, distribution_note))
         parts.append(_trade_stats_section(metrics))
     parts.append(_trade_log_section(trades))
 
@@ -199,7 +219,7 @@ def _underwater_section(curve: Sequence[EquityPoint]) -> str:
     return _section("underwater — depth below the running peak", f"worst {worst:.3f}%", svg)
 
 
-def _r_distribution_section(metrics: Metrics) -> str:
+def _r_distribution_section(metrics: Metrics, note: str) -> str:
     stats = metrics.trade
     if stats is None or not stats.r_multiples:
         return ""
@@ -219,8 +239,7 @@ def _r_distribution_section(metrics: Metrics) -> str:
     svg = (
         f"<svg viewBox='0 0 {width} {height}' width='100%' height='{height}' "
         "role='img' aria-label='R-multiple distribution'>" + bars + "</svg>"
-        "<p class='note'>A premium-selling strategy's shape — many small wins, rare "
-        "large losses — is invisible in an average and obvious here.</p>"
+        f"<p class='note'>{html.escape(note)}</p>"
     )
     return _section(
         "R-multiple distribution", f"{stats.trades_with_r} trades with a stop", svg

@@ -92,6 +92,14 @@ class ScalperParams:
     buy_rsi_extreme: float = 75.0
     sell_rsi_extreme: float = 25.0
     stop_loss: Decimal = Decimal("10")
+    #: When set, the stop is this many ATRs from entry instead of `stop_loss`
+    #: dollars. `None` - the baseline - keeps the fixed dollar distance the
+    #: rules specify. This exists because a fixed distance is not a fixed risk:
+    #: gold's median five-minute range trebled between 2024 and 2026, so "$10
+    #: away" was six median bars in one regime and two in the next. Any run
+    #: using it is a variant and is labelled as one.
+    stop_atr_multiple: Decimal | None = None
+    atr_period: int = 14
     max_hold: timedelta = timedelta(hours=4)
     rsi_reversal_exit: bool = True
 
@@ -117,8 +125,13 @@ class ScalperParams:
             directions = "buy only"
         elif not self.allow_buy:
             directions = "sell only"
+        stop = (
+            f"{self.stop_atr_multiple}xATR"
+            if self.stop_atr_multiple is not None
+            else f"${self.stop_loss}"
+        )
         return (
-            f"SL ${self.stop_loss}, hold {int(self.max_hold.total_seconds() // 3600)}h, "
+            f"SL {stop}, hold {int(self.max_hold.total_seconds() // 3600)}h, "
             f"rsi-exit {'on' if self.rsi_reversal_exit else 'off'}, "
             f"news {'on' if self.news_filter else 'off'}, {directions}"
         )
@@ -228,17 +241,42 @@ def rsi_reversal_exit(
     return previous_rsi <= params.sell_rsi_extreme and rsi > params.sell_rsi_extreme
 
 
-def stop_level(side: Side, entry_price: Decimal, params: ScalperParams = BASELINE) -> Decimal:
-    """The price at which the position is down `stop_loss` dollars.
+def stop_distance(
+    params: ScalperParams = BASELINE, *, atr_at_entry: float | None = None
+) -> Decimal:
+    """How far from entry the stop sits, in price.
+
+    The fixed rule divides by `lots` because a dollar of loss and a dollar of
+    gold are only the same thing at one ounce; the ATR rule does not, because a
+    multiple of ATR is a distance already and scaling it by size would make the
+    stop move when the position does.
+    """
+    if params.stop_atr_multiple is None:
+        return params.stop_loss / Decimal(params.lots)
+    if atr_at_entry is None or atr_at_entry != atr_at_entry or atr_at_entry <= 0:
+        # No usable volatility estimate - fall back to the dollar stop rather
+        # than to no stop at all. An unbounded position is never the safe
+        # default when a measurement is missing.
+        return params.stop_loss / Decimal(params.lots)
+    return params.stop_atr_multiple * Decimal(str(atr_at_entry))
+
+
+def stop_level(
+    side: Side,
+    entry_price: Decimal,
+    params: ScalperParams = BASELINE,
+    *,
+    distance: Decimal | None = None,
+) -> Decimal:
+    """The executable exit price at which the stop is reached.
 
     Measured against the **executed** entry price and expressed as an executable
     exit price, which is what a broker's stop order actually is: a long stopped
     out is filled at bid, and the bid reaching this level is the loss being
-    realised. Because one engine lot is one ounce, a dollar of stop is a dollar
-    of gold - `lots` scales the money, not the distance.
+    realised.
     """
-    distance = params.stop_loss / Decimal(params.lots)
-    return entry_price - distance if side is Side.BUY else entry_price + distance
+    away = distance if distance is not None else stop_distance(params)
+    return entry_price - away if side is Side.BUY else entry_price + away
 
 
 def _nan(value: float) -> bool:

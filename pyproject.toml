@@ -175,3 +175,4 @@ ignore = [
 "scripts/backtest_xauusd_rsi_stoch.py" = ["T201"]
 "scripts/build_xauusd_dataset.py" = ["T201"]
 "scripts/build_us_event_calendar.py" = ["T201", "DTZ007"]
+"scripts/study_xauusd_stop.py" = ["T201"]

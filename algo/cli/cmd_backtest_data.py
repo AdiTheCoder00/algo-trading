@@ -210,6 +210,10 @@ def backtest_bhavcopy(
             warnings=(*result.warnings, "SHAPE TEST: two ticks a day, not a real intraday grid"),
             dataset_hash=result.dataset_hash,
             config_hash=result.config_hash,
+            distribution_note=(
+                "A premium-selling strategy's shape — many small wins, rare large "
+                "losses — is invisible in an average and obvious here."
+            ),
         )
         typer.echo(f"  tearsheet  -> {write(tearsheet, markup)}")
 
@@ -464,5 +468,9 @@ def backtest_smartapi(
             warnings=(*result.warnings, "REAL 30-MIN DATA, ONE CYCLE ONLY - spread still modelled"),
             dataset_hash=result.dataset_hash,
             config_hash=result.config_hash,
+            distribution_note=(
+                "A premium-selling strategy's shape — many small wins, rare large "
+                "losses — is invisible in an average and obvious here."
+            ),
         )
         typer.echo(f"  tearsheet  -> {write(tearsheet, markup)}")

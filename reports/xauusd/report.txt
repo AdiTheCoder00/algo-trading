@@ -4,7 +4,6 @@ XAUUSD 5M RSI / STOCHASTIC-RSI SCALPER - BASELINE BACKTEST
 
 DATA
   source            Dukascopy tick archive, bid/ask, decoded to mid bars
-  full archive      2024-01-01 .. 2026-06-03  (95,347 M5 bars)
   study window      2024-01-01 .. 2025-05-13  (95,071 M5 bars, 7,930 H1 bars)
   truncated         276 bars dropped past a gap in the archive wider than a week
   spread            per-bar spread on 95,347 bars; median 0.400, p10 0.327, p90 0.607
@@ -271,7 +270,7 @@ BASELINE (exact rules, realistic costs)
   labelling         MT5 stamps a bar with its OPEN time; `algo.core.bar` labels by
                     CLOSE. Shifted by one bar here, or the H1 trend would be read
                     off an hour that had not finished.
-  bars              50,000 M5, 4,169 H1  (2025-12-19 .. 2026-09-04)
+  bars              50,000 M5, 4,170 H1  (2025-12-19 .. 2026-09-04)
   spread            flat $0.29 round trip, the D-121 measured quote. NOT measured
                     per bar the way the main window is - the terminal refuses tick
                     history for this period, so one number stands in for eight

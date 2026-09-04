@@ -241,3 +241,57 @@ def _sma(values: Sequence[float], period: int) -> list[float]:
             continue
         out[i] = sum(window) / period
     return out
+
+
+def true_range(
+    highs: Sequence[float], lows: Sequence[float], closes: Sequence[float]
+) -> list[float]:
+    """Wilder's true range: the bar's own span, or its gap from the last close.
+
+    The first bar has no previous close and so has no gap to measure; its true
+    range is simply its high minus its low. That is the standard convention and
+    it matters here only for one bar out of ninety-five thousand.
+    """
+    if not (len(highs) == len(lows) == len(closes)):
+        raise DomainError("true range needs highs, lows and closes of the same length")
+    out: list[float] = []
+    for i in range(len(highs)):
+        span = float(highs[i]) - float(lows[i])
+        if i == 0:
+            out.append(span)
+            continue
+        previous = float(closes[i - 1])
+        out.append(
+            max(span, abs(float(highs[i]) - previous), abs(float(lows[i]) - previous))
+        )
+    return out
+
+
+def atr(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    period: int = 14,
+) -> list[float]:
+    """Average true range, Wilder-smoothed and seeded with a simple average.
+
+    Same seeding as `rsi` and for the same reason: this is the `ta.atr` every
+    chart draws, and a stop placed at "two ATRs" should mean the same distance
+    here as it does on the screen the rule was written against.
+
+    NaN until there are `period` bars to average, so a caller cannot place a
+    stop at a volatility estimate that does not exist yet.
+    """
+    if period < 1:
+        raise DomainError(f"ATR period must be at least 1, got {period}")
+    ranges = true_range(highs, lows, closes)
+    n = len(ranges)
+    out = [float("nan")] * n
+    if n < period:
+        return out
+    average = sum(ranges[:period]) / period
+    out[period - 1] = average
+    for i in range(period, n):
+        average = (average * (period - 1) + ranges[i]) / period
+        out[i] = average
+    return out

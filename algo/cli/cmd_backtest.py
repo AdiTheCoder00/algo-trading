@@ -202,5 +202,9 @@ def backtest(
             warnings=result.warnings,
             dataset_hash=result.dataset_hash,
             config_hash=result.config_hash,
+            distribution_note=(
+                "A premium-selling strategy's shape — many small wins, rare large "
+                "losses — is invisible in an average and obvious here."
+            ),
         )
         typer.echo(f"  tearsheet  -> {write(tearsheet, markup)}")

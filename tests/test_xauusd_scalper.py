@@ -27,6 +27,7 @@ from algo.pricing.indicators import rsi, stoch_rsi
 from algo.strategy.rsi_stoch_reversal import (
     BASELINE,
     ExitState,
+    ScalperParams,
     Trend,
     entry_side,
     rsi_reversal_exit,
@@ -556,3 +557,112 @@ def test_the_session_bands_cover_every_hour_exactly_once() -> None:
     seen = [session_of(datetime(2024, 1, 2, hour, tzinfo=UTC)) for hour in range(24)]
     assert len(set(seen)) == len(SESSIONS)
     assert all(name in {s[0] for s in SESSIONS} for name in seen)
+
+
+# ---------------------------------------------------------- the volatility stop
+
+
+def test_atr_seeds_on_a_simple_average_then_smooths() -> None:
+    from algo.pricing.indicators import atr, true_range
+
+    highs = [10.0 + i * 0.5 for i in range(30)]
+    lows = [h - 2.0 for h in highs]
+    closes = [h - 0.5 for h in highs]
+
+    ranges = true_range(highs, lows, closes)
+    assert ranges[0] == pytest.approx(2.0), "the first bar has no gap to measure"
+
+    values = atr(highs, lows, closes, 14)
+    assert all(v != v for v in values[:13]), "no ATR before 14 bars"
+    assert values[13] == pytest.approx(sum(ranges[:14]) / 14)
+    for i in range(14, 30):
+        assert values[i] == pytest.approx((values[i - 1] * 13 + ranges[i]) / 14)
+
+
+def test_true_range_uses_the_gap_when_it_is_wider_than_the_bar() -> None:
+    from algo.pricing.indicators import true_range
+
+    # A bar that opens far below the previous close: its own span is 1, but the
+    # distance from the last close (99.5) down to its low (89) is 10.5, and that
+    # is the range actually travelled.
+    ranges = true_range([100.0, 90.0], [99.0, 89.0], [99.5, 89.5])
+    assert ranges[1] == pytest.approx(10.5)
+
+
+def test_an_atr_stop_scales_with_volatility_and_a_dollar_stop_does_not() -> None:
+    """The finding the stop study rests on, as an assertion.
+
+    The same rules over the same shape at two different volatilities: a fixed
+    dollar stop fires far more often in the noisier one, an ATR stop does not.
+    """
+    from dataclasses import replace
+
+    from algo.reporting.scalper_report import summarise
+
+    def run_at(scale: Decimal, params: ScalperParams):
+        base = datetime(2024, 1, 2, 0, 0, tzinfo=UTC)
+        seed = 12345
+
+        def draw() -> Decimal:
+            nonlocal seed
+            seed = (1103515245 * seed + 12345) % 2147483648
+            return Decimal(seed % 401 - 195) / Decimal(100) * scale
+
+        m5: list[Bar] = []
+        price = Decimal("2000")
+        for i in range(M5_WARMUP + H1_WARMUP * 12 + 3000):
+            nxt = price + draw()
+            m5.append(
+                Bar(
+                    ts=base + timedelta(minutes=5 * (i + 1)),
+                    timeframe=M5,
+                    open=price,
+                    high=max(price, nxt) + Decimal("0.3") * scale,
+                    low=min(price, nxt) - Decimal("0.3") * scale,
+                    close=nxt,
+                    volume=1,
+                )
+            )
+            price = nxt
+        h1 = regrid_bars(m5, H1)
+        result = run_scalper(m5, h1, params=params, costs=FREE, calendar=_calendar())
+        return summarise(result, params, label="t")
+
+    def stop_share(summary) -> float:
+        share = summary.exit_share.get("stop loss")
+        return float(share) if share is not None else 0.0
+
+    quiet_dollar = stop_share(run_at(Decimal("1"), BASELINE))
+    loud_dollar = stop_share(run_at(Decimal("3"), BASELINE))
+    assert loud_dollar - quiet_dollar > 15, (
+        "a fixed dollar stop must fire far more often when the range triples - "
+        f"got {quiet_dollar:.1f}% and {loud_dollar:.1f}%"
+    )
+
+    scaled = replace(BASELINE, stop_atr_multiple=Decimal("6"))
+    quiet_atr = stop_share(run_at(Decimal("1"), scaled))
+    loud_atr = stop_share(run_at(Decimal("3"), scaled))
+    assert abs(loud_atr - quiet_atr) < 10, (
+        "an ATR stop must mean roughly the same thing at both volatilities - "
+        f"got {quiet_atr:.1f}% and {loud_atr:.1f}%"
+    )
+
+
+def test_the_atr_stop_falls_back_rather_than_leaving_a_position_unbounded() -> None:
+    """A missing volatility estimate must not silently become "no stop"."""
+    from dataclasses import replace
+
+    from algo.strategy.rsi_stoch_reversal import stop_distance
+
+    scaled = replace(BASELINE, stop_atr_multiple=Decimal("6"))
+    assert stop_distance(scaled, atr_at_entry=2.0) == Decimal("12")
+    assert stop_distance(scaled, atr_at_entry=float("nan")) == BASELINE.stop_loss
+    assert stop_distance(scaled, atr_at_entry=None) == BASELINE.stop_loss
+    assert stop_distance(scaled, atr_at_entry=0.0) == BASELINE.stop_loss
+
+
+def test_the_baseline_still_uses_a_flat_ten_dollar_stop() -> None:
+    """The variant must not have moved the baseline. Cheap, and the whole point."""
+    assert BASELINE.stop_atr_multiple is None
+    assert BASELINE.stop_loss == Decimal("10")
+    assert stop_level(Side.BUY, Decimal("2000"), BASELINE) == Decimal("1990")
