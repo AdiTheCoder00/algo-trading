@@ -134,6 +134,7 @@
 #include <AlgoGold\ProtectiveExits.mqh>
 #include <AlgoGold\Trader.mqh>
 #include <AlgoGold\ScalpFilters.mqh>
+#include <AlgoGold\Dashboard.mqh>
 
 //+------------------------------------------------------------------+
 //| Inputs                                                            |
@@ -176,6 +177,11 @@ input double InpDailyLossLimit   = 0.0;     // Halt for the day at this realised
 input double InpDailyProfitTarget= 0.0;     // Halt for the day at this realised profit. 0 = off
 input int    InpMaxTradesPerDay  = 30;      // Halt after this many entries. 0 = off
 
+input group "--- Dashboard ---"
+input bool   InpShowDashboard    = true;    // On-chart status panel
+input int    InpDashX            = 12;      // Panel X offset, pixels
+input int    InpDashY            = 18;      // Panel Y offset, pixels
+
 input group "--- Execution ---"
 input bool   InpUseRiskSizing    = true;    // true: size from InpRiskPercent. false: fixed InpLots
 input double InpRiskPercent      = 0.5;     // Percent of BALANCE risked per trade
@@ -198,6 +204,15 @@ int              g_emaFastH    = INVALID_HANDLE;
 int              g_emaSlowH    = INVALID_HANDLE;
 int              g_rsiH        = INVALID_HANDLE;
 int              g_atrH        = INVALID_HANDLE;
+//--- Latest indicator reads, cached for the panel. The bar-close path already
+//--- computes these; the panel must not re-read four buffers every tick.
+CGoldDashboard   g_dash;
+datetime         g_lastDashPaint = 0;
+double           g_uiEmaFast   = 0.0;
+double           g_uiEmaSlow   = 0.0;
+double           g_uiAtr       = 0.0;
+double           g_uiRsi       = 0.0;
+double           g_uiSep       = 0.0;
 
 //--- Bars of indicator history the handles need before their values mean
 //--- anything. The EMAs dominate; the +5 covers the two-bar RSI comparison and
@@ -525,6 +540,10 @@ int OnInit()
                   (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),pos.volume,pos.entry,
                   (int)InpMagic);
 
+   if(InpShowDashboard)
+      g_dash.Create("AGScalp_",StringFormat("ALGOGOLD SCALPER  (%d)",(int)InpMagic),
+                    InpDashX,InpDashY);
+
    g_lastBarTime = iTime(_Symbol,g_tf,0);
    return INIT_SUCCEEDED;
   }
@@ -532,8 +551,125 @@ int OnInit()
 //+------------------------------------------------------------------+
 //| Deinit                                                            |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| The panel. Shows what the terminal cannot: the regime filter, the |
+//| gate counters, and the session/day state that decide whether a    |
+//| signal becomes a trade.                                           |
+//|                                                                   |
+//| The gate counters are the point. Until now they only appeared in  |
+//| GateStatsReport at shutdown, which is exactly when it is too late  |
+//| to notice that every signal is being refused. D-139 was caused by  |
+//| not being able to tell "no signal" from "signal refused"; this     |
+//| puts that distinction on the chart while it is still actionable.   |
+//+------------------------------------------------------------------+
+void PaintDashboard(void)
+  {
+   if(!g_dash.Active())
+      return;
+   const datetime now = TimeCurrent();
+   if(now==g_lastDashPaint)
+      return;
+   g_lastDashPaint = now;
+   g_dash.Refresh(StringFormat("ALGOGOLD SCALPER  (%d)",(int)InpMagic));
+
+   const int digits = (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+   const color cOk = C'120,220,140', cBad = C'240,110,110',
+               cDim = C'150,160,180', cHot = C'255,200,90';
+
+   int r = 0;
+   g_dash.Set(r++,"SYMBOL / TF",
+              StringFormat("%s  %s",_Symbol,StringSubstr(EnumToString(g_tf),7)),clrWhite);
+
+   const bool canTrade = (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)
+                         && (bool)MQLInfoInteger(MQL_TRADE_ALLOWED);
+   g_dash.Set(r++,"STATUS",
+              (canTrade ? (InpAllowNewEntries ? "TRADING" : "MANAGE ONLY") : "ALGO OFF"),
+              (canTrade && InpAllowNewEntries) ? cOk : cHot);
+
+//--- Regime: the chop filter is the main defence, and whether it is currently
+//--- blocking is invisible anywhere else.
+   if(g_uiAtr>0.0)
+     {
+      const double sepAtr = g_uiSep/g_uiAtr;
+      const bool trending = (InpMinSepAtr<=0.0) || (sepAtr>=InpMinSepAtr);
+      const string dir = (g_uiEmaFast>g_uiEmaSlow) ? "UP" : "DOWN";
+      g_dash.Set(r++,"REGIME",
+                 StringFormat("%s  %.2f ATR %s",dir,sepAtr,(trending?"ok":"CHOP")),
+                 trending?cOk:cHot);
+      g_dash.Set(r++,"RSI",StringFormat("%.1f  (band %.0f/%.0f)",
+                 g_uiRsi,InpRsiPullback,100.0-InpRsiPullback),cDim);
+      g_dash.Set(r++,"ATR",StringFormat("%.*f",digits,g_uiAtr),cDim);
+     }
+   else
+      g_dash.Set(r++,"REGIME","warming up",cDim);
+
+   string why = "";
+   const bool inSession = SessionAllowsEntry(now,InpSessionStart,InpSessionEnd,InpFridayEnd,why);
+   g_dash.Set(r++,"SESSION",(inSession?"open":"closed"),(inSession?cOk:cHot));
+   g_dash.Set(r++,"SPREAD",StringFormat("%d pts",(int)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD)),cDim);
+
+   const GoldPosition pos = g_trader.Snapshot();
+   if(pos.exists)
+     {
+      double floating = 0.0;
+      for(int i=PositionsTotal()-1; i>=0; i--)
+        {
+         if(PositionGetSymbol(i)!=_Symbol) continue;
+         if(PositionGetInteger(POSITION_MAGIC)!=InpMagic) continue;
+         floating += PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
+        }
+      g_dash.Set(r++,"POSITION",
+                 StringFormat("%s %.2f @ %.*f",(pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),
+                              pos.volume,digits,pos.entry),
+                 (pos.side==POSITION_TYPE_BUY?cOk:cBad));
+      g_dash.Set(r++,"FLOATING",StringFormat("%+.2f",floating),(floating>=0?cOk:cBad));
+//--- This expert has no TrailState: its trail is R-multiple based, armed once
+//--- the position has travelled InpTrailStartR of its own risk unit. Recompute
+//--- the same way ManageOpenPosition does rather than inventing a second rule.
+      const double R = RiskUnit(pos,g_uiAtr);
+      const double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      const double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      double rMult = 0.0;
+      if(R>0.0 && bid>0.0 && ask>0.0)
+        {
+         const double travelled = (pos.side==POSITION_TYPE_BUY) ? (bid-pos.entry) : (pos.entry-ask);
+         rMult = travelled/R;
+        }
+      g_dash.Set(r++,"R MULTIPLE",StringFormat("%+.2f R",rMult),(rMult>=0?cOk:cBad));
+      const bool armed = (InpTrailStartR>0.0 && rMult>=InpTrailStartR);
+      g_dash.Set(r++,"TRAIL",
+                 (armed?"ARMED":StringFormat("arms at %.2fR",InpTrailStartR)),
+                 (armed?cOk:cDim));
+     }
+   else
+     {
+      g_dash.Set(r++,"POSITION","flat",cDim);
+      g_dash.Set(r++,"FLOATING","0.00",cDim);
+      g_dash.Set(r++,"R MULTIPLE","-",cDim);
+      g_dash.Set(r++,"TRAIL","-",cDim);
+     }
+
+//--- Gate telemetry, live. "signals fired" against "taken" answers the question
+//--- D-139 could not: is the signal silent, or is it being refused?
+   g_dash.Set(r++,"SIGNALS",StringFormat("%d fired / %d taken",g_gate.signals,g_gate.taken),
+              (g_gate.signals>0 && g_gate.taken==0)?cHot:cDim);
+   g_dash.Set(r++,"BLOCKED",
+              StringFormat("ses %d cd %d sp %d cost %d",
+                           g_gate.outOfSession,g_gate.cooldown,
+                           g_gate.wideSpread,g_gate.costGate),cDim);
+
+   g_dash.Set(r++,"TODAY",StringFormat("%+.2f  (%d trades)",g_day.realised,g_day.trades),
+              (g_day.realised>=0?cOk:cBad));
+   g_dash.Set(r++,"DAY GUARD",(g_day.halted?"HALTED":"open"),(g_day.halted?cBad:cOk));
+   g_dash.Set(r++,"EQUITY",StringFormat("%.2f",AccountInfoDouble(ACCOUNT_EQUITY)),clrWhite);
+
+   ChartRedraw(0);
+  }
+
+//+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
+   g_dash.Destroy();
    GateStatsReport(g_gate);
 
    if(g_emaFastH!=INVALID_HANDLE) IndicatorRelease(g_emaFastH);
@@ -555,6 +691,8 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   PaintDashboard();
+
    const datetime current = iTime(_Symbol,g_tf,0);
    if(current==g_lastBarTime || current==0)
       return;
@@ -612,6 +750,8 @@ void OnClosedBar()
 //---    "entry suppressed" appearing zero times. Now every fired signal is
 //---    counted, and every refusal is counted against a reason.
    const double separation = MathAbs(emaFast-emaSlow);
+   g_uiEmaFast = emaFast; g_uiEmaSlow = emaSlow;
+   g_uiAtr = atr; g_uiRsi = rsiNow; g_uiSep = separation;
    const bool   trending   = (InpMinSepAtr<=0.0) || (separation >= InpMinSepAtr*atr);
    const bool   up         = trending && (emaFast > emaSlow);
    const bool   down       = trending && (emaFast < emaSlow);

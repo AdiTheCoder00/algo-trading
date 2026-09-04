@@ -2948,6 +2948,339 @@ nor any set file. Changing a default in `.mq5` and re-running proves nothing
 until that cache is cleared. The expert prints its whole configuration on init
 for exactly this reason; that banner is what caught it.
 
+### D-140 - Screened all 76 installed experts; ours is dead, and the one survivor rests on an assumption this broker cannot test
+
+You asked for every installed expert to be backtested, not just ours. 76 found,
+75 completed (one licensed EA hung past its cap), on identical settings: XAUUSD
+M1, 2026.06.01-08.31, real-tick model, $10,000, 1:100, each on its own compiled
+defaults.
+
+**48 traded, 16 took no trades, 11 could not initialise** (licence checks -
+`MHD Scalper Pro 9.5`, `Piner EA`, `Grid Scalper MA`, `VALHALLA EDGE`,
+`TwisterPro Scalper`). **Only 13 of 48 cleared profit factor 1.0.**
+
+**Our scalper does not work, and this is the entry that says so.** Three
+windows, ~5,900 trades, eighteen months:
+
+| Window | Trades | PF | Net | Max DD |
+|---|---|---|---|---|
+| 2026.06-08 (in-sample) | 1,261 | 0.91 | -$2,775 | 31.0% |
+| 2026.01-05 (out-of-sample) | 1,898 | **0.87** | -$5,007 | 51.4% |
+| 2025.06-12 (out-of-sample) | 2,739 | **0.73** | -$8,748 | **88.5%** |
+
+Below break-even in every window, and *worse* out-of-sample. A signal that loses
+everywhere it is shown does not have an edge hidden behind a parameter, and
+D-131 already established that sweeping thresholds on this data fits noise.
+**Stop work on GoldIntradayScalper as a strategy.** The plumbing around it -
+`ScalpFilters`, the attached bracket, the daily governors, the gate telemetry -
+is sound and reusable. The entry rule is not.
+
+Its one virtue is diagnostic: PF moved only 0.91 -> 0.87 -> 0.73 across regimes
+*because* it realises every loss through a hard stop, and equity drawdown
+tracked balance drawdown to within 0.4% in all three runs. The numbers are
+stable because they are honest, which is more than most of the field managed.
+
+**The survivor.** `Adaptive Gold Scalper v2.3` held up on windows it was never
+selected on - PF 17.75 (221 trades) and 5.44 (263 trades) against 25.81
+in-sample, strike rate steady near 91%, max loss pinned at -$40.30/-$40.40/
+-$40.70 every time. That constant is its 400-point stop on a fixed 0.10 lot.
+Its M5 run returned byte-identical results to M1: it is a price-level strategy
+(`_order_price_gap`, `_point_shift` are distances, not bar counts) and ignores
+the chart timeframe entirely.
+
+Economics worked back from the report: average win ~$53, average loss ~$32,
+strike rate 91%. Its `_take_profit=10000` ($100) is essentially never reached -
+the $0.20 trailing stop closes almost everything. So the real claim is **~1.3:1
+reward at a 91% strike rate**, which has very little margin.
+
+**And that is the assumption this broker cannot test.** Real ticks begin
+2026.08.26; the account retains about five days. Every run above used ticks
+synthesized from M1 bars. This EA fills through pending stop orders resting ~$50
+from price - the most slippage-sensitive order type there is. The tester fills a
+resting order at exactly its price; a spike violent enough to travel $50 does
+not. At 1.3:1 and 91%, a few points of real slippage per fill inverts the
+expectancy. No historical run here can settle it; **forward-testing on demo is
+the only remaining discriminator.**
+
+**Two things I asserted and had to withdraw.**
+
+*Max/min lot ratio is not a martingale tell.* I introduced it as the cleanest
+one available without source. Our own EA scores 14.7 on it and contains no
+martingale - the spread is ATR-based risk sizing choosing larger lots when stops
+are tighter. It flags *variable sizing*, nothing more.
+
+*`Adaptive Gold Scalper` does not hide its losses.* Seeing a 100% win rate on
+the real-tick window, I concluded it had an exit that never realises a loss. The
+balance-versus-equity drawdown decomposition refutes it: 0.38% against 0.58%.
+That decomposition, not the win rate, is the test that settles the question, and
+it cleanly separates the field - `Quantum Athena` 1.17% balance against 11.16%
+equity (9.5x), `ExpertMAPSAR` 5.0x, `MoonDog` 2.1x all *do* carry unrealised
+losses.
+
+**Four harness traps, each of which silently produced plausible wrong output.**
+
+1. **A UTF-8 BOM voids the entire config.** PowerShell 5.1's `Set-Content
+   -Encoding UTF8` writes one; MT5 then reads `<BOM>[Tester]`, fails to match
+   the section header, and ignores every setting - while still logging
+   *"successfully initialized from start config"* and opening normally. Two full
+   batch attempts tested nothing at all before this was found.
+2. **The tester prefers its saved input cache to compiled defaults** (D-139), so
+   `MQL5\Profiles\Tester\<Expert>.set` must be cleared per EA or the run
+   silently uses stale values.
+3. **`ShutdownTerminal=1` is not reliable here.** Waiting on process exit made
+   every EA burn its full timeout.
+4. **The batch left a 9.19 GB tester log** (martingale EAs log every tick), and
+   reading it to detect completion threw `OutOfMemoryException` - which a
+   `try/catch` converted into "0 finishes", so the check could never succeed.
+   Disk hit 97% full. Completion is now signalled by the report file appearing
+   and its size settling: one `stat()`, no log read.
+
+The shape shared by (1) and (4) is worth naming: **an error path that returns a
+plausible value instead of failing loudly.** Both times the instrument broke
+silently and the silence read as progress - the same failure the gate telemetry
+in D-139 exists to prevent, repeated in the tooling that measures it.
+
+### D-141 - The gold EAs do not transfer, and two of them were never trading the chart symbol
+
+Follow-on to D-140. You wanted `Adaptive Gold Scalper` on FixedVol100, then the
+top 10 on FixedVol100 and BTCUSD. Both symbols carry **real ticks from
+2026.06.01** - XAUUSD retains only ~5 days - so unlike everything in D-140,
+these rest on ticks that happened.
+
+**The broker constraints are the whole story, and they differ enormously.**
+
+| | XAUUSD | FixedVol100 | BTCUSD |
+|---|---|---|---|
+| price | 4,326 | 4,911 | 76,640 |
+| spread (price) | 0.28 | 0.88 | **16.95** |
+| spread / price | 0.0065% | 0.018% | **0.022%** |
+| `STOPS_LEVEL` | 0.20 | **7.123** | 0 |
+| $ per 1.0 price at min lot | 1.00 | 0.10 | 0.01 |
+
+**AGS is not symbol-locked; it is constraint-locked.** On FixedVol100 with its
+own defaults it sent 1,027 orders and had **2,054 rejected as `Invalid stops`,
+filling none**. Its stop sits 4.000 from entry; the broker minimum there is
+7.123. Scaling the distances past that (`_stop_loss` 400->1000,
+`_trailing_points` 20->800, `_take_profit` 10000->25000, `_order_price_gap`
+5000->12500) makes it trade normally: 265 trades, **profit factor 0.61**, win
+rate 43.0% against 94.9% on gold, expected payoff -$0.23.
+
+**And it cannot be fixed by tuning, for a structural reason.** AGS's profit
+engine is its trailing stop - the $100 take-profit is essentially never reached,
+the $0.20 trail closes almost everything. On XAUUSD that trail is 1x the broker
+minimum, ~5% of the stop distance. On FixedVol100 the tightest *legal* trail is
+7.123, which is **71% of a 10.000 stop**. The mechanism that makes this EA money
+is unavailable on that instrument at any parameter setting.
+
+**Top 10 by gold profit factor, on both symbols: none transfer.** Genuine
+results only (see the invalidated rows below): Quantum Titan 0.78 and
+ExpertMAPSAR 3.85 on FixedVol100; AGS 0.39, Smart Gold Hunter 0.15,
+ExpertMAPSAR 0.18 on BTCUSD. Five EAs produce no signal at all off gold.
+ExpertMAPSAR's 3.85 is the *stock MetaQuotes sample* over 59 trades, and it
+scored 1.69 on gold and 0.20 on the real-tick gold window - noise, not edge.
+Quantum Titan's BTCUSD 2.65 is unusable: **1,332 of ~1,400 orders were
+rejected**, so the 68 fills are a biased survivor sample.
+
+**Two EAs ignore the chart symbol entirely, which invalidates their rows.**
+
+- `Iron Stops v1.18` traded **XAUUSD** when attached to FixedVol100 *and* when
+  attached to BTCUSD. Net $6,817.04 and $6,816.64 against $6,811.41 on gold -
+  the same 49 trades every time.
+- `Range Breakout v5.20` traded a **XAUUSD / USDJPY / BTCUSD** basket on both
+  charts.
+
+Their apparent cross-symbol profit factors are the gold result re-run. **Any
+EA screen that does not verify which symbol was actually dealt will silently
+report this as a transferable edge.** The check is cheap: read the deals
+table's Symbol column, not the chart the test was configured with.
+
+**A third instance of the same measurement failure.** The harness was built to
+distinguish `rejected` from `no signal` - precisely the distinction that matters
+here - and it reported 0 rejects for the run that had 2,054. The tester log is
+UTF-16; seeking to a byte offset past the BOM and decoding from there yields
+garbage matching no pattern. Correct counts came from re-reading the file whole
+with encoding detection and scoping by run block.
+
+That is the third time in this exercise: the UTF-8 BOM voiding the tester config
+(D-140), an `OutOfMemoryException` swallowed by a `catch` and returned as "not
+finished", and now this. **Every one was an error path returning a plausible
+value instead of failing loudly**, and every one initially read as a result
+rather than a fault. Where a measurement can fail silently, it needs a positive
+signal that it ran - which is the same argument the gate telemetry in D-139
+already made, now paid for three more times.
+
+### D-142 - Adding a stop to ExpertMAPSAR fixed the risk and revealed there was no edge
+
+You asked for a stop loss and take profit on the MetaQuotes `ExpertMAPSAR`
+sample. Added as `mt5/Experts/Samples/ExpertMaPsarBracket.mq5` (magic 14599, a
+new file - the stock sample stays as shipped). The bracket works. The strategy
+does not.
+
+**The sample has no stop and no target, and nothing in its `.mq5` says so.**
+`CExpertSignal`'s constructor sets `m_stop_level(0.0)`/`m_take_level(0.0)`, and
+`OpenLongParams` does `sl = (m_stop_level==0.0) ? 0.0 : ...`, so every order
+goes out with `sl=0 tp=0`. Worse, `CTrailingPSAR::CheckTrailingStopLong` uses
+`base = (pos_sl==0.0) ? PriceOpen() : pos_sl` - with no initial stop, `base` IS
+the entry, so the trail can only move the stop *above entry* and a position
+going straight against you is unprotected until the opposite signal.
+
+**Pattern 0 makes a bracketed version churn.** `CSignalMA` votes with four
+models; pattern 0 - "price is on the necessary side of the indicator" - is a
+persistent STATE whose default weight of 80 clears `threshold_open` 50 alone.
+Unbracketed that is harmless (one position, held). Bracketed it is not: stop
+out, state still true, re-enter next bar. Measured on XAUUSD M1 2026.06-08:
+
+| | Trades | PF | Net | bal DD | eq DD | max loss |
+|---|---|---|---|---|---|---|
+| stock, no bracket | 51 | 1.69 | +117.87 | 1.17% | 5.82% | -119.93 |
+| bracket, pattern 0 on | 4,936 | 0.88 | -1,173.84 | 11.94% | 11.96% | -38.26 |
+| bracket, pattern 0 off | 1,405 | **1.06** | +142.41 | 1.15% | 1.17% | -5.95 |
+
+Patterns 1/2/3 are crossings and piercings - events - so disabling pattern 0
+keeps the bracket without the churn. That was predicted from reading the source
+before running it, not found by sweeping.
+
+**And it does not survive out-of-sample.** The pattern_0 choice was still made
+after seeing the window above, so the window above is in-sample:
+
+| bracket, pattern 0 off | Trades | PF | Net |
+|---|---|---|---|
+| 2026.06-08 (in-sample) | 1,405 | 1.06 | +142.41 |
+| 2026.01-05 | 554 | **0.77** | -296.36 |
+| 2025.06-12 | 717 | **0.81** | -157.16 |
+
+**The 1.06 was the window doing the work.** No edge. Same conclusion as D-140
+reached for our own scalper, by the same route.
+
+**The stock sample is not merely edgeless, it is dangerous.** PF 1.69, then
+11.06, then 0.10 across the three windows on 51/56/33 trades, and in 2025H2 a
+**single trade lost $1,013 on a $10,000 account**. Its equity drawdown runs
+12-18x its balance drawdown in two of three windows (0.69% balance against
+12.60% equity in 2026H1). That is the unrealised-loss signature D-141 used to
+disqualify `Quantum Athena` and `MoonDog`, and it is what produces a 94% win
+rate: it does not close losers. **Its own largest loss exceeds its entire net
+profit in the one window where it made money.**
+
+**What the bracket actually bought, since the strategy is a write-off:**
+
+| | stock | bracketed |
+|---|---|---|
+| worst single loss | -$1,013.11 | -$37.87 |
+| equity vs balance DD | up to 18x gap | 1.01x |
+
+A 27x smaller worst case and no hidden unrealised risk. A stop cannot
+manufacture edge; it can stop a bad strategy from being catastrophic, and it
+makes the absence of edge *visible* instead of hidden behind a win rate.
+
+**Gap risk, measured rather than assumed.** The bracketed runs' worst losses
+were -$37.87 and -$15.04 against a $4.00 stop at 0.01 lots - price jumping the
+stop over a weekend or on a spike, **4-9x the intended risk when it happens**.
+Rare (2 of 3,286 losing exits in-sample) but real, and the same exposure D-141
+flagged as AGS's unverifiable assumption.
+
+**One harness bug worth recording**, since it wasted a run and is easy to
+repeat: clearing the tester cache with `Get-ChildItem -Filter "$leaf*"` is
+case-insensitive AND prefix-based, so clearing `ExpertMAPSAR*` also deleted
+`ExpertMaPsarBracket.set`. Matching `"$leaf.*"` - with the dot - keeps them
+apart. Related: a PowerShell function that both `Write-Output`s and returns a
+value folds the output INTO the return value, so the confirmation line never
+printed and the run's inputs had to be verified from the `.set` afterwards.
+
+**Asked to make it tradable; it cannot be, and this is where that stops.**
+Two changes were added, both principled rather than searched:
+
+- **The cost gates** - spread cap, target-vs-spread ratio, session window,
+  cooldown, daily loss limit and trade cap - reusing `ScalpFilters.mqh` rather
+  than a second copy. All default to OFF so the measured baseline above is
+  unchanged, and the expert prints which gates are live on init, because a
+  filter that is silently off looks exactly like one that never triggers.
+- **The timeframe**, tested as a hypothesis. D-124 established slower-is-better
+  on different strategies before this expert existed - trade count roughly
+  halves per step while spread is charged per round trip - so M15 is a
+  prediction, not a knob.
+
+| XAUUSD | M1 | M15 |
+|---|---|---|
+| 2026.06-08 | 1.06 | 0.90 |
+| 2026.01-05 | 0.77 | **0.58** |
+| 2025.06-12 | 0.81 | 1.04 |
+
+**Six window-configurations, scattered around break-even with no consistency.**
+The timeframe hypothesis was a fair test and it failed. Trying M30, H1, H4
+until one came back above 1.0 would be D-131's finding repeated deliberately,
+so it was not done. `CSignalMA` on XAUUSD has no edge this repo can find, and
+no bracket, gate or interval fixes that.
+
+**What the work is actually worth keeping for.** The signal is a write-off; the
+scaffolding is not. The bracket, the `STOPS_LEVEL` pre-flight that refuses to
+start rather than send orders that will all be rejected (D-141), the gates, and
+the init banner that states its own configuration are all signal-agnostic and
+reusable. That is the same split D-140 reached for `GoldIntradayScalper`: the
+machinery survived, the entry rule did not. Two independent strategies now,
+same verdict, same cause.
+
+### D-143 - The grid made it five times worse while raising the win rate
+
+You asked for a scale-in ladder on GoldTrendlineBreakout: add on the same side
+at every $5 of loss, up to 5 positions, lot x1.25 each add, close the basket at
+$2 combined profit. Built as `dda3486` and measured. It is now DISABLED, and
+this records why.
+
+**Controlled before/after.** Same expert, same symbols, same window
+(2026.06.01-08.31), same M15, real ticks, $10,000. The only change is the grid:
+
+| | trades | PF | net | max DD | win rate |
+|---|---|---|---|---|---|
+| FixedVol100, single position | 1,166 | 0.83 | -$1,385 | 14.57% | 39.5% |
+| FixedVol100, **with grid** | 3,246 | **0.50** | **-$7,191** | **73.65%** | **55.7%** |
+| BTCUSD, single position | 708 | 0.67 | -$1,460 | 14.93% | 41.4% |
+| BTCUSD, **with grid** | 2,509 | **0.39** | **-$6,527** | **65.40%** | 48.3% |
+
+**Roughly 5x the loss and a 15% drawdown turned into 65-74%.**
+
+**The win rate went UP while the account did far worse** - 39.5% to 55.7% on
+FixedVol100. That is the whole grid trade in one number: the adds pull the
+average entry toward price, so baskets resolve profitably more often, and the
+ones that do not resolve cost several positions instead of one. It is the same
+signature D-141 used to disqualify `Quantum Athena` and `MoonDog`, reproduced
+here deliberately and measured rather than inferred.
+
+**A behaviour worth recording.** The tester log shows `scale-in 5 of 5` firing
+three times inside one basket. The cap is on CONCURRENT positions, not total
+adds: when one of the five closes on its own bracket a slot frees and the ladder
+refills it. So the init banner's "WORST CASE ... about 83.34" is the worst case
+at any INSTANT, not the most a single basket can lose over its life. The banner
+wording is accurate but easy to read as the stronger claim.
+
+**Timeframe, measured on the same runs.** Before the grid existed:
+
+| | trades | PF | net | max DD |
+|---|---|---|---|---|
+| FixedVol100 M1 | 9,789 | 0.78 | **-$10,004** | **100.05%** |
+| FixedVol100 M15 | 1,166 | 0.83 | -$1,385 | 14.57% |
+| BTCUSD M15 | 708 | 0.67 | -$1,460 | 14.93% |
+| BTCUSD M1 | 0 | - | - | - |
+
+**M1 lost the entire account** - 100.05% drawdown on a $10,000 deposit across
+9,789 trades in three months. Both charts were moved to M15 on that basis.
+D-124's finding again, now on two more instruments.
+
+BTCUSD M1 returning zero trades is UNEXPLAINED. The report is genuine (22 KB
+against megabytes for the others) and the run completed; I did not determine the
+cause and am not claiming one.
+
+**What is running now**, after disabling: M15, bracket attached at entry at
+1.5:1, money trail arming at $5, salvage at $5 adverse -> exit at $2, scale-in
+OFF, basket exit OFF. That is within a salvage rule of the configuration that
+measured 0.83 and 0.67 - still losing, but survivable rather than
+account-ending.
+
+**The strategy underneath is unchanged and still has no edge.** PF 0.07 on M1
+gold (D-140), 0.78-0.83 on FixedVol100, 0.67 on BTCUSD. Every exit mechanism
+added over this session - bracket, points, money, trail, salvage, grid - changes
+the SHAPE of the outcome distribution. None of them changed the sign. A grid on
+a losing signal wins more often and loses more.
+
 ---
 
 ## Judgement calls made because the brief was silent or self-conflicting
@@ -2961,3 +3294,191 @@ for exactly this reason; that banner is what caught it.
 | 5 | Backtest evaluates stops at bar granularity and is therefore optimistic vs live | Q15 |
 | 6 | Mandatory pre-expiry exit overrides any strategy intent | D-016, Q4 |
 | 7 | Build order changed — M1.5 inserted before M2 | D-019 |
+
+### D-144 - Gold Sniping ignores the chart timeframe entirely, and its 88% win rate is a martingale
+
+You asked to test the Market EA `Gold Sniping` over two months on M1, M5, M15,
+M30 and H1. All five ran: XAUUSD, 2026.07.01-08.31, every tick based on real
+ticks, $10,000 deposit, five separately written reports.
+
+**Every timeframe returned the identical result, to the cent.**
+
+| TF | trades | net | PF | win rate | balance DD | equity DD |
+|---|---|---|---|---|---|---|
+| M1  | 4,424 | +$3,457.59 | 1.07 | 87.73% | 29.11% | 43.34% |
+| M5  | 4,424 | +$3,457.59 | 1.07 | 87.73% | 29.11% | 43.34% |
+| M15 | 4,424 | +$3,457.59 | 1.07 | 87.73% | 29.11% | 43.34% |
+| M30 | 4,424 | +$3,457.59 | 1.07 | 87.73% | 29.11% | 43.34% |
+| H1  | 4,424 | +$3,457.59 | 1.07 | 87.73% | 29.11% | 43.34% |
+
+Not a caching artefact: each report was deleted before its run, each was written
+at a distinct time, and the tester journal shows five separate `automatic
+testing started` lines. **The EA never reads the chart period.** It is driven by
+price and tick events. There is no timeframe to optimise, and any claim of a
+recommended timeframe for it is empty. This is the same class of finding as
+D-141, where two gold EAs ignored the chart *symbol*.
+
+**The win rate is structural, not skill.** From the tester log: baskets close on
+about $1.00 of profit and reopen with `Rest period = 0 minutes`, and lot size
+escalates on adverse moves (0.01 -> 0.02 -> ...). The statistics agree:
+
+- 87.73% of trades win, yet PF is only **1.07** - gross profit $54,891 against
+  gross loss $51,434. The 12% of losers give back nearly everything.
+- Largest win **+$506** vs largest loss **-$734**.
+- Max consecutive losses: **7, costing -$4,088** - 41% of the account in one run.
+- Equity DD (43.34%) exceeds balance DD (29.11%), the martingale signature: it
+  carries unrealised losses rather than taking them.
+
++34.6% in two months, at a 43% equity drawdown, with the drawdown bounded only
+by the worst gold trend that happened to fall inside the window. For a
+martingale the entire risk lives in the tail, and **a two-month sample cannot
+contain it.** These numbers describe a survivor, not an edge.
+
+**Two limits on the measurement itself.** This broker retains only ~5 days of
+real XAUUSD ticks, so despite `Model=4` most of the window is ticks synthesised
+from M1 bars - which flatters basket EAs specifically, by understating the
+intrabar spikes that break baskets. The report does not say so. And two months
+is too short a window to locate the failure point of a martingale.
+
+**Why the first attempt reported "no report" on three timeframes.** The tester
+log directory had grown to **10.2 GB**, throttling each run past the 420 s cap.
+I labelled that failure "licence?" in the moment - a guess, and wrong. Cleared
+the logs, raised the cap, and every run completed in 6.4-6.8 minutes. Same
+lesson as D-140: a run that dies for an environmental reason and a run with
+nothing to report look identical from the outside unless the cause is read
+rather than assumed. The re-run script now captures the tester log tail on
+failure so there is something to read.
+
+### D-145 - Gold Sniping destroys the account in eight weeks; the two-month profit was survivorship
+
+Following D-144, you asked for the 2024-2026 run - the window the two-month
+test could not reach. XAUUSD, 2024.01.01-2026.08.31 requested, real-tick model,
+$10,000, M15 and M1.
+
+**It never reached March 2024.** Last deal 2024.02.26. Balance drawdown 101.35%
+means the account went through zero: a $10,000 deposit lost $10,145.03. The run
+finished in 2.4 minutes rather than the expected ~100 because after February
+2024 there was no money left to trade; the remaining 30 months are empty.
+
+| | 2026.07-08 (D-144) | 2024.01-2026.08 (requested) |
+|---|---|---|
+| last deal | 2026.08.28 | **2024.02.26** |
+| trades | 4,424 | 340 |
+| net | **+$3,457.59** | **-$10,145.03** |
+| profit factor | 1.07 | **0.49** |
+| expected payoff | +0.78 | **-29.84** |
+| win rate | 87.73% | 62.65% |
+| balance DD | 29.11% | **101.35%** |
+| equity DD | 43.34% | **101.43%** |
+| max consecutive losses | 7 (-$4,088) | 10 (-$1,338) |
+
+M1 returned the identical figure again, so the timeframe-independence of D-144
+holds over this window too.
+
+**The two-month result was a survivor, and this is what it was hiding.** Same
+expert, same settings, same broker - only the window moved. +34.6% over two
+months was not an edge; it was one calm stretch that happened to contain no gold
+trend large enough to break a basket. The win rate falling from 88% to 63% is
+the mechanism becoming visible: baskets that normally close for ~$1 instead kept
+escalating until margin ran out. For a martingale, the sample either contains
+the tail event or it does not, and the reported statistics look excellent right
+up until it does.
+
+**The wipeout is still the optimistic case.** MT5 states the reason in the
+report itself:
+
+```
+History Quality:  0% real ticks   (2024-2026)
+History Quality:  8% real ticks   (2026-07/08)
+```
+
+`Model=4` cannot supply real ticks this broker never retained, so every price in
+the 2024 window was interpolated from M1 bars. That understates precisely the
+intrabar spikes that break baskets. The real outcome would have been worse and
+sooner. Note also that the two-month test was only 8% real - the number that
+looked like a result was itself almost entirely synthetic.
+
+**Rule this establishes: never accept a martingale or grid EA's backtest from a
+single window.** Balance drawdown near or above 100% is not a bad score on a
+scale, it is account death, and it is the only statistic in the table that
+matters. Cross-reference D-143, where adding a grid to our own expert turned a
+15% drawdown into 65-74% while the win rate went up.
+
+### D-146 - the Asia value-area fade loses, but its real problem is geometry, not the sample
+
+You brought a gold strategy from a video: mark 05:30 IST, draw a volume profile
+over 05:30-05:45, take the session's direction from the broker open, and fade
+the first close back inside the value area toward the opposite edge. Claim
+attached to it: 400-1000 pips a day.
+
+Measured by `scripts/measure_asia_value_area_xauusd.py` on 100,001 real M1
+XAUUSD bars, 2026-05-26 to 2026-09-04, 74 broker sessions, at the measured
+spread profile (median $0.22, 199,170 ticks). One MT5 lot, flat by 12:00 UTC so
+no swap applies. The source rule specifies no stop and no formula for
+"direction", so two assumptions were taken and are named in the script's
+docstring: **stop at the liquidity wick** the excursion printed, **bias** from
+the 21:00 UTC session open to 00:00 UTC.
+
+| | as described | control: bias inverted |
+|---|---|---|
+| trades | 55 (74% of sessions) | 59 (80%) |
+| win rate | 45.45% | 45.76% |
+| gross | -$2,775.00 | -$995.00 |
+| spread paid | -$1,196.00 | -$1,284.00 |
+| net | **-$3,971.00** | **-$2,279.00** |
+| profit factor | 0.65 | 0.80 |
+| expectancy | -$72.20 a trade | -$38.63 a trade |
+| max drawdown | $5,138.00 | $4,908.50 |
+| t of the mean | -1.22 | -0.51 |
+
+**Neither result is distinguishable from zero, and saying otherwise would be
+the D-144 mistake in reverse.** At n=55 and a per-trade standard deviation of
+$438, |t| = 1.22. This run cannot prove the strategy loses money. What it can
+do is bound the size of any edge: whatever is there is far too small to have
+shown up in fourteen weeks, which is the only window this broker's M1 history
+reaches - M1 stops at 2026-05-26, and a fifteen-minute profile cannot be built
+from coarser bars.
+
+**The finding that does not depend on the sample is the geometry.** Averaged
+over the trades taken:
+
+```
+value area       $4.89 wide
+target distance  $3.79      (the opposite edge, from the fill)
+stop distance    $4.98      (the liquidity wick, from the fill)
+reward : risk    0.76 : 1
+```
+
+The stop is **wider than the target**, every day, by construction. Fading a
+liquidity sweep means entering after the excursion has already happened, so the
+wick you must survive is further away than the edge you are aiming at. At 0.76:1
+the break-even win rate is **56.8%**; the setup delivered 45.5%. That gap is not
+a statistical accident to be resolved with more data - it is what the rule asks
+for. Widening the stop makes the ratio worse; tightening it below the wick
+throws away the only level the rule supplies.
+
+**The direction filter carries no visible information.** Inverting the bias -
+chasing instead of fading - produced 45.76% wins against 45.45%, and lost
+somewhat less. The part of the rule presented as the edge ("pehle yeh clear ho
+jayega") does not separate the two populations at all in this window. Both
+readings sit inside the same noise, which is itself the point: a filter that
+cannot be told apart from its own inverse is not yet evidence of anything.
+
+**On the pips claim.** The average target was $3.79 away, which is 379 pips only
+under the $0.01-a-pip convention; at $0.10 it is 38. The target was reached on
+26 of 74 sessions - 35%. So "400-500 pips a day" requires the loosest pip
+definition *and* that every session both signals and wins. The measured figure
+for the same sessions is -$72 a trade.
+
+**What this establishes.** Not "the strategy fails" - the sample cannot support
+that. It establishes that the setup is structurally short of reward against
+risk, that its direction filter is indistinguishable from its own inverse here,
+and that **no EA should be written for it on this evidence.** Same ordering
+lesson as D-141 and D-144: the cheap measurement comes before the expert, and
+this one cost an afternoon instead of a build.
+
+**One limit worth repeating.** The profile is built from MT5 `tick_volume` -
+quote updates, not traded volume, because a CFD feed has no traded volume. Every
+value area here is a distribution of quotes. It will not match a value area
+drawn on a futures feed, and that is a different measurement wearing the same
+name rather than an approximation that improves with more data.
