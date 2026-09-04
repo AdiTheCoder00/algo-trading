@@ -153,3 +153,6 @@ ignore = [
 # measurement script that no engine code imports.
 "tools/macd_telegram_alert/macd_alert.py" = ["T201"]
 "scripts/measure_macd_xauusd.py" = ["T201"]
+# Same again for the Asia value-area study: a report written to stdout for a
+# human, imported by nothing.
+"scripts/measure_asia_value_area_xauusd.py" = ["T201"]

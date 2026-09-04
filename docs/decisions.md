@@ -3403,3 +3403,82 @@ single window.** Balance drawdown near or above 100% is not a bad score on a
 scale, it is account death, and it is the only statistic in the table that
 matters. Cross-reference D-143, where adding a grid to our own expert turned a
 15% drawdown into 65-74% while the win rate went up.
+
+### D-146 - the Asia value-area fade loses, but its real problem is geometry, not the sample
+
+You brought a gold strategy from a video: mark 05:30 IST, draw a volume profile
+over 05:30-05:45, take the session's direction from the broker open, and fade
+the first close back inside the value area toward the opposite edge. Claim
+attached to it: 400-1000 pips a day.
+
+Measured by `scripts/measure_asia_value_area_xauusd.py` on 100,001 real M1
+XAUUSD bars, 2026-05-26 to 2026-09-04, 74 broker sessions, at the measured
+spread profile (median $0.22, 199,170 ticks). One MT5 lot, flat by 12:00 UTC so
+no swap applies. The source rule specifies no stop and no formula for
+"direction", so two assumptions were taken and are named in the script's
+docstring: **stop at the liquidity wick** the excursion printed, **bias** from
+the 21:00 UTC session open to 00:00 UTC.
+
+| | as described | control: bias inverted |
+|---|---|---|
+| trades | 55 (74% of sessions) | 59 (80%) |
+| win rate | 45.45% | 45.76% |
+| gross | -$2,775.00 | -$995.00 |
+| spread paid | -$1,196.00 | -$1,284.00 |
+| net | **-$3,971.00** | **-$2,279.00** |
+| profit factor | 0.65 | 0.80 |
+| expectancy | -$72.20 a trade | -$38.63 a trade |
+| max drawdown | $5,138.00 | $4,908.50 |
+| t of the mean | -1.22 | -0.51 |
+
+**Neither result is distinguishable from zero, and saying otherwise would be
+the D-144 mistake in reverse.** At n=55 and a per-trade standard deviation of
+$438, |t| = 1.22. This run cannot prove the strategy loses money. What it can
+do is bound the size of any edge: whatever is there is far too small to have
+shown up in fourteen weeks, which is the only window this broker's M1 history
+reaches - M1 stops at 2026-05-26, and a fifteen-minute profile cannot be built
+from coarser bars.
+
+**The finding that does not depend on the sample is the geometry.** Averaged
+over the trades taken:
+
+```
+value area       $4.89 wide
+target distance  $3.79      (the opposite edge, from the fill)
+stop distance    $4.98      (the liquidity wick, from the fill)
+reward : risk    0.76 : 1
+```
+
+The stop is **wider than the target**, every day, by construction. Fading a
+liquidity sweep means entering after the excursion has already happened, so the
+wick you must survive is further away than the edge you are aiming at. At 0.76:1
+the break-even win rate is **56.8%**; the setup delivered 45.5%. That gap is not
+a statistical accident to be resolved with more data - it is what the rule asks
+for. Widening the stop makes the ratio worse; tightening it below the wick
+throws away the only level the rule supplies.
+
+**The direction filter carries no visible information.** Inverting the bias -
+chasing instead of fading - produced 45.76% wins against 45.45%, and lost
+somewhat less. The part of the rule presented as the edge ("pehle yeh clear ho
+jayega") does not separate the two populations at all in this window. Both
+readings sit inside the same noise, which is itself the point: a filter that
+cannot be told apart from its own inverse is not yet evidence of anything.
+
+**On the pips claim.** The average target was $3.79 away, which is 379 pips only
+under the $0.01-a-pip convention; at $0.10 it is 38. The target was reached on
+26 of 74 sessions - 35%. So "400-500 pips a day" requires the loosest pip
+definition *and* that every session both signals and wins. The measured figure
+for the same sessions is -$72 a trade.
+
+**What this establishes.** Not "the strategy fails" - the sample cannot support
+that. It establishes that the setup is structurally short of reward against
+risk, that its direction filter is indistinguishable from its own inverse here,
+and that **no EA should be written for it on this evidence.** Same ordering
+lesson as D-141 and D-144: the cheap measurement comes before the expert, and
+this one cost an afternoon instead of a build.
+
+**One limit worth repeating.** The profile is built from MT5 `tick_volume` -
+quote updates, not traded volume, because a CFD feed has no traded volume. Every
+value area here is a distribution of quotes. It will not match a value area
+drawn on a futures feed, and that is a different measurement wearing the same
+name rather than an approximation that improves with more data.
