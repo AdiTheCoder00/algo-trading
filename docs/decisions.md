@@ -3546,3 +3546,65 @@ different bias formula, a different profile window, a filter on which days to
 skip - and each of those is another parameter searched against the same 74
 sessions, which is how D-143's grid came to look good on the win rate while
 being five times worse. **Stopping here is the finding.**
+
+### D-148 - a flat stop under the trail does exactly what D-127 predicted, and it is not enough
+
+D-127 measured a 2%-armed, 0.5% trailing exit with the flat stop switched off,
+found all six cells negative, and closed by naming the configuration it had not
+run: the flat stop bounding the loser side the trail leaves open, *and* the
+trail locking the winner side, together. That question is now answered. It is
+no.
+
+`scripts/measure_stop_trail_matrix_xauusd.py` runs six exit configurations x
+three timeframes x two strategies from one code path - `run_cfd_backtest`,
+which has taken `stop_loss_pct`, `trail_activation_pct` and `trail_pct` as
+arguments since D-130, so no module constant is edited and all thirty-six cells
+are directly comparable. Window 2024-07-24 to 2026-08-28 (2.09 yr), 100 engine
+lots, measured Vantage costs.
+
+```
+MacdCrossover net              M15          M30           H1
+  0.5% stop only           -$81,192     $81,739     $131,272
+  2%/0.5% trail only      -$402,757   -$241,608    -$137,628
+  0.5% stop + trail       -$206,552    -$76,947     -$21,616
+  1.0% stop + trail       -$244,050   -$108,482    -$103,353
+
+TrendlineBreakout net          M15          M30           H1
+  0.5% stop only           -$17,974     $48,714     $133,039
+  2%/0.5% trail only      -$165,841   -$147,443     -$52,759
+  0.5% stop + trail       -$133,029    -$86,243     -$47,914
+  1.0% stop + trail       -$102,872   -$147,574    -$136,622
+```
+
+**The stop does its job.** D-127's hypothesis was that the flat stop would bound
+the losers the trail leaves uncovered, and it does: **ten of the twelve
+stop-plus-trail cells beat their trail-only counterpart**, several by a lot -
+MACD H1 goes from -$137,628 to -$21,616, MACD M30 from -$241,608 to -$76,947.
+The two exceptions are both `TrendlineBreakout` with the 1.0% stop: M30 is
+marginally worse (-$147,574 against -$147,443) and H1 substantially so
+(-$136,622 against -$52,759), the same non-monotonicity in stop width D-126
+recorded.
+
+**And it is irrelevant, because the damage is on the other side.** Every cell
+that was *positive* with the stop alone turns negative the moment the trail is
+added:
+
+```
+  MACD M30        +$81,739  ->  -$76,947
+  MACD H1        +$131,272  ->  -$21,616
+  Breakout M30    +$48,714  ->  -$86,243
+  Breakout H1    +$133,039  ->  -$47,914
+```
+
+**All twelve trail-bearing cells are negative**, at both stop widths, on both
+strategies, at every timeframe. That is D-127's own mechanism read confirmed
+from the other direction: these strategies' returns on this window come from a
+small number of large trend-following holds, a 2%-armed 0.5% trail caps exactly
+those, and bounding the loser side does not give back what capping the winner
+side takes away. **A stop cannot rescue an exit that is cutting the trades the
+edge lives in.**
+
+The question is closed. Not "the trail needs a different activation or
+distance" - that is a parameter search against one window, and D-131 already
+showed what those produce here.
+

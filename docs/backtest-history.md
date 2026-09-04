@@ -40,6 +40,7 @@ real deals), financing charged nightly. One MT5 lot fixed, no risk scaling.
 | D-127 | both, 2%-armed 0.5% trail, no flat stop | same | **all six cells negative**, -$48,684 to -$406,480 |
 | D-131 | walk-forward, Breakout H1, optimising channel length | 13 windows, 89 out-of-sample trades | in-sample $471,556 · **out-of-sample $31,288** · *never touching the parameter* **$91,075** |
 | D-132 | parameter sweep tooling | — | built with a robustness verdict above the grid, because a heatmap invites reading off the greenest square, which is the D-131 mistake |
+| D-148 | flat stop **and** trail together — the cell D-127 named and never ran | 2024-07-24 → 2026-08-28 | **all twelve trail-bearing cells negative.** The stop bounds losers as predicted (10 of 12 beat trail-only) and every cell the stop alone left positive turns negative |
 
 Buy-and-hold over the D-124 window: **≈ +$199,700**. Over D-123's M5 window:
 +$15,682.
@@ -123,10 +124,12 @@ Each of these was named in its own entry as the real next step, and each is
 still open. They are listed because a question that has been asked and left is
 easy to lose.
 
-1. **A flat stop and a trail together.** D-127 measured the 2%-armed trail with
-   no stop underneath it and said so: whether a flat stop bounding the loser side
-   *and* a trail locking the winner side beats either alone is a different
-   question. Both parameters already exist on `run_cfd_backtest`.
+1. ~~**A flat stop and a trail together.**~~ **Answered by D-148: no.** The stop
+   bounds the loser side exactly as D-127 predicted, and all twelve
+   trail-bearing cells are still negative, because the trail's damage is to the
+   small number of large winners the edge lives in. Closed, not parked — a
+   different activation or trail distance would be a parameter search against
+   one window.
 2. **Stop distance chosen per strategy and timeframe.** D-125 and D-126 both
    identified this and both correctly declined it, to avoid fitting nine cells of
    one 2.11-year window. Doing it *inside* walk-forward makes the choice
@@ -149,8 +152,9 @@ Ranked by information gained per unit of work, on the evidence above.
 1. **Get more history** (open question 4). It is the binding constraint on
    everything intraday, it is infrastructure rather than strategy, and it turns
    the 74-session studies into something that can answer its own question.
-2. **Run the untested exit combination** (open question 1). The code exists; this
-   is an afternoon, and it closes the one configuration D-127 explicitly left.
+2. ~~Run the untested exit combination.~~ **Done — D-148.** The code already
+   existed on `run_cfd_backtest`; it closes the one configuration D-127
+   explicitly left open.
 3. **Make walk-forward a gate rather than an exhibit.** `cfd_walkforward.py` has
    been run essentially once and immediately falsified the best strategy here.
    D-138 built an expert in a regime the measurements already said loses.
