@@ -178,3 +178,4 @@ ignore = [
 "scripts/study_xauusd_stop.py" = ["T201"]
 "scripts/study_xauusd_entry.py" = ["T201"]
 "scripts/study_xauusd_signal.py" = ["T201"]
+"scripts/backtest_xauusd_ema_pullback.py" = ["T201"]

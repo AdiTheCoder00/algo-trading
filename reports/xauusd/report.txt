@@ -77,7 +77,8 @@ BASELINE (6xATR stop, realistic costs)
     max drawdown    229.65  (22.2% of a 1,000.00 account)
     worst MAE       -35.04      median -4.50
     best MFE        +43.75      median +3.99
-    stop distance   9.79 median, 43.48 widest   (what was actually at risk)
+    risk at stop    9.79 median, 43.48 widest   (money, = distance x size)
+    stop distance   9.79 median   (price)
     win streak      9
     loss streak     9
 
@@ -278,7 +279,7 @@ BASELINE (6xATR stop, realistic costs)
   labelling         MT5 stamps a bar with its OPEN time; `algo.core.bar` labels by
                     CLOSE. Shifted by one bar here, or the H1 trend would be read
                     off an hour that had not finished.
-  bars              50,000 M5, 4,169 H1  (2025-12-19 .. 2026-09-04)
+  bars              50,000 M5, 4,170 H1  (2025-12-19 .. 2026-09-04)
   spread            flat $0.29 round trip, the D-121 measured quote. NOT measured
                     per bar the way the main window is - the terminal refuses tick
                     history for this period, so one number stands in for eight
@@ -286,7 +287,7 @@ BASELINE (6xATR stop, realistic costs)
 
   A DIFFERENT MARKET, not just a different period:
     price           3,943 .. 5,599   (the study window was 1,984 .. 3,500)
-    median M5 range 4.86   against 1.4885 in the study window  -  3.3x
+    median M5 range 4.87   against 1.4885 in the study window  -  3.3x
     a FIXED $10 stop would be 2.1 median bars away here
     and 6.7 there - the same rule meaning two
     different things, which is what the ATR baseline exists to stop.
@@ -295,7 +296,7 @@ BASELINE (6xATR stop, realistic costs)
     reason the baseline uses one - read the row below with that in mind.
 
                                trades     win%       net $       PF     exp $      maxDD
-    MT5 holdout (unseen)          244    54.1%     +872.67    1.420     +3.58    -305.21
+    MT5 holdout (unseen)          242    53.7%     +793.32    1.381     +3.28    -305.21
 
 ================================================================================================
 5. FINAL EVALUATION  (the brief's fifteen questions, from the numbers above)
@@ -308,8 +309,8 @@ BASELINE (6xATR stop, realistic costs)
 
   2. Is it profitable out of sample?
       No. In sample -34.03 on 331 trades, out of sample -46.38 on 145; the change is -12.34.
-      On the second holdout - 244 trades on the broker's own bars over eight months the
-      archive does not cover - it made +872.67, profit factor 1.420. Every one of these
+      On the second holdout - 242 trades on the broker's own bars over eight months the
+      archive does not cover - it made +793.32, profit factor 1.381. Every one of these
       samples is small enough that a different split would move the number.
 
   3. Is the edge present on both BUY and SELL?
@@ -372,7 +373,7 @@ BASELINE (6xATR stop, realistic costs)
       holdout: gold's median five-minute range is more than three times larger there than in
       the study window. That is exactly what the volatility-scaled stop exists to absorb,
       and it is why the baseline no longer uses a fixed dollar distance. The win rate still
-      falls from 48.9% to 54.1% for that reason alone. A rule set whose risk changes with
+      falls from 48.9% to 53.7% for that reason alone. A rule set whose risk changes with
       the price of gold is not stable across regimes even when its P&L happens to be.
 
   15. Is there evidence of overfitting?

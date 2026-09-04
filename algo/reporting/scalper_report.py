@@ -125,12 +125,15 @@ class Summary:
     median_mae: Decimal | None
     median_mfe: Decimal | None
 
-    #: How much price the stop was placed away from entry. Under a fixed dollar
-    #: stop these are the same number on every trade; under an ATR multiple they
-    #: are not, and a report that only quoted the multiple would never say how
-    #: many dollars were actually at risk.
+    #: MONEY at risk between entry and stop - the price distance times the size,
+    #: not the distance alone. The two are the same number only when the
+    #: position is one lot, which is why the distinction is spelled out here:
+    #: under risk-based sizing a $1.50 stop on six ounces and a $9 stop on one
+    #: ounce are the same $9 of risk, and it is the $9 a report should quote.
+    median_risk: Decimal | None
+    widest_risk: Decimal | None
+    #: The price distance itself, which is what the stop order would be placed at.
     median_stop_distance: Decimal | None
-    widest_stop_distance: Decimal | None
 
     average_hold: timedelta | None
     median_hold: timedelta | None
@@ -238,8 +241,9 @@ def summarise(
         best_mfe=max((t.mfe for t in trades), default=None),
         median_mae=_median([t.mae for t in trades]),
         median_mfe=_median([t.mfe for t in trades]),
-        median_stop_distance=_median([t.stop_distance * t.lots for t in trades]),
-        widest_stop_distance=max((t.stop_distance * t.lots for t in trades), default=None),
+        median_risk=_median([t.stop_distance * t.lots for t in trades]),
+        widest_risk=max((t.stop_distance * t.lots for t in trades), default=None),
+        median_stop_distance=_median([t.stop_distance for t in trades]),
         average_hold=(sum(holds, timedelta()) / len(holds) if holds else None),
         median_hold=(_median_timedelta(holds) if holds else None),
         max_hold=(max(holds) if holds else None),
@@ -532,8 +536,9 @@ def render_text(summary: Summary) -> str:
         f"({_pct(s.max_drawdown_pct)} of a {_amount(s.starting_equity)} account)",
         f"    worst MAE       {_money(s.worst_mae)}      median {_money(s.median_mae)}",
         f"    best MFE        {_money(s.best_mfe)}      median {_money(s.median_mfe)}",
-        f"    stop distance   {_amount(s.median_stop_distance)} median, "
-        f"{_amount(s.widest_stop_distance)} widest   (what was actually at risk)",
+        f"    risk at stop    {_amount(s.median_risk)} median, "
+        f"{_amount(s.widest_risk)} widest   (money, = distance x size)",
+        f"    stop distance   {_amount(s.median_stop_distance)} median   (price)",
         f"    win streak      {s.longest_win_streak}",
         f"    loss streak     {s.longest_loss_streak}",
         "",

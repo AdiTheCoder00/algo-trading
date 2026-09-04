@@ -1,0 +1,296 @@
+====================================================================================================
+XAUUSD 5M 4-EMA TREND-PULLBACK STRATEGY - BASELINE BACKTEST
+====================================================================================================
+
+DATA
+  source            Dukascopy tick archive, bid/ask, decoded to mid bars
+  window            2024-01-01 .. 2025-05-13   (95,071 M5 candles)
+  truncated         276 candles dropped past a gap in the archive wider than a week
+  spread            per-bar spread on 95,347 bars; median 0.400, p10 0.327, p90 0.607
+  warmup            1,000 candles before any signal - five times the 200 EMA,
+                    because a recursive EMA seeded on its first value has a
+                    residue that decays rather than vanishing at exactly 200
+
+INSTRUMENT, FROM THE ENGINE'S SPEC (not assumed)
+  engine lot        1 troy ounce; $1 per $1 of gold
+  minimum order     1 lot = 1 ounce
+  tick size         0.01
+  source            MetaTrader5.symbol_info("XAUUSD"), Vantage MT5, recorded in
+                    algo/exchange/data/spec_xauusd.yaml
+  CAVEAT            those terms are stamped effective 2026-01-01, which is when
+                    they were measured. This window predates that, so the contract
+                    size and minimum order are a later measurement applied
+                    backwards - the same caveat the swap rate carries.
+
+EXECUTION AND COST ASSUMPTIONS
+  entry             at the OPEN of the candle after the confirmation candle
+  sizing            risk / distance-to-stop, ROUNDED DOWN to whole ounces;
+                    a setup needing less than one ounce is skipped, never
+                    rounded up into a larger risk than intended
+  stop              the pullback extreme, checked intrabar; a candle that gaps
+                    through it fills at that candle's open, never at the level
+  4-hour cap        measured from the actual fill timestamp, closed at the first
+                    executable price at or after it
+  same-candle       the stop is tested before any close-based exit, so a candle
+                    containing both resolves as the stop - the engine's existing
+                    pessimistic convention
+  exits             stop and 4-hour cap ONLY. No take-profit, no trail, no EMA
+                    exit, no news filter, no daily loss limit.
+
+====================================================================================================
+1. THE BASELINE
+====================================================================================================
+
+  rules             EMA 9/20/50/200, risk $10, stale 12 bars, long+short
+
+  TRADE STATISTICS
+    total trades    2566
+    long / short    1585 / 981
+    winners         480
+    losers          2086
+    win rate        18.7%
+    average win     +28.49
+    average loss    -9.16
+    largest win     +514.45
+    largest loss    -61.35
+    profit factor   0.716
+    expectancy      -2.11 per trade
+
+  ACCOUNT PERFORMANCE
+    starting        10,000.00
+    ending          4,574.43
+    net realised    -5,425.57
+    return          -54.3%
+    max drawdown    5,780.07   (56.9%)
+    recovery factor -0.939   (net P&L / max drawdown)
+
+  POSITION SIZING
+    ounces traded   1 min, 4 median, 38 max
+    risk at stop    9.04 median, 10.00 widest   (money; the budget is 10.00)
+    stop distance   2.09 median   (price)
+    setups skipped  54   because the pullback stop was
+                    further than $10 away, so even one ounce would have
+                    breached the risk budget
+    setups seen     8484   (5864 while already in a position)
+
+  TIME STATISTICS
+    average hold    1h 54m
+    median hold     0h 35m
+    maximum hold    73h 30m
+    between trades  2.7h average
+
+  EXIT STATISTICS
+    stop loss        2021   78.8%
+    max hold          545   21.2%
+    ...of which 21 opened past the stop and filled at the open
+
+  LONG VS SHORT
+                trades    win%      net $      PF    exp $     maxDD
+    LONG          1585   19.8%  -2,961.53   0.747    -1.87 -3,264.04
+    SHORT          981   16.9%  -2,464.04   0.666    -2.51 -2,663.20
+
+  DISTRIBUTION
+    win streak      5
+    loss streak     30
+    median trade    -9.03
+    top 128 winners   +8,930.13 of -5,425.57
+    without them    -14,355.71   - the result with the best 5% removed
+
+  MONTHLY
+    month       trades    win%      net $      PF     maxDD
+    2024-01        141   17.7%    -478.38   0.589   -648.37
+    2024-02        154   14.3%    -797.33   0.383   -797.33
+    2024-03        157   15.9%    -367.13   0.712   -599.55
+    2024-04        144   20.1%     -84.53   0.919   -328.82
+    2024-05        187   18.7%    -494.60   0.643   -515.06
+    2024-06        147   19.7%    -434.46   0.596   -502.55
+    2024-07        166   21.1%    -159.58   0.866   -319.53
+    2024-08        168   16.1%    -449.03   0.646   -516.37
+    2024-09        164   17.1%    -559.86   0.549   -709.57
+    2024-10        154   20.8%    -335.20   0.693   -472.62
+    2024-11        160   22.5%    +282.09   1.243   -220.94
+    2024-12        146   19.2%    -593.71   0.479   -616.59
+    2025-01        166   20.5%    -310.34   0.745   -573.65
+    2025-02        130   23.1%     -31.69   0.964   -242.49
+    2025-03        166   15.1%    -725.51   0.432   -743.37
+    2025-04        150   20.0%    +184.63   1.189   -186.02
+    2025-05         66   15.2%     -70.94   0.834   -197.37
+
+  ENGINE METRICS (algo.reporting.metrics, on the bar-resolution equity curve)
+    trades            2566
+    bars              95071
+    net P&L           -5,425.57380
+    gross P&L         1,493.88800
+    total cost        6,919.46180
+    cost drag         463.1848%
+    return            -54.2557%
+    exposure          43.3%
+    max drawdown      5,780.07455 (56.9337%), 462d
+    Sharpe            -3.6423
+    Sortino           -1.4759
+    Calmar            -0.9387
+    
+    round trips       2566 (480W / 2086L)
+    win rate          18.7062%
+    profit factor     0.7160
+    largest win       514.4535
+    largest loss      -61.3464
+    losing streak     30
+    expectancy        -0.2284R   (from 2566 trades with a stop)
+    average win       3.2721R
+    average loss      -1.0339R
+
+  trade log         reports\xauusd\ema_pullback_trades.csv
+  tearsheet         reports\xauusd\ema_pullback_tearsheet.html
+
+====================================================================================================
+2. TRANSACTION-COST SENSITIVITY
+====================================================================================================
+
+                                   trades    win%      net $      PF    exp $     maxDD  skipped
+    realistic                        2566   18.7%  -5,425.57   0.716    -2.11 -5,780.07       54
+    moderate                         2688   16.8% -11,030.18   0.505    -4.10-11,151.51       56
+    conservative                     3015   13.5% -19,935.20   0.300    -6.61-20,010.87       62
+
+====================================================================================================
+3. PARAMETER SENSITIVITY  (is 9/20/50/200 a plateau or a spike?)
+====================================================================================================
+
+    One EMA moved at a time. A robust rule should not change sign when a
+    period moves by two.
+
+  FAST EMA
+                                   trades    win%      net $      PF    exp $     maxDD  skipped
+    ema_fast = 7                     2650   19.0%  -5,490.98   0.720    -2.07 -5,702.62       68
+    ema_fast = 9 (baseline)          2566   18.7%  -5,425.57   0.716    -2.11 -5,780.07       54
+    ema_fast = 11                    2484   18.6%  -5,631.54   0.697    -2.27 -5,992.95       44
+
+  PULLBACK EMA
+                                   trades    win%      net $      PF    exp $     maxDD  skipped
+    ema_pullback = 18                2561   18.5%  -5,202.14   0.728    -2.03 -5,527.75       54
+    ema_pullback = 20 (baseline)     2566   18.7%  -5,425.57   0.716    -2.11 -5,780.07       54
+    ema_pullback = 22                2573   18.7%  -5,422.92   0.716    -2.11 -5,844.31       54
+
+  TREND EMA
+                                   trades    win%      net $      PF    exp $     maxDD  skipped
+    ema_trend = 45                   2581   18.7%  -5,383.58   0.720    -2.09 -5,729.49       56
+    ema_trend = 50 (baseline)        2566   18.7%  -5,425.57   0.716    -2.11 -5,780.07       54
+    ema_trend = 55                   2555   18.6%  -5,529.54   0.710    -2.16 -5,881.19       54
+
+  MAJOR EMA
+                                   trades    win%      net $      PF    exp $     maxDD  skipped
+    ema_major = 180                  2607   18.7%  -5,861.66   0.699    -2.25 -6,167.97       57
+    ema_major = 200 (baseline)       2566   18.7%  -5,425.57   0.716    -2.11 -5,780.07       54
+    ema_major = 220                  2528   18.8%  -5,236.86   0.722    -2.07 -5,652.88       50
+
+====================================================================================================
+4. HOLDING-PERIOD SENSITIVITY  (baseline stays 4 hours)
+====================================================================================================
+
+                                   trades    win%      net $      PF    exp $     maxDD  skipped
+    2h hold                          3264   23.3%  -7,479.02   0.666    -2.29 -7,638.43       64
+    3h hold                          2815   20.2%  -6,871.67   0.666    -2.44 -7,077.50       62
+    4h hold (baseline)               2566   18.7%  -5,425.57   0.716    -2.11 -5,780.07       54
+    5h hold                          2330   17.9%  -4,205.32   0.762    -1.80 -4,654.66       54
+    6h hold                          2192   15.9%  -5,216.98   0.695    -2.38 -5,615.74       52
+
+====================================================================================================
+5. RISK SENSITIVITY  (the signals must not move, only the size)
+====================================================================================================
+
+                                   trades    win%      net $      PF    exp $     maxDD  skipped
+    $5 risk                          2545   17.1%  -2,615.73   0.707    -1.03 -2,769.80      432
+    $10 risk (baseline)              2566   18.7%  -5,425.57   0.716    -2.11 -5,780.07       54
+    $20 risk                         2571   19.0% -11,356.37   0.719    -4.42-12,039.84       10
+
+    The entry timestamps are NOT identical across those three rows, and that is expected rather
+    than a bug: a larger budget can afford a wider stop, so $20 takes setups that $5 has to skip.
+    The signals are the same; which of them are affordable is not. The count in the 'skipped'
+    column is where that shows.
+
+====================================================================================================
+6. OUT OF SAMPLE  (chronological)
+====================================================================================================
+
+  split at          2024-12-10 12:40 UTC
+
+                                   trades    win%      net $      PF    exp $     maxDD  skipped
+    in sample (70%)                  1797   18.4%  -4,181.95   0.694    -2.33 -4,480.81       22
+    out of sample (30%)               749   19.2%  -1,267.36   0.762    -1.69 -1,472.63       32
+
+  A SECOND HOLDOUT: the broker's own bars, eight later months
+  (flat D-121 spread - the terminal serves no tick history for this period)
+
+                                   trades    win%      net $      PF    exp $     maxDD  skipped
+    MT5 holdout (unseen)             1211   18.1%    +867.74   1.108    +0.72   -726.22      632
+
+====================================================================================================
+7. FINAL ASSESSMENT
+====================================================================================================
+
+  1. Does the baseline have positive expectancy?
+      No. -2.11 a trade over 2566 trades, net -5,425.57 on a 10,000.00 nominal account. The win rate
+      is 18.7% against an average win of +28.49 and an average loss of -9.16 - the winners are three
+      times the size of the losers, and there are nowhere near enough of them.
+
+  2. Is profit factor meaningfully above 1?
+      No - it is 0.716, meaningfully BELOW 1. For every dollar the winners made, the losers lost
+      about a dollar and forty. This is not a marginal result that better execution might rescue.
+
+  3. Is drawdown acceptable relative to returns?
+      No. Max drawdown 5,780.07 against a net of -5,425.57 - the drawdown IS the result. The worst
+      losing streak is 30 trades against a best winning streak of 5, which is the shape of a
+      strategy that is right occasionally and large when it is.
+
+  4. Is performance consistent across time?
+      Consistently negative: 2 of 17 months are positive. That is a kind of consistency, and not the
+      useful kind - there is no regime in this window where the strategy worked and the rest where
+      it did not.
+
+  5. Does it survive realistic transaction costs?
+      No, and costs are the whole story. Gross P&L before costs is +1,493.89; costs took 6,919.46,
+      which is 2.70 a trade. realistic -5,425.57, moderate -11,030.18, conservative -19,935.20.
+      Risk-based sizing is what makes this so severe: a tight structural stop buys a large position,
+      and the spread is charged on every ounce of it.
+
+  6. Does it survive out of sample?
+      In sample -4,181.95, out of sample -1,267.36 - negative in both halves. The MT5 holdout is
+      +867.74 at profit factor 1.108, but read it with two things in mind: 632 setups there were
+      skipped as unaffordable against 54 here, because that market's ranges are three times wider,
+      and the signal study already showed that a four-hour position taken at random made money in
+      that window.
+
+  7. Is performance robust around 9/20/50/200?
+      The parameter surface is flat and uniformly negative - 12 of 12 single-EMA variants lose
+      money, and the spread between the best and worst is small next to the drawdown of any of them.
+      So yes, it is robust, in the sense that nothing about the answer depends on the exact periods.
+      There is no cliff here because there is no peak to fall off.
+
+  8. Is there evidence of overfitting?
+      No, and there could not be - nothing was fitted. The baseline ran and was reported before any
+      variant existed and no parameter was searched. The flat sensitivity surface in section 3 is
+      the positive evidence for that: an overfitted parameter set sits on a spike, and this one sits
+      on a plain.
+
+  THE LIMITATION THAT SHAPES THIS RESULT
+      54 setups were skipped because their pullback stop sat more than $10 from entry, and at a
+      one-ounce minimum a $10 budget cannot take those. More importantly, the median stop that WAS
+      taken is only 2.09 of price, which buys a median 4-ounce position. That is the mechanism:
+      sizing to a fixed dollar risk against a tight structural stop makes the position large, and
+      the spread is charged per ounce. The strategy does not lose because the pullback idea is wrong
+      - gross P&L is positive - it loses because this way of sizing it multiplies the cost of being
+      right.
+
+  LONG VS SHORT
+      LONG -2,961.53 over 1585 trades at 19.8%; SHORT -2,464.04 over 981 at 16.9%. Both lose, and
+      neither is rescued by dropping the other. Reported rather than removed, as the specification
+      asks.
+
+  WHAT WOULD ACTUALLY TEST THE IDEA
+      Three changes, in order of how much they would tell you. Size in a way that does not scale
+      with the tightness of the stop - a fixed lot, or a risk budget with a floor on the stop
+      distance - so that the spread is not multiplied by the position. Take the trade at a venue
+      where the round trip is a fraction of this one's. And widen the horizon: the gross figure says
+      the pullback read is not worthless, and everything that destroys it is a cost that a longer
+      hold would amortise.
+

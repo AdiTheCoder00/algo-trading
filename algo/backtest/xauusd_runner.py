@@ -72,6 +72,7 @@ from algo.core.bar import Bar
 from algo.core.enums import Side
 from algo.core.errors import DataError
 from algo.core.instrument import CfdId
+from algo.core.money import round_down_to_lot_step
 from algo.costs.slippage import NoSlippage, SlippageModel
 from algo.data.econ_calendar import EconomicCalendar
 from algo.exchange.forex_calendar import ForexCalendar
@@ -104,6 +105,67 @@ H1_WARMUP = 300
 #: changes, the stochastic needs 14 RSI values on top and the two smoothings
 #: another 5 - about 33. 100 is comfortably past it.
 M5_WARMUP = 100
+
+
+@dataclass(frozen=True, slots=True)
+class EntryIntent:
+    """What an entry hook wants, when a side alone is not enough to say it.
+
+    The specified RSI strategy needs only a direction: its stop is a distance
+    from the parameters and its size is fixed. A structural strategy needs two
+    more things, and both have to travel with the signal rather than being
+    reconstructed later:
+
+    `stop_price` is where the stop belongs - a price the market printed, such as
+    a pullback's low - not a distance. The runner turns it into the same
+    executable level a parameter-derived stop produces, so one exit path serves
+    both.
+
+    `risk` asks the runner to size the position so that reaching that stop costs
+    about that much money, instead of trading a fixed number of lots. The
+    arithmetic happens at the fill, for a reason worth stating: the fill price
+    is the next candle's open, which is not known when the signal fires, and
+    sizing off the signal candle's close would risk a different amount than
+    intended. At the moment the order goes to market the price is on the screen,
+    so sizing from it is what a trader actually does and is not look-ahead.
+    """
+
+    side: Side
+    stop_price: Decimal | None = None
+    risk: Decimal | None = None
+    #: Overrides `ScalperParams.lots` when set and `risk` is not.
+    lots: int | None = None
+
+
+#: The engine's minimum tradeable size for XAUUSD, from `spec_xauusd.yaml`:
+#: MT5 `volume_min` 0.01 broker lots of 100 ounces = one ounce, in steps of one.
+#: Held here rather than looked up per bar because the lookup is by date and the
+#: answer has not changed across this project's whole data window; the study
+#: script asserts it against the spec store at startup.
+MIN_LOTS = 1
+LOT_STEP = 1
+
+
+def size_for_risk(
+    *, risk: Decimal, entry_price: Decimal, stop_price: Decimal
+) -> tuple[int, Decimal]:
+    """Lots that risk about `risk` between entry and stop, and the distance.
+
+    Rounds **down** and never up, via the engine's own
+    `round_down_to_lot_step`, whose docstring states the rule this follows:
+    "If the rounded size is below min lot, skip the trade and log it - do not
+    round up. Rounding up would silently exceed the risk budget."
+
+    Returns 0 lots when the stop is far enough away that even one ounce would
+    breach the budget. On XAUUSD at one ounce a lot, that is any stop wider than
+    the risk itself - a $10 budget cannot take a $13 stop - and the caller is
+    expected to skip and count those rather than quietly risk more.
+    """
+    distance = abs(entry_price - stop_price)
+    if distance <= 0:
+        return 0, distance
+    lots = round_down_to_lot_step(risk / distance, LOT_STEP)
+    return (lots if lots >= MIN_LOTS else 0), distance
 
 
 @dataclass(slots=True)
@@ -155,6 +217,11 @@ class ScalperTrade:
     news_status: str = "clear"
     rsi_extreme_activated: bool = False
     bars_held: int = 0
+    #: Whatever the strategy that produced this trade wants in its own log. The
+    #: runner records the RSI strategy's readings unconditionally because it
+    #: computes them anyway; a different entry supplies its own through the
+    #: `telemetry` hook rather than having its fields bolted onto this record.
+    context: dict[str, str] = field(default_factory=dict)
     #: The bar opened past the stop, so the fill was its open rather than the
     #: level. Recorded here rather than inferred from the P&L afterwards: with
     #: slippage charged on every stop, "filled worse than the level" is true of
@@ -200,6 +267,11 @@ class ScalperResult:
     #: filter name -> how many signals it rejected. Empty on the baseline, which
     #: has no filters; per-name so one filter cannot hide behind another.
     blocked_by_filter: dict[str, int] = field(default_factory=dict)
+    #: Signals abandoned at the fill because the structural stop was too far
+    #: away to take even the minimum size inside the risk budget. Counted rather
+    #: than dropped: "the strategy took 90 trades" and "it saw 400 setups and
+    #: could afford 90" are different claims about it.
+    blocked_by_sizing: int = 0
     #: Trading days on which realised P&L reached the limit, and the day's total.
     limit_days: dict[date, Decimal] = field(default_factory=dict)
     daily_realised: dict[date, Decimal] = field(default_factory=dict)
@@ -321,7 +393,9 @@ def run_scalper(
     indicators: Indicators | None = None,
     slippage: SlippageModel | None = None,
     tick: Decimal = Decimal("0.001"),
-    entry: Callable[[int], Side | None] | None = None,
+    entry: Callable[[int], Side | EntryIntent | None] | None = None,
+    telemetry: Callable[[int], dict[str, str]] | None = None,
+    warmup_bars: int | None = None,
 ) -> ScalperResult:
     """Walk `m5` once, trading the baseline rules and charging real costs.
 
@@ -329,6 +403,16 @@ def run_scalper(
     for the indicators themselves - recomputing RSI over 100,000 bars for each
     of a dozen stop-loss variants is pure waste, and the series are identical
     by construction. Pass `None` and they are computed here.
+
+    `warmup_bars` overrides how many M5 bars must pass before anything trades.
+    The default pair of gates - 100 M5 bars and 300 completed H1 bars - exists
+    for the RSI strategy's own indicators; an entry hook with different inputs
+    knows its own warmup and the H1 gate is not applied to it, because a hook
+    that never reads the hourly trend should not be made to wait for it.
+
+    `telemetry` is asked for the strategy's own log fields at each signal bar.
+    The runner records the RSI readings regardless - it computes them anyway -
+    and a different strategy adds its own here rather than growing the record.
 
     `entry` replaces the specified entry rule with an arbitrary one, taking the
     index of a closed M5 bar and returning a side or `None`. Everything else -
@@ -370,7 +454,7 @@ def run_scalper(
 
     open_trade: ScalperTrade | None = None
     state: ExitState | None = None
-    pending: tuple[Side, int] | None = None  # (side, index of the signal bar)
+    pending: tuple[EntryIntent, int] | None = None  # (intent, signal bar index)
     last_session: date | None = None
     realised = Decimal("0")
 
@@ -380,8 +464,9 @@ def run_scalper(
 
         # ---------------------------------------------------- fill a pending entry
         if pending is not None:
-            side, signal_index = pending
+            intent, signal_index = pending
             pending = None
+            side = intent.side
             entry_mid = bar.open
             entry_slip = slip.extra(tick=tick, is_stop=False)
             entry_exec = (
@@ -392,9 +477,34 @@ def run_scalper(
             signal_bar = m5[signal_index]
             h1_index = ind.h1_index[signal_index]
             entry_day = session_date_for(sessions, signal_bar.ts)
-            open_trade = ScalperTrade(
+
+            affordable = True
+            lots = params.lots if intent.lots is None else intent.lots
+            distance = stop_distance(params, atr_at_entry=ind.m5_atr[signal_index])
+            if intent.stop_price is not None:
+                sized, structural = (
+                    size_for_risk(
+                        risk=intent.risk,
+                        entry_price=entry_exec,
+                        stop_price=intent.stop_price,
+                    )
+                    if intent.risk is not None
+                    else (lots, abs(entry_exec - intent.stop_price))
+                )
+                # Too wide to afford at the minimum size: skip and count,
+                # never round the size up into the budget. Deliberately not a
+                # `continue` - the bar still has to record its equity point, or
+                # the curve grows a hole wherever the strategy declined a trade.
+                affordable = sized >= 1
+                lots, distance = (sized, structural) if affordable else (lots, distance)
+                if not affordable:
+                    result.blocked_by_sizing += 1
+            else:
+                affordable = True
+
+            open_trade = None if not affordable else ScalperTrade(
                 side=side,
-                lots=params.lots,
+                lots=lots,
                 signal_ts=signal_bar.ts,
                 # The signal candle's close and the next candle's open are the
                 # same instant on a continuous 5-minute grid. Both are recorded
@@ -403,29 +513,28 @@ def run_scalper(
                 entry_ts=signal_bar.ts,
                 entry_price=entry_exec,
                 entry_mid=entry_mid,
-                spread_paid=half * params.lots,
-                slippage_paid=entry_slip * params.lots,
-                entry_slippage=entry_slip * params.lots,
-                commission_paid=_commission(charged, side, params.lots, entry_exec, entry_day),
-                h1_ema_fast=ind.h1_ema_fast[h1_index],
-                h1_ema_slow=ind.h1_ema_slow[h1_index],
-                h1_macd=ind.h1_macd[h1_index],
-                h1_macd_signal=ind.h1_signal[h1_index],
-                h1_macd_hist=ind.h1_hist[h1_index],
+                spread_paid=half * lots,
+                slippage_paid=entry_slip * lots,
+                entry_slippage=entry_slip * lots,
+                commission_paid=_commission(charged, side, lots, entry_exec, entry_day),
+                h1_ema_fast=(ind.h1_ema_fast[h1_index] if h1_index >= 0 else float("nan")),
+                h1_ema_slow=(ind.h1_ema_slow[h1_index] if h1_index >= 0 else float("nan")),
+                h1_macd=(ind.h1_macd[h1_index] if h1_index >= 0 else float("nan")),
+                h1_macd_signal=(ind.h1_signal[h1_index] if h1_index >= 0 else float("nan")),
+                h1_macd_hist=(ind.h1_hist[h1_index] if h1_index >= 0 else float("nan")),
                 m5_rsi=ind.m5_rsi[signal_index],
                 m5_rsi_previous=ind.m5_rsi[signal_index - 1],
                 stoch_k=ind.stoch_k[signal_index],
                 stoch_d=ind.stoch_d[signal_index],
                 daily_realised_before=result.daily_realised.get(entry_day, Decimal("0")),
-                stop_distance=stop_distance(
-                    params, atr_at_entry=ind.m5_atr[signal_index]
-                ),
+                stop_distance=distance,
                 m5_atr=ind.m5_atr[signal_index],
                 # Recorded whether or not the filter is on, so a run with it off
                 # can still be asked how many of its trades were news trades.
                 news_status=_news_status(calendar, signal_bar.ts, params),
+                context=telemetry(signal_index) if telemetry is not None else {},
             )
-            state = ExitState(side=side)
+            state = ExitState(side=side) if open_trade is not None else None
             last_session = session_date_for(sessions, bar.ts)
 
         held = open_trade is not None
@@ -517,7 +626,7 @@ def run_scalper(
         # ----------------------------------------------------------- entry search
         if open_trade is None and pending is None and i + 1 < len(m5):
             h1_index = ind.h1_index[i]
-            if i >= M5_WARMUP and h1_index >= H1_WARMUP:
+            if _warmed(i, h1_index, warmup_bars, entry):
                 side = (
                     entry(i)
                     if entry is not None
@@ -531,6 +640,7 @@ def run_scalper(
                     )
                 )
                 if side is not None:
+                    side = _as_intent(side)
                     result.signals_seen += 1
                     day = session_date_for(sessions, bar.ts)
                     event = (
@@ -544,17 +654,17 @@ def run_scalper(
                         EntryContext(
                             m5_atr=ind.m5_atr[i],
                             full_spread=half * 2,
-                            h1_ema_gap=ind.h1_ema_fast[h1_index] - ind.h1_ema_slow[h1_index],
-                            h1_atr=ind.h1_atr[h1_index],
-                            h1_hist=ind.h1_hist[h1_index],
-                            h1_hist_previous=(
-                                ind.h1_hist[h1_index - 1] if h1_index else float("nan")
-                            ),
+                            h1_ema_gap=_h1(ind.h1_ema_fast, h1_index)
+                            - _h1(ind.h1_ema_slow, h1_index),
+                            h1_atr=_h1(ind.h1_atr, h1_index),
+                            h1_hist=_h1(ind.h1_hist, h1_index),
+                            h1_hist_previous=_h1(ind.h1_hist, h1_index - 1),
                             hour=bar.ts.hour,
                             signal_index=i,
                         ),
                         params,
                     )
+
                     if rejected is not None:
                         result.blocked_by_filter[rejected] = (
                             result.blocked_by_filter.get(rejected, 0) + 1
@@ -568,13 +678,13 @@ def run_scalper(
                         # the limit as an already-open position closes.
                         result.blocked_by_daily_limit += 1
                     else:
-                        pending = (side, i)
+                        pending = (_as_intent(side), i)
         elif open_trade is not None:
             # A setup that appeared while already in a position. Counted rather
             # than dropped: "the strategy took 300 trades" and "the strategy saw
             # 900 setups and could act on 300" are different claims about it.
             h1_index = ind.h1_index[i]
-            if i >= M5_WARMUP and h1_index >= H1_WARMUP:
+            if _warmed(i, h1_index, warmup_bars, entry):
                 blocked = (
                     entry(i)
                     if entry is not None
@@ -594,6 +704,39 @@ def run_scalper(
         result.equity_curve.append((bar.ts, starting_equity + realised, 1 if held else 0))
 
     return result
+
+
+def _h1(series: list[float], index: int) -> float:
+    """An hourly reading, or NaN when there is no completed hourly bar yet.
+
+    A custom entry may legitimately fire before the H1 series has warmed up -
+    it need not read the hourly trend at all - and the telemetry that records
+    hourly values for the log must not crash on that.
+    """
+    return series[index] if 0 <= index < len(series) else float("nan")
+
+
+def _warmed(
+    index: int,
+    h1_index: int,
+    warmup_bars: int | None,
+    entry: Callable[[int], Side | EntryIntent | None] | None,
+) -> bool:
+    """Has enough history passed for a signal to mean anything?
+
+    Two gates for the specified strategy, one for a custom entry. The H1 gate is
+    about the hourly trend filter, and applying it to a hook that reads only M5
+    would silently discard the first three thousand bars of every study for a
+    reason that does not apply to it.
+    """
+    if entry is not None:
+        return index >= (warmup_bars if warmup_bars is not None else M5_WARMUP)
+    return index >= M5_WARMUP and h1_index >= H1_WARMUP
+
+
+def _as_intent(value: Side | EntryIntent) -> EntryIntent:
+    """A hook may return a bare side; the runner works in intents."""
+    return value if isinstance(value, EntryIntent) else EntryIntent(side=value)
 
 
 def _commission(

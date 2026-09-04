@@ -282,8 +282,8 @@ def evaluate(
         (
             "12. What is the largest single-trade loss?",
             f"{money(baseline.largest_loss)}, against a stop that ranged from "
-            f"{amount(baseline.median_stop_distance)} at the median to "
-            f"{amount(baseline.widest_stop_distance)} at its widest. That is the ATR stop "
+            f"{amount(baseline.median_risk)} at the median to "
+            f"{amount(baseline.widest_risk)} at its widest. That is the ATR stop "
             "working as intended rather than failing: a trade entered in a volatile hour "
             "risks more dollars, and it is the fixed-dollar version that was quietly "
             "taking a different amount of risk each time without saying so. "
