@@ -37,6 +37,14 @@ dev = [
     # httpx. filterwarnings=error turns that into a collection failure, so the
     # transport it actually wants is declared rather than inherited by luck.
     "httpx2",
+    # Same class of problem, one layer down. starlette's TestClient still
+    # annotates its portal factory with `anyio.abc.BlockingPortal`, and anyio
+    # 4.15 turned that alias into a DeprecationWarning, which filterwarnings=
+    # error makes a collection failure of tests/test_api.py. Pinned rather than
+    # filtered: the warning is accurate, it is starlette's to fix, and silencing
+    # it here would also hide the day our own code reaches for the dead alias.
+    # Verified against starlette 1.6.0 / fastapi 0.141.1, the current resolution.
+    "anyio<4.15",
     # tools/macd_telegram_alert/mt5_xauusd_alert.py imports macd_alert.py's
     # shared MACD/Telegram/state code, and that unconditionally imports ccxt
     # at module level. The tool has its own isolated venv + requirements.txt
