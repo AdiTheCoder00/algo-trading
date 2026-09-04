@@ -30,6 +30,13 @@ never reaches 75 never becomes eligible, and one that touched 76 an hour ago is
 still eligible when it finally slips under. `ExitState.extreme_activated` carries
 that per position and is reset with the position, never across trades.
 
+## The one place this departs from the rules as specified
+
+The specified stop is a flat $10. The baseline here is 6 x ATR(14), which is
+what $10 was when the rule was written, expressed so that it stays that when
+gold's range changes. `SPEC_BASELINE` is the literal specification and is run
+and reported alongside every result. The reasoning is on `BASELINE` below.
+
 ## What the MACD histogram is not
 
 The histogram is computed and recorded on every trade, and is **not** a
@@ -137,7 +144,31 @@ class ScalperParams:
         )
 
 
-BASELINE = ScalperParams()
+#: The brief's rules exactly as written, fixed $10 stop and all. Kept as a named
+#: object rather than as a comment because it is still run and still reported on
+#: every study - promoting the ATR stop must not make the specified strategy
+#: unmeasurable, only un-default.
+SPEC_BASELINE = ScalperParams()
+
+#: The baseline. The only difference from `SPEC_BASELINE` is that the stop is a
+#: multiple of ATR rather than a fixed number of dollars.
+#:
+#: Six, and the number is not a choice from a sweep. $10 was 6.2 ATRs in the
+#: 2024-25 window this was first measured on, so 6xATR is that same stop
+#: translated into units that do not change meaning when the market does - which
+#: is the entire reason for the change. Picking the multiple by which one earned
+#: most would be fitting to 480 trades, and the sweep it would be fitted to
+#: disagrees with itself between windows.
+#:
+#: What the change fixes, in one number: at a fixed $10 the share of trades
+#: ending on the stop is 23.9% in the 2024-25 window and 65.1% in the 2026 one,
+#: because gold's five-minute range trebled between them. At 6xATR the two are
+#: within 6.6 points. The dollar stop was silently a different rule in each
+#: regime; this one is not.
+#:
+#: It does not make the strategy profitable and was not adopted for that. Every
+#: ATR row in both windows sits in the same band as every dollar row.
+BASELINE = ScalperParams(stop_atr_multiple=Decimal("6"))
 
 
 def trend_of(*, ema_fast: float, ema_slow: float, macd_line: float, macd_signal: float) -> Trend:

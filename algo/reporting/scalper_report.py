@@ -125,6 +125,13 @@ class Summary:
     median_mae: Decimal | None
     median_mfe: Decimal | None
 
+    #: How much price the stop was placed away from entry. Under a fixed dollar
+    #: stop these are the same number on every trade; under an ATR multiple they
+    #: are not, and a report that only quoted the multiple would never say how
+    #: many dollars were actually at risk.
+    median_stop_distance: Decimal | None
+    widest_stop_distance: Decimal | None
+
     average_hold: timedelta | None
     median_hold: timedelta | None
     max_hold: timedelta | None
@@ -231,6 +238,8 @@ def summarise(
         best_mfe=max((t.mfe for t in trades), default=None),
         median_mae=_median([t.mae for t in trades]),
         median_mfe=_median([t.mfe for t in trades]),
+        median_stop_distance=_median([t.stop_distance * t.lots for t in trades]),
+        widest_stop_distance=max((t.stop_distance * t.lots for t in trades), default=None),
         average_hold=(sum(holds, timedelta()) / len(holds) if holds else None),
         median_hold=(_median_timedelta(holds) if holds else None),
         max_hold=(max(holds) if holds else None),
@@ -296,10 +305,12 @@ def to_trades(result: ScalperResult, params: ScalperParams) -> list[Trade]:
     `Trade.net_pnl` identical to `ScalperTrade.net_pnl` - checked in the tests -
     while the mid-basis gross stays available on the runner's own record.
 
-    `r_multiple` is the trade in units of the configured stop, which is what
+    `r_multiple` is the trade in units of **its own** stop, which is what
     `metrics.trade_stats` expects R to mean: "the configured stop, not the
-    maximum possible loss". Here the stop is a real hard stop, so R is exactly
-    as meaningful as the rest of the strategy's risk statement.
+    maximum possible loss". Per trade rather than from the parameters, because
+    under an ATR-scaled stop every trade risks a different number of dollars -
+    which is the point of that stop, and would make a single divisor wrong for
+    all but one trade.
     """
     out: list[Trade] = []
     for index, trade in enumerate(result.trades, start=1):
@@ -328,7 +339,9 @@ def to_trades(result: ScalperResult, params: ScalperParams) -> list[Trade]:
                 gross_pnl=executed,
                 charges=Charges(brokerage=trade.commission_paid, swap=trade.swap_paid),
                 r_multiple=(
-                    trade.net_pnl / params.stop_loss if params.stop_loss else None
+                    trade.net_pnl / (trade.stop_distance * trade.lots)
+                    if trade.stop_distance
+                    else None
                 ),
                 exit_reason=trade.exit_reason.value if trade.exit_reason else "",
                 reason=_reason(trade),
@@ -421,7 +434,7 @@ def equity_points(
     """The realised-equity curve as the engine's own point type.
 
     Realised only, matching `run_cfd_backtest`: the curve steps at each close
-    rather than floating with an open position. With a hard $10 stop and a
+    rather than floating with an open position. With a hard stop and a
     four-hour cap the unrealised excursion between steps is bounded by the stop,
     so the drawdown this understates is bounded by roughly one stop - stated
     rather than left for a reader to wonder about.
@@ -519,6 +532,8 @@ def render_text(summary: Summary) -> str:
         f"({_pct(s.max_drawdown_pct)} of a {_amount(s.starting_equity)} account)",
         f"    worst MAE       {_money(s.worst_mae)}      median {_money(s.median_mae)}",
         f"    best MFE        {_money(s.best_mfe)}      median {_money(s.median_mfe)}",
+        f"    stop distance   {_amount(s.median_stop_distance)} median, "
+        f"{_amount(s.widest_stop_distance)} widest   (what was actually at risk)",
         f"    win streak      {s.longest_win_streak}",
         f"    loss streak     {s.longest_loss_streak}",
         "",

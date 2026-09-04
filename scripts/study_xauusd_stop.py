@@ -68,7 +68,12 @@ from algo.core.bar import Bar
 from algo.core.enums import Side
 from algo.data.econ_calendar import EconomicCalendar
 from algo.reporting.scalper_report import Summary, summarise
-from algo.strategy.rsi_stoch_reversal import BASELINE, ExitState, rsi_reversal_exit
+from algo.strategy.rsi_stoch_reversal import (
+    BASELINE,
+    SPEC_BASELINE,
+    ExitState,
+    rsi_reversal_exit,
+)
 
 #: The sweep. Wide enough that the ends are obviously wrong, so the middle is
 #: read as a plateau rather than as a peak. `None` is the no-stop reference.
@@ -242,10 +247,16 @@ def sweep(
     say(HEADER + f"{'stopped':>10}")
     results: dict[str, Summary] = {}
     for level in STOP_LADDER:
-        params = replace(BASELINE, stop_loss=level if level is not None else NO_STOP)
+        params = replace(
+            BASELINE,
+            stop_loss=level if level is not None else NO_STOP,
+            # Cleared, or `stop_distance` takes the ATR branch and every row in
+            # this table is the same run wearing nine different labels.
+            stop_atr_multiple=None,
+        )
         name = f"${level} stop" if level is not None else "no stop at all"
-        if level == BASELINE.stop_loss:
-            name += "  <- baseline"
+        if level == SPEC_BASELINE.stop_loss:
+            name += "  <- as specified"
         result = run(m5, h1, params, costs, slippage, calendar, ind)
         item = summarise(result, params, label=name, starting_equity=ACCOUNT)
         results[name] = item
@@ -304,17 +315,22 @@ def main() -> None:
     say(f"  window            {dataset.label}  ({len(dataset.m5):,} M5 bars)")
     say("  costs             realistic: per-bar measured spread, zero commission,")
     say("                    measured swap, $0.05 slippage on a stop")
-    say("  everything else   the exact baseline rules. Only the stop moves.")
+    say("  everything else   the exact specified rules. Only the stop moves.")
     say()
 
-    baseline = run(dataset.m5, dataset.h1, BASELINE, costs, slippage, calendar, ind)
-    summary = summarise(baseline, BASELINE, label="baseline", starting_equity=ACCOUNT)
+    # This study is about the SPECIFIED stop - a flat $10 - which is what it was
+    # written to examine and what the report's `$10 stop` rows mean. The project
+    # baseline has since moved to 6xATR partly because of what is below.
+    baseline = run(dataset.m5, dataset.h1, SPEC_BASELINE, costs, slippage, calendar, ind)
+    summary = summarise(
+        baseline, SPEC_BASELINE, label="specified $10 stop", starting_equity=ACCOUNT
+    )
     stops = [t for t in baseline.trades if t.exit_reason.value == "stop loss"]
 
     unstopped = run(
         dataset.m5,
         dataset.h1,
-        replace(BASELINE, stop_loss=NO_STOP),
+        replace(BASELINE, stop_loss=NO_STOP, stop_atr_multiple=None),
         costs,
         slippage,
         calendar,
@@ -432,7 +448,7 @@ def main() -> None:
         h_unstopped = run(
             h_m5,
             h_h1,
-            replace(BASELINE, stop_loss=NO_STOP),
+            replace(BASELINE, stop_loss=NO_STOP, stop_atr_multiple=None),
             mt5_costs(),
             slippage,
             calendar,
@@ -531,9 +547,9 @@ def verdict(
     stop_hit = baseline.exit_share.get("stop loss")
 
     free_here = dukas.get("no stop at all")
-    baseline_here = dukas.get("$10 stop  <- baseline")
+    baseline_here = dukas.get("$10 stop  <- as specified")
     free_there = holdout.get("no stop at all")
-    baseline_there = holdout.get("$10 stop  <- baseline")
+    baseline_there = holdout.get("$10 stop  <- as specified")
 
     add(
         "1. The $10 stop costs this strategy money, in both windows.",

@@ -26,6 +26,7 @@ from algo.data.econ_calendar import EconomicCalendar, EconomicEvent
 from algo.pricing.indicators import rsi, stoch_rsi
 from algo.strategy.rsi_stoch_reversal import (
     BASELINE,
+    SPEC_BASELINE,
     ExitState,
     ScalperParams,
     Trend,
@@ -380,15 +381,24 @@ def test_no_trade_is_held_past_the_maximum_when_the_market_is_open() -> None:
         assert trade.holding_time <= BASELINE.max_hold
 
 
-def test_a_stopped_trade_loses_exactly_the_stop_before_other_costs() -> None:
-    """With no spread, no commission and no swap, a stop is -$10 to the cent
-    unless the bar gapped through it."""
-    _m5, _h1, result = _forced_run()
-    stopped = [t for t in result.trades if t.exit_reason.value == "stop loss"]
-    for trade in stopped:
-        move = trade.exit_price - trade.entry_price
-        signed = move if trade.side is Side.BUY else -move
-        assert signed <= Decimal("-10"), "a stop can fill worse on a gap, never better"
+def test_a_stopped_trade_loses_exactly_its_own_stop_before_other_costs() -> None:
+    """With no spread, no commission and no swap, a stop fills at its level.
+
+    Against the trade's **own** stop distance rather than a constant, because
+    the baseline's stop is a multiple of ATR and so is a different number of
+    dollars on every trade. A constant here would have silently stopped testing
+    anything the moment the baseline changed.
+    """
+    for params in (BASELINE, SPEC_BASELINE):
+        _m5, _h1, result = _forced_run(params=params)
+        stopped = [t for t in result.trades if t.exit_reason.value == "stop loss"]
+        assert stopped, f"{params.label()} produced no stopped trades to check"
+        for trade in stopped:
+            move = trade.exit_price - trade.entry_price
+            signed = (move if trade.side is Side.BUY else -move) * trade.lots
+            assert signed <= -trade.stop_distance * trade.lots, (
+                "a stop can fill worse on a gap, never better"
+            )
 
 
 def test_costs_reconcile_with_the_executed_prices() -> None:
@@ -595,7 +605,6 @@ def test_an_atr_stop_scales_with_volatility_and_a_dollar_stop_does_not() -> None
     The same rules over the same shape at two different volatilities: a fixed
     dollar stop fires far more often in the noisier one, an ATR stop does not.
     """
-    from dataclasses import replace
 
     from algo.reporting.scalper_report import summarise
 
@@ -632,16 +641,15 @@ def test_an_atr_stop_scales_with_volatility_and_a_dollar_stop_does_not() -> None
         share = summary.exit_share.get("stop loss")
         return float(share) if share is not None else 0.0
 
-    quiet_dollar = stop_share(run_at(Decimal("1"), BASELINE))
-    loud_dollar = stop_share(run_at(Decimal("3"), BASELINE))
+    quiet_dollar = stop_share(run_at(Decimal("1"), SPEC_BASELINE))
+    loud_dollar = stop_share(run_at(Decimal("3"), SPEC_BASELINE))
     assert loud_dollar - quiet_dollar > 15, (
         "a fixed dollar stop must fire far more often when the range triples - "
         f"got {quiet_dollar:.1f}% and {loud_dollar:.1f}%"
     )
 
-    scaled = replace(BASELINE, stop_atr_multiple=Decimal("6"))
-    quiet_atr = stop_share(run_at(Decimal("1"), scaled))
-    loud_atr = stop_share(run_at(Decimal("3"), scaled))
+    quiet_atr = stop_share(run_at(Decimal("1"), BASELINE))
+    loud_atr = stop_share(run_at(Decimal("3"), BASELINE))
     assert abs(loud_atr - quiet_atr) < 10, (
         "an ATR stop must mean roughly the same thing at both volatilities - "
         f"got {quiet_atr:.1f}% and {loud_atr:.1f}%"
@@ -661,8 +669,37 @@ def test_the_atr_stop_falls_back_rather_than_leaving_a_position_unbounded() -> N
     assert stop_distance(scaled, atr_at_entry=0.0) == BASELINE.stop_loss
 
 
-def test_the_baseline_still_uses_a_flat_ten_dollar_stop() -> None:
-    """The variant must not have moved the baseline. Cheap, and the whole point."""
-    assert BASELINE.stop_atr_multiple is None
-    assert BASELINE.stop_loss == Decimal("10")
-    assert stop_level(Side.BUY, Decimal("2000"), BASELINE) == Decimal("1990")
+def test_the_specification_is_still_runnable_and_unchanged() -> None:
+    """The baseline moved to an ATR stop on request; the brief's rules did not.
+
+    `SPEC_BASELINE` is what every report still shows alongside the baseline, so
+    it has to keep meaning exactly what the specification said - a flat $10,
+    everything else identical. If these two ever differ anywhere but the stop,
+    the comparison the reports draw is not the comparison they claim.
+    """
+    from dataclasses import fields
+
+    assert SPEC_BASELINE.stop_atr_multiple is None
+    assert SPEC_BASELINE.stop_loss == Decimal("10")
+    assert stop_level(Side.BUY, Decimal("2000"), SPEC_BASELINE) == Decimal("1990")
+
+    assert BASELINE.stop_atr_multiple == Decimal("6")
+    differences = {
+        f.name
+        for f in fields(ScalperParams)
+        if getattr(BASELINE, f.name) != getattr(SPEC_BASELINE, f.name)
+    }
+    assert differences == {"stop_atr_multiple"}, (
+        f"the baseline should differ from the specification in the stop alone, "
+        f"but also differs in {differences - {'stop_atr_multiple'}}"
+    )
+
+
+def test_the_atr_baseline_risks_a_different_amount_on_every_trade() -> None:
+    """The property that makes the change worth making, and the one that makes
+    a single R divisor wrong - `to_trades` uses each trade's own stop."""
+    _m5, _h1, result = _forced_run()
+    distances = {t.stop_distance for t in result.trades}
+    assert len(distances) > 1, "an ATR stop that never varies is not an ATR stop"
+    for trade in result.trades:
+        assert trade.stop_distance > 0

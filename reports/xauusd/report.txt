@@ -26,8 +26,11 @@ EXECUTION AND COST ASSUMPTIONS
   position          0.01 MT5 lot = 1 ounce. A $1 move in gold is $1 of P&L.
   entry             at the open of the candle AFTER the confirmation candle
   bars              mid of bid and ask; a fill crosses half the measured spread
-  stop              a price, at entry -/+ $10; a bar that gaps through it fills
-                    at the bar's open, never at the level
+  stop              6 x ATR(14) from entry, measured on the confirmation
+                    candle. A price, not a P&L threshold, and a bar that gaps
+                    through it fills at the bar's open, never at the level.
+                    The brief specifies a flat $10; that version is reported
+                    as the first row of the stop table below.
   trading day       21:00 UTC to 21:00 UTC - the broker's rollover, which is
                     midnight on its own UTC+3 server clock. The -$50 daily limit
                     resets there, NOT at UTC midnight and not in local time.
@@ -36,153 +39,154 @@ EXECUTION AND COST ASSUMPTIONS
                     MT5 publishes no historical series (D-121).
 
 ================================================================================================
-1. THE EXACT BASELINE
+1. THE BASELINE  (the specified rules, with the stop scaled to volatility)
 ================================================================================================
 
-BASELINE (exact rules, realistic costs)
+BASELINE (6xATR stop, realistic costs)
   window            2024-01-01 23:05 .. 2025-05-13 12:00  (95,071 M5 bars)
-  rules             SL $10, hold 4h, rsi-exit on, news on, buy+sell
+  rules             SL 6xATR, hold 4h, rsi-exit on, news on, buy+sell
 
   TRADES
-    total           482   (306 BUY / 176 SELL)
-    setups seen     837   (350 while already in a position)
-    winners         232
-    losers          250
-    win rate        48.1%
+    total           476   (302 BUY / 174 SELL)
+    setups seen     837   (355 while already in a position)
+    winners         233
+    losers          243
+    win rate        48.9%
 
   MONEY  (0.01 lot = 1 ounce; $1 of gold is $1)
-    net P&L         -23.70
-    gross P&L       +247.86   (mid to mid, before costs)
-    gross profit    1,576.01   (sum of winners, net of costs)
-    gross loss      1,599.72   (sum of losers, net of costs)
-    profit factor   0.985
-    expectancy      -0.05 per trade
-    average win     +6.79
-    average loss    -6.40
-    median trade    -0.52
+    net P&L         -65.56
+    gross P&L       +198.29   (mid to mid, before costs)
+    gross profit    1,624.53   (sum of winners, net of costs)
+    gross loss      1,690.09   (sum of losers, net of costs)
+    profit factor   0.961
+    expectancy      -0.14 per trade
+    average win     +6.97
+    average loss    -6.96
+    median trade    -0.32
     largest win     +33.62
-    largest loss    -14.80
+    largest loss    -33.71
 
   COSTS
-    spread          229.40
-    slippage        5.75
+    spread          222.34
+    slippage        5.30
     commission      0.00
-    swap            36.41
-    total           271.56
+    swap            36.21
+    total           263.85
 
   RISK
-    max drawdown    213.80  (20.0% of a 1,000.00 account)
-    worst MAE       -24.24      median -4.88
-    best MFE        +43.75      median +3.90
+    max drawdown    229.65  (22.2% of a 1,000.00 account)
+    worst MAE       -35.04      median -4.50
+    best MFE        +43.75      median +3.99
+    stop distance   9.79 median, 43.48 widest   (what was actually at risk)
     win streak      9
     loss streak     9
 
   HOLDING
-    average         4h 29m
+    average         4h 55m
     median          4h 00m
     maximum         73h 20m
     ...longer than the 4h 00m cap because the market was shut: the four-hour
        exit fires at the next executable price, and over a weekend that is Sunday.
 
   EXITS
-    stop loss         115   23.9%
-    rsi reversal      126   26.1%
-    max hold          241   50.0%
-    ...of which 2 opened past the stop and filled at the bar's open, worse than the level
+    stop loss         106   22.3%
+    rsi reversal      128   26.9%
+    max hold          242   50.8%
+    ...of which 3 opened past the stop and filled at the bar's open, worse than the level
 
   GATES
     blocked by news         5
-    blocked by daily limit  0
-    days hitting -$50       0
+    blocked by daily limit  1
+    days hitting -$50       1
 
   BY DIRECTION
                          trades   wins    win%         net       exp
-    BUY                     306    149   48.7%      -57.37     -0.19
-    SELL                    176     83   47.2%      +33.66     +0.19
+    BUY                     302    150   49.7%      -83.34     -0.28
+    SELL                    174     83   47.7%      +17.78     +0.10
 
   BY HOUR OF DAY (UTC, entry hour)
                          trades   wins    win%         net       exp
-    00:00 UTC                37     20   54.1%       -1.77     -0.05
-    01:00 UTC                30     15   50.0%      -23.34     -0.78
-    02:00 UTC                12      4   33.3%       -8.29     -0.69
-    03:00 UTC                12      9   75.0%      +92.30     +7.69
-    04:00 UTC                15      8   53.3%      -21.42     -1.43
-    05:00 UTC                27     18   66.7%      +54.70     +2.03
-    06:00 UTC                16     10   62.5%      +33.79     +2.11
-    07:00 UTC                18     11   61.1%       -1.29     -0.07
-    08:00 UTC                11      3   27.3%      -14.02     -1.27
-    09:00 UTC                13      5   38.5%       +3.25     +0.25
-    10:00 UTC                23      9   39.1%      -47.03     -2.04
-    11:00 UTC                20     12   60.0%      +40.63     +2.03
-    12:00 UTC                17      8   47.1%      -36.47     -2.15
-    13:00 UTC                28     12   42.9%       +2.17     +0.08
-    14:00 UTC                20     11   55.0%      +17.59     +0.88
-    15:00 UTC                24     16   66.7%     +100.69     +4.20
-    16:00 UTC                19      7   36.8%       -3.96     -0.21
-    17:00 UTC                23     12   52.2%      -12.43     -0.54
-    18:00 UTC                21      8   38.1%      -27.67     -1.32
-    19:00 UTC                23      5   21.7%      -71.69     -3.12
-    20:00 UTC                20      8   40.0%      -23.33     -1.17
-    21:00 UTC                 4      1   25.0%      -21.15     -5.29
-    22:00 UTC                16      5   31.2%      -40.81     -2.55
-    23:00 UTC                33     15   45.5%      -14.15     -0.43
+    00:00 UTC                37     21   56.8%      +66.69     +1.80
+    01:00 UTC                30     14   46.7%      -78.21     -2.61
+    02:00 UTC                12      3   25.0%      -35.77     -2.98
+    03:00 UTC                13     10   76.9%      +98.26     +7.56
+    04:00 UTC                16      8   50.0%      -22.83     -1.43
+    05:00 UTC                26     18   69.2%      +52.61     +2.02
+    06:00 UTC                16     10   62.5%      +36.29     +2.27
+    07:00 UTC                19     12   63.2%      +20.29     +1.07
+    08:00 UTC                11      4   36.4%       +2.07     +0.19
+    09:00 UTC                11      4   36.4%      -10.39     -0.94
+    10:00 UTC                23      9   39.1%      -51.39     -2.23
+    11:00 UTC                18      9   50.0%       +2.90     +0.16
+    12:00 UTC                17      8   47.1%      -51.68     -3.04
+    13:00 UTC                28     13   46.4%      -14.29     -0.51
+    14:00 UTC                21     13   61.9%      +40.74     +1.94
+    15:00 UTC                24     16   66.7%      +58.98     +2.46
+    16:00 UTC                18      6   33.3%      -36.02     -2.00
+    17:00 UTC                23     12   52.2%      -52.77     -2.29
+    18:00 UTC                21      8   38.1%      -33.36     -1.59
+    19:00 UTC                21      5   23.8%      -48.09     -2.29
+    20:00 UTC                20      9   45.0%       +8.69     +0.43
+    21:00 UTC                 4      0    0.0%      -29.53     -7.38
+    22:00 UTC                14      6   42.9%      +16.95     +1.21
+    23:00 UTC                33     15   45.5%       -5.68     -0.17
 
   BY SESSION
                          trades   wins    win%         net       exp
-    Asia 00-07              149     84   56.4%     +125.97     +0.85
-    London 07-12             85     40   47.1%      -18.46     -0.22
-    London/NY 12-16          89     47   52.8%      +83.98     +0.94
-    New York 16-21          106     40   37.7%     -139.08     -1.31
-    Sydney/roll 21-00        53     21   39.6%      -76.10     -1.44
+    Asia 00-07              150     84   56.0%     +117.03     +0.78
+    London 07-12             82     38   46.3%      -36.53     -0.45
+    London/NY 12-16          90     50   55.6%      +33.75     +0.38
+    New York 16-21          103     40   38.8%     -161.55     -1.57
+    Sydney/roll 21-00        51     21   41.2%      -18.27     -0.36
 
   BY MONTH
                          trades   wins    win%         net       exp
-    2024-01                  13      3   23.1%      -32.22     -2.48
-    2024-02                  22     12   54.5%       -9.08     -0.41
-    2024-03                  26      9   34.6%       -0.22     -0.01
-    2024-04                  31     15   48.4%      -28.00     -0.90
-    2024-05                  39     19   48.7%      +40.81     +1.05
-    2024-06                  37     15   40.5%      -11.15     -0.30
-    2024-07                  32     21   65.6%      +81.15     +2.54
-    2024-08                  29     13   44.8%      -35.67     -1.23
-    2024-09                  26     18   69.2%      +11.13     +0.43
-    2024-10                  37     15   40.5%      -50.26     -1.36
-    2024-11                  28     19   67.9%      +80.83     +2.89
-    2024-12                  28     11   39.3%      -76.58     -2.74
-    2025-01                  35     19   54.3%      +35.23     +1.01
-    2025-02                  26     14   53.8%      -16.61     -0.64
-    2025-03                  26     11   42.3%      -24.92     -0.96
-    2025-04                  35     12   34.3%      -37.58     -1.07
-    2025-05                  12      6   50.0%      +49.44     +4.12
+    2024-01                  13      3   23.1%      -27.05     -2.08
+    2024-02                  22     13   59.1%       -9.85     -0.45
+    2024-03                  27      9   33.3%      +10.69     +0.40
+    2024-04                  31     15   48.4%      -32.85     -1.06
+    2024-05                  40     19   47.5%      +22.52     +0.56
+    2024-06                  38     14   36.8%      -24.64     -0.65
+    2024-07                  32     21   65.6%      +66.06     +2.06
+    2024-08                  29     13   44.8%      -16.56     -0.57
+    2024-09                  26     18   69.2%       +9.56     +0.37
+    2024-10                  37     15   40.5%      -64.47     -1.74
+    2024-11                  28     19   67.9%      +68.96     +2.46
+    2024-12                  29     11   37.9%      -87.70     -3.02
+    2025-01                  34     19   55.9%      +31.51     +0.93
+    2025-02                  26     13   50.0%      -32.49     -1.25
+    2025-03                  26     10   38.5%      -42.30     -1.63
+    2025-04                  28     14   50.0%      -31.44     -1.12
+    2025-05                  10      7   70.0%      +94.48     +9.45
 
   BY YEAR
                          trades   wins    win%         net       exp
-    2024                    348    170   48.9%      -29.25     -0.08
-    2025                    134     62   46.3%       +5.55     +0.04
+    2024                    352    170   48.3%      -85.32     -0.24
+    2025                    124     63   50.8%      +19.76     +0.16
 
   ENGINE METRICS (algo.reporting.metrics, on the bar-resolution equity curve)
-    trades            482
+    trades            476
     bars              95071
-    net P&L           -23.70430
-    gross P&L         247.85775
-    total cost        271.56205
-    cost drag         109.5637%
-    return            -2.3704%
-    exposure          15.8%
-    max drawdown      213.79575 (19.9857%), 244d
-    Sharpe            -0.0266
-    Sortino           -0.0022
-    Calmar            -0.1109
+    net P&L           -65.55903911108796304
+    gross P&L         198.29086088891203696
+    total cost        263.84990
+    cost drag         133.0621%
+    return            -6.5559%
+    exposure          16.1%
+    max drawdown      229.64813791103089000 (22.1638%), 243d
+    Sharpe            -0.1735
+    Sortino           -0.0128
+    Calmar            -0.2855
     
-    round trips       482 (232W / 250L)
-    win rate          48.1328%
-    profit factor     0.9852
+    round trips       476 (233W / 243L)
+    win rate          48.9496%
+    profit factor     0.9612
     largest win       33.6170
-    largest loss      -14.7993
+    largest loss      -33.7123
     losing streak     9
-    expectancy        -0.0049R   (from 482 trades with a stop)
-    average win       0.6793R
-    average loss      -0.6399R
+    expectancy        -0.0297R   (from 476 trades with a stop)
+    average win       0.6212R
+    average loss      -0.6539R
 
   trade log         reports\xauusd\baseline_trades.csv
   tearsheet         reports\xauusd\baseline_tearsheet.html
@@ -192,10 +196,10 @@ BASELINE (exact rules, realistic costs)
 ================================================================================================
 
                                trades     win%       net $       PF     exp $      maxDD
-    realistic                     482    48.1%      -23.70    0.985     -0.05    -213.80
-    moderate                      483    44.5%     -230.73    0.865     -0.48    -325.16
-    conservative                  485    39.6%     -612.29    0.683     -1.26    -683.44
-    zero cost (reference only)    481    50.7%     +272.10    1.186     +0.57     -81.15
+    realistic                     476    48.9%      -65.56    0.961     -0.14    -229.65
+    moderate                      478    45.0%     -270.31    0.849     -0.57    -384.75
+    conservative                  482    40.2%     -649.85    0.678     -1.35    -756.49
+    zero cost (reference only)    474    51.3%     +191.44    1.123     +0.40    -134.83
 
     The zero-cost row is a reference, not a result: it is what the rules would
     have earned if trading were free, and the gap to the realistic row is the
@@ -210,33 +214,37 @@ BASELINE (exact rules, realistic costs)
 
   NEWS FILTER
                                trades     win%       net $       PF     exp $      maxDD
-    news on (baseline)            482    48.1%      -23.70    0.985     -0.05    -213.80
-    news off                      486    48.6%       +7.18    1.004     +0.01    -207.33
+    news on (baseline)            476    48.9%      -65.56    0.961     -0.14    -229.65
+    news off                      480    49.4%      -34.67    0.979     -0.07    -223.18
 
   RSI REVERSAL EXIT
                                trades     win%       net $       PF     exp $      maxDD
-    rsi exit on (baseline)        482    48.1%      -23.70    0.985     -0.05    -213.80
-    rsi exit off                  471    42.5%      +18.04    1.011     +0.04    -202.62
+    rsi exit on (baseline)        476    48.9%      -65.56    0.961     -0.14    -229.65
+    rsi exit off                  467    42.4%     -141.39    0.923     -0.30    -325.77
 
   MAXIMUM HOLDING PERIOD
                                trades     win%       net $       PF     exp $      maxDD
-    2h hold                       564    45.6%     -131.67    0.913     -0.23    -323.65
-    4h hold (baseline)            482    48.1%      -23.70    0.985     -0.05    -213.80
-    6h hold                       441    47.8%      -29.55    0.982     -0.07    -250.42
-    8h hold                       415    47.5%      -86.74    0.950     -0.21    -294.06
+    2h hold                       559    46.9%      -24.46    0.983     -0.04    -264.84
+    4h hold (baseline)            476    48.9%      -65.56    0.961     -0.14    -229.65
+    6h hold                       435    49.4%      +13.93    1.008     +0.03    -227.36
+    8h hold                       408    49.3%      +19.91    1.011     +0.05    -263.83
 
-  STOP LOSS
+  STOP RULE  (the fixed-dollar rows clear the ATR multiple, or it would win)
                                trades     win%       net $       PF     exp $      maxDD
-    $7.50 stop                    496    44.8%      -55.11    0.964     -0.11    -250.52
-    $10 stop (baseline)           482    48.1%      -23.70    0.985     -0.05    -213.80
-    $12.50 stop                   474    49.6%      -32.39    0.980     -0.07    -224.42
-    $15 stop                      470    50.2%      -67.73    0.960     -0.14    -269.37
+    $10 fixed - AS SPECIFIED      482    48.1%      -23.70    0.985     -0.05    -213.80
+    $7.50 fixed                   496    44.8%      -55.11    0.964     -0.11    -250.52
+    $12.50 fixed                  474    49.6%      -32.39    0.980     -0.07    -224.42
+    $15 fixed                     470    50.2%      -67.73    0.960     -0.14    -269.37
+    3 x ATR                       526    40.1%      -18.48    0.988     -0.04    -198.96
+    4 x ATR                       500    44.0%      -82.28    0.950     -0.16    -229.98
+    6 x ATR (baseline)            476    48.9%      -65.56    0.961     -0.14    -229.65
+    8 x ATR                       467    50.3%     -111.73    0.936     -0.24    -329.18
 
   DIRECTION
                                trades     win%       net $       PF     exp $      maxDD
-    buy + sell (baseline)         482    48.1%      -23.70    0.985     -0.05    -213.80
-    buy only                      306    48.7%      -57.37    0.942     -0.19    -157.80
-    sell only                     176    47.2%      +33.66    1.055     +0.19    -101.23
+    buy + sell (baseline)         476    48.9%      -65.56    0.961     -0.14    -229.65
+    buy only                      303    49.5%      -89.40    0.916     -0.30    -220.66
+    sell only                     174    47.7%      +17.78    1.028     +0.10    -130.67
 
 ================================================================================================
 4. OUT OF SAMPLE  (chronological, never shuffled)
@@ -245,8 +253,8 @@ BASELINE (exact rules, realistic costs)
   split at          2024-12-10 12:40 UTC - 70% of bars in sample
 
                                trades     win%       net $       PF     exp $      maxDD
-    in sample (70%)               328    49.1%       +9.11    1.010     +0.03    -106.00
-    out of sample (30%)           154    45.5%      -47.84    0.928     -0.31    -171.46
+    in sample (70%)               331    48.6%      -34.03    0.966     -0.10    -105.29
+    out of sample (30%)           145    49.0%      -46.38    0.935     -0.32    -177.78
 
     The out-of-sample half re-warms its own indicators from the split point, so
     its first 300 hours are warmup and it trades a little less than a straight
@@ -254,12 +262,12 @@ BASELINE (exact rules, realistic costs)
 
   WALK FORWARD (six consecutive folds, each reported on its own)
                                trades     win%       net $       PF     exp $      maxDD
-    fold 1  2024-01..2024-03       55    40.0%      -43.85    0.682     -0.80     -51.34
-    fold 2  2024-03..2024-06       76    47.4%      +24.86    1.106     +0.33     -71.43
-    fold 3  2024-06..2024-09       61    57.4%      +57.67    1.347     +0.95     -66.76
-    fold 4  2024-09..2024-11       68    52.9%      +37.35    1.195     +0.55     -62.91
-    fold 5  2024-11..2025-02       64    53.1%       +1.27    1.007     +0.02     -56.66
-    fold 6  2025-02..2025-05       69    40.6%      -10.33    0.971     -0.15    -135.46
+    fold 1  2024-01..2024-03       56    41.1%      -36.18    0.723     -0.65     -44.93
+    fold 2  2024-03..2024-06       78    46.2%       -7.04    0.974     -0.09     -65.47
+    fold 3  2024-06..2024-09       61    57.4%      +61.39    1.378     +1.01     -50.46
+    fold 4  2024-09..2024-11       68    52.9%      +14.72    1.069     +0.22     -73.48
+    fold 5  2024-11..2025-02       64    53.1%      -21.22    0.896     -0.33     -69.59
+    fold 6  2025-02..2025-05       60    50.0%      +32.32    1.086     +0.54    -100.42
 
     Each fold warms up from its own start, so a fold trades fewer bars than it
     contains. Folds are reported, never selected from.
@@ -279,48 +287,53 @@ BASELINE (exact rules, realistic costs)
   A DIFFERENT MARKET, not just a different period:
     price           3,943 .. 5,599   (the study window was 1,984 .. 3,500)
     median M5 range 4.86   against 1.4885 in the study window  -  3.3x
-    so a $10 stop is 2.1 median bars away here and 6.7 there.
-    The rules are unchanged; what they mean is not. This is the one thing to
-    read before comparing the row below to anything above it.
+    a FIXED $10 stop would be 2.1 median bars away here
+    and 6.7 there - the same rule meaning two
+    different things, which is what the ATR baseline exists to stop.
+    Under the specified fixed stop that difference would land squarely in the
+    results. Under the baseline's ATR stop it is absorbed, which is the whole
+    reason the baseline uses one - read the row below with that in mind.
 
                                trades     win%       net $       PF     exp $      maxDD
-    MT5 holdout (unseen)          315    31.1%     +110.86    1.052     +0.35    -225.73
+    MT5 holdout (unseen)          244    54.1%     +872.67    1.420     +3.58    -305.21
 
 ================================================================================================
 5. FINAL EVALUATION  (the brief's fifteen questions, from the numbers above)
 ================================================================================================
 
   1. Is it profitable after realistic transaction costs?
-      No. Net -23.70 over 482 trades: profit factor 0.985, expectancy -0.05 a trade. Before
-      costs the same trades made +247.86 and costs took 271.56. The strategy is not losing
+      No. Net -65.56 over 476 trades: profit factor 0.961, expectancy -0.14 a trade. Before
+      costs the same trades made +198.29 and costs took 263.85. The strategy is not losing
       to the market; it is losing to the spread.
 
   2. Is it profitable out of sample?
-      No. In sample +9.11 on 328 trades, out of sample -47.84 on 154; the change is -56.94.
-      On the second holdout - 315 trades on the broker's own bars over eight months the
-      archive does not cover - it made +110.86, profit factor 1.052. Every one of these
+      No. In sample -34.03 on 331 trades, out of sample -46.38 on 145; the change is -12.34.
+      On the second holdout - 244 trades on the broker's own bars over eight months the
+      archive does not cover - it made +872.67, profit factor 1.420. Every one of these
       samples is small enough that a different split would move the number.
 
   3. Is the edge present on both BUY and SELL?
-      No. BUY -57.37 over 306 trades; SELL +33.66 over 176. They point opposite ways, and
+      No. BUY -83.34 over 302 trades; SELL +17.78 over 174. They point opposite ways, and
       with gold trending up through most of this window that is at least as likely to be the
       trend as an edge in one direction.
 
-  4. What percentage of trades hit the $10 stop?
-      23.9% - 115 trades.
+  4. What percentage of trades hit the stop?
+      22.3% - 106 trades, at a stop of 6 x ATR. Under the specified flat $10 it is a
+      different number in every regime, which is why the baseline no longer uses one - see
+      the stop table.
 
   5. What percentage exit through the RSI reversal?
-      26.1% - 126 trades. Note what that means: in three quarters of trades RSI never
+      26.9% - 128 trades. Note what that means: in three quarters of trades RSI never
       reached its extreme at all, so the exit the rules describe most carefully is the one
       that fires least.
 
   6. What percentage reach the 4-hour maximum hold?
-      50.0% - 241 trades, the most common ending by a wide margin. The clock, not either
+      50.8% - 242 trades, the most common ending by a wide margin. The clock, not either
       signal, is what actually closes this strategy's positions.
 
   7. Does the RSI reversal exit improve results?
-      No. Switching it off is +41.74 on net P&L. It raises the win rate (48.1% with it,
-      42.5% without) and loses money doing so, which is the signature of an exit that closes
+      No. Switching it off is -75.83 on net P&L. It raises the win rate (48.9% with it,
+      42.4% without) and loses money doing so, which is the signature of an exit that closes
       winners early.
 
   8. Does the news filter improve results?
@@ -329,36 +342,38 @@ BASELINE (exact rules, realistic costs)
       calendar covers only NFP, CPI, PPI and FOMC, so a wider one would block more.
 
   9. How often does the -$50 daily loss limit activate?
-      Never in this window: 0 days, 0 entries blocked. One position of 0.01 lots with a $10
-      stop would need five losing trades inside one 21:00-21:00 trading day, and four-hour
-      holds leave no room for that. The rule is inert at this size.
+      Never in this window: 1 days, 1 entries blocked. One position of 0.01 lots with a stop
+      of a few dollars would need five losing trades inside one 21:00-21:00 trading day, and
+      four-hour holds leave no room for that. The rule is inert at this size.
 
   10. What is the maximum drawdown?
-      213.80 on realised equity - 20.0% of a 1,000.00 account, and about 21 full stops deep.
-      Against a net result of roughly zero, that is the whole point: the path is far larger
-      than the destination.
+      229.65 on realised equity - 22.2% of a 1,000.00 account. Against a net result of
+      roughly zero, that is the whole point: the path is far larger than the destination.
 
   11. What is the worst losing streak?
       9 losing trades in a row (the best winning streak is 9).
 
   12. What is the largest single-trade loss?
-      -14.80. Larger than the $10 stop because 2 bars opened past the level and were filled
-      at the open, and because every exit still crosses the spread on the way out.
+      -33.71, against a stop that ranged from 9.79 at the median to 43.48 at its widest.
+      That is the ATR stop working as intended rather than failing: a trade entered in a
+      volatile hour risks more dollars, and it is the fixed-dollar version that was quietly
+      taking a different amount of risk each time without saying so. 3 bars also opened past
+      the level and filled at the open, and every exit still crosses the spread.
 
   13. How sensitive is it to transaction costs?
-      Completely - costs are the result. realistic -23.70, moderate -230.73, conservative
-      -612.29. At 0.56 a trade against an average win of +6.79, the cost and the edge are
+      Completely - costs are the result. realistic -65.56, moderate -270.31, conservative
+      -649.85. At 0.55 a trade against an average win of +6.97, the cost and the edge are
       the same size, so the venue decides the sign.
 
   14. Is performance reasonably stable across years?
-      There is only one full year here plus a stub, so the honest unit is the fold: 4 of 6
-      are positive, spanning -43.85 to +57.67 on 55-76 trades each. That spread is what a
+      There is only one full year here plus a stub, so the honest unit is the fold: 3 of 6
+      are positive, spanning -36.18 to +61.39 on 55-76 trades each. That spread is what a
       zero-expectancy process looks like cut six ways. The sharper answer comes from the
       holdout: gold's median five-minute range is more than three times larger there than in
-      the study window, so the $10 stop - a fixed distance, not a fixed fraction of anything
-      - is a materially tighter stop in the later period. The win rate falls from 48.1% to
-      31.1% for that reason alone. A rule set whose risk changes with the price of gold is
-      not stable across regimes even when its P&L happens to be.
+      the study window. That is exactly what the volatility-scaled stop exists to absorb,
+      and it is why the baseline no longer uses a fixed dollar distance. The win rate still
+      falls from 48.9% to 54.1% for that reason alone. A rule set whose risk changes with
+      the price of gold is not stable across regimes even when its P&L happens to be.
 
   15. Is there evidence of overfitting?
       Not in this run, because nothing was fitted: no parameter was searched, the baseline
@@ -368,8 +383,8 @@ BASELINE (exact rules, realistic costs)
       set with a real edge does not change sign every time you nudge it.
 
   WHAT THIS SAMPLE CANNOT TELL YOU
-      482 trades over sixteen months is a small sample for a difference this small. An
-      expectancy of -0.05 against an average win of +6.79 is well inside the noise a few
+      476 trades over sixteen months is a small sample for a difference this small. An
+      expectancy of -0.14 against an average win of +6.97 is well inside the noise a few
       hundred coin flips would produce, so the reading is not 'this loses slightly' but
       'this has no edge that this data can measure, and it pays the spread to find out'. The
       result is also from a Dukascopy tick archive, not from the broker this would trade on;

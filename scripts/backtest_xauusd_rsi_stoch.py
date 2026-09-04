@@ -1,11 +1,24 @@
 """The XAUUSD 5-minute RSI / Stochastic-RSI scalper, backtested end to end.
 
-Runs the **exact baseline first**, reports it in full, and only then runs the
-controlled variants - and the variants are reported beside the baseline rather
-than in place of it. Nothing here searches a parameter space or picks a winner:
-§17's comparisons exist to say how sensitive the result is, not to find a better
-one, and a script that could quietly return the best of twelve runs would make
-every number it printed uninterpretable.
+Runs the baseline first, reports it in full, and only then runs the controlled
+variants - and the variants are reported beside the baseline rather than in
+place of it. Nothing here searches a parameter space or picks a winner: the
+comparisons exist to say how sensitive the result is, not to find a better one,
+and a script that could quietly return the best of twelve runs would make every
+number it printed uninterpretable.
+
+## The baseline is no longer the specification, and both are reported
+
+The rules as specified use a flat $10 stop. The baseline here scales that stop
+to volatility - 6 x ATR(14), which is what $10 was in this window - after
+`study_xauusd_stop.py` showed the fixed version is a different rule in different
+regimes: at the same nominal $10 the stop-out rate is 23.9% in 2024-25 and 65.1%
+in 2026, because gold's five-minute range trebled. That was a deliberate change,
+made on request and after measurement, not a search result.
+
+The specification is not lost. `SPEC_BASELINE` - the literal $10 rules - runs on
+every invocation and is the first row of the stop table, so the number the brief
+asked for is always on the page next to the number the baseline now produces.
 
     python scripts/backtest_xauusd_rsi_stoch.py --data state/xauusd --out reports/xauusd
 
@@ -74,7 +87,7 @@ from algo.reporting.scalper_report import (
     summarise,
     to_trades,
 )
-from algo.strategy.rsi_stoch_reversal import BASELINE, ScalperParams
+from algo.strategy.rsi_stoch_reversal import BASELINE, SPEC_BASELINE, ScalperParams
 
 
 def mt5_holdout(
@@ -100,10 +113,10 @@ def mt5_holdout(
     MT5 bars are **bid**, not mid. Treating them as mid and charging half a
     spread per fill is nevertheless correct on a round trip: a long
     under-charges by half on the way in and over-charges by half on the way out,
-    and the two cancel exactly. The residue is in where the $10 stop sits
-    relative to the true bid - half a spread, about seven cents - which is
-    stated rather than corrected because correcting it would need the spread
-    this window does not have.
+    and the two cancel exactly. The residue is in where the stop sits relative
+    to the true bid - half a spread, about seven cents - which is stated rather
+    than corrected because correcting it would need the spread this window does
+    not have.
     """
     fetched = mt5_m5_bars()
     if fetched is None:
@@ -129,10 +142,12 @@ def mt5_holdout(
         f"   (the study window was 1,984 .. 3,500)")
     say(f"    median M5 range {theirs}   against {study_range} in the study window"
         f"  -  {theirs / study_range:.1f}x")
-    say(f"    so a $10 stop is {Decimal('10') / theirs:.1f} median bars away here and "
-        f"{Decimal('10') / study_range:.1f} there.")
-    say("    The rules are unchanged; what they mean is not. This is the one thing to")
-    say("    read before comparing the row below to anything above it.")
+    say(f"    a FIXED $10 stop would be {Decimal('10') / theirs:.1f} median bars away here")
+    say(f"    and {Decimal('10') / study_range:.1f} there - the same rule meaning two")
+    say("    different things, which is what the ATR baseline exists to stop.")
+    say("    Under the specified fixed stop that difference would land squarely in the")
+    say("    results. Under the baseline's ATR stop it is absorbed, which is the whole")
+    say("    reason the baseline uses one - read the row below with that in mind.")
     say()
 
     result = run(bars, hours, BASELINE, mt5_costs(), slippage, calendar)
@@ -211,8 +226,11 @@ def evaluate(
             "edge in one direction.",
         ),
         (
-            "4. What percentage of trades hit the $10 stop?",
-            f"{pct(share.get('stop loss'))} - {baseline.exits.get('stop loss', 0)} trades.",
+            "4. What percentage of trades hit the stop?",
+            f"{pct(share.get('stop loss'))} - {baseline.exits.get('stop loss', 0)} "
+            f"trades, at a stop of {baseline.params.stop_atr_multiple} x ATR. Under the "
+            "specified flat $10 it is a different number in every regime, which is why "
+            "the baseline no longer uses one - see the stop table.",
         ),
         (
             "5. What percentage exit through the RSI reversal?",
@@ -245,15 +263,15 @@ def evaluate(
             "9. How often does the -$50 daily loss limit activate?",
             f"Never in this window: {baseline.limit_days} days, "
             f"{baseline.blocked_by_daily_limit} entries blocked. One position of 0.01 lots "
-            "with a $10 stop would need five losing trades inside one 21:00-21:00 trading "
-            "day, and four-hour holds leave no room for that. The rule is inert at this size.",
+            "with a stop of a few dollars would need five losing trades inside one "
+            "21:00-21:00 trading day, and four-hour holds leave no room for that. The "
+            "rule is inert at this size.",
         ),
         (
             "10. What is the maximum drawdown?",
             f"{amount(baseline.max_drawdown)} on realised equity - "
             f"{pct(baseline.max_drawdown_pct)} of a {amount(baseline.starting_equity)} "
-            f"account, and about {baseline.max_drawdown / baseline.params.stop_loss:.0f} full "
-            "stops deep. Against a net result of roughly zero, that is the whole point: the "
+            "account. Against a net result of roughly zero, that is the whole point: the "
             "path is far larger than the destination.",
         ),
         (
@@ -263,9 +281,14 @@ def evaluate(
         ),
         (
             "12. What is the largest single-trade loss?",
-            f"{money(baseline.largest_loss)}. Larger than the $10 stop because "
-            f"{baseline.stops_gapped} bars opened past the level and were filled at the open, "
-            "and because every exit still crosses the spread on the way out.",
+            f"{money(baseline.largest_loss)}, against a stop that ranged from "
+            f"{amount(baseline.median_stop_distance)} at the median to "
+            f"{amount(baseline.widest_stop_distance)} at its widest. That is the ATR stop "
+            "working as intended rather than failing: a trade entered in a volatile hour "
+            "risks more dollars, and it is the fixed-dollar version that was quietly "
+            "taking a different amount of risk each time without saying so. "
+            f"{baseline.stops_gapped} bars also opened past the level and filled at the "
+            "open, and every exit still crosses the spread.",
         ),
         (
             "13. How sensitive is it to transaction costs?",
@@ -283,9 +306,9 @@ def evaluate(
             f"{money(max((f.net_pnl for f in folds), default=None))} on 55-76 trades each. "
             "That spread is what a zero-expectancy process looks like cut six ways. The "
             "sharper answer comes from the holdout: gold's median five-minute range is more "
-            "than three times larger there than in the study window, so the $10 stop - a "
-            "fixed distance, not a fixed fraction of anything - is a materially tighter stop "
-            "in the later period. The win rate falls from "
+            "than three times larger there than in the study window. That is exactly what "
+            "the volatility-scaled stop exists to absorb, and it is why the baseline no "
+            "longer uses a fixed dollar distance. The win rate still falls from "
             + (f"{pct(baseline.win_rate)} to {pct(holdout.win_rate)} " if holdout else "")
             + "for that reason alone. A rule set whose risk changes with the price of gold "
             "is not stable across regimes even when its P&L happens to be.",
@@ -374,8 +397,11 @@ def main() -> None:
     say("  position          0.01 MT5 lot = 1 ounce. A $1 move in gold is $1 of P&L.")
     say("  entry             at the open of the candle AFTER the confirmation candle")
     say("  bars              mid of bid and ask; a fill crosses half the measured spread")
-    say("  stop              a price, at entry -/+ $10; a bar that gaps through it fills")
-    say("                    at the bar's open, never at the level")
+    say("  stop              6 x ATR(14) from entry, measured on the confirmation")
+    say("                    candle. A price, not a P&L threshold, and a bar that gaps")
+    say("                    through it fills at the bar's open, never at the level.")
+    say("                    The brief specifies a flat $10; that version is reported")
+    say("                    as the first row of the stop table below.")
     say("  trading day       21:00 UTC to 21:00 UTC - the broker's rollover, which is")
     say("                    midnight on its own UTC+3 server clock. The -$50 daily limit")
     say("                    resets there, NOT at UTC midnight and not in local time.")
@@ -390,11 +416,11 @@ def main() -> None:
     # --------------------------------------------------------------- baseline
     costs, slippage = scenarios["realistic"]
     baseline = run(m5, h1, BASELINE, costs, slippage, calendar, indicators)
-    summary = summarise(baseline, BASELINE, label="BASELINE (exact rules, realistic costs)",
+    summary = summarise(baseline, BASELINE, label="BASELINE (6xATR stop, realistic costs)",
                         starting_equity=ACCOUNT)
 
     say("=" * 96)
-    say("1. THE EXACT BASELINE")
+    say("1. THE BASELINE  (the specified rules, with the stop scaled to volatility)")
     say("=" * 96)
     say()
     say(render_text(summary))
@@ -449,10 +475,12 @@ def main() -> None:
             ],
             dataset_hash=f"{len(m5)} M5 bars {m5[0].ts:%Y%m%d}-{window_end:%Y%m%d}",
             distribution_note=(
-                "Losses are capped near -1R by the $10 stop, which is the stop working. "
-                "The right tail runs further but is thin, and the left shoulder is the "
-                "fattest part of the chart — a hard stop bounds what a bad trade "
-                "costs, it does not create anything for the good ones to win."
+                "R here is each trade's OWN stop, which under a volatility-scaled "
+                "stop is a different number of dollars every time — so losses "
+                "cluster near -1R by construction and this is a picture of the exit "
+                "rules rather than of the dollars. The right tail runs further but "
+                "is thin: a stop bounds what a bad trade costs, it does not create "
+                "anything for the good ones to win."
             ),
             config_hash=BASELINE.label(),
             generated_at=datetime.now(UTC),
@@ -534,11 +562,25 @@ def main() -> None:
             ],
         ),
         (
-            "STOP LOSS",
+            "STOP RULE  (the fixed-dollar rows clear the ATR multiple, or it would win)",
             [
-                (f"${sl} stop" + (" (baseline)" if sl == "10" else ""),
-                 replace(BASELINE, stop_loss=Decimal(sl)))
-                for sl in ("7.50", "10", "12.50", "15")
+                ("$10 fixed - AS SPECIFIED", SPEC_BASELINE),
+                *(
+                    (
+                        f"${sl} fixed",
+                        replace(
+                            BASELINE, stop_loss=Decimal(sl), stop_atr_multiple=None
+                        ),
+                    )
+                    for sl in ("7.50", "12.50", "15")
+                ),
+                *(
+                    (
+                        f"{k} x ATR" + (" (baseline)" if k == "6" else ""),
+                        replace(BASELINE, stop_atr_multiple=Decimal(k)),
+                    )
+                    for k in ("3", "4", "6", "8")
+                ),
             ],
         ),
         (
