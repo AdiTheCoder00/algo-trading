@@ -3348,3 +3348,58 @@ lesson as D-140: a run that dies for an environmental reason and a run with
 nothing to report look identical from the outside unless the cause is read
 rather than assumed. The re-run script now captures the tester log tail on
 failure so there is something to read.
+
+### D-145 - Gold Sniping destroys the account in eight weeks; the two-month profit was survivorship
+
+Following D-144, you asked for the 2024-2026 run - the window the two-month
+test could not reach. XAUUSD, 2024.01.01-2026.08.31 requested, real-tick model,
+$10,000, M15 and M1.
+
+**It never reached March 2024.** Last deal 2024.02.26. Balance drawdown 101.35%
+means the account went through zero: a $10,000 deposit lost $10,145.03. The run
+finished in 2.4 minutes rather than the expected ~100 because after February
+2024 there was no money left to trade; the remaining 30 months are empty.
+
+| | 2026.07-08 (D-144) | 2024.01-2026.08 (requested) |
+|---|---|---|
+| last deal | 2026.08.28 | **2024.02.26** |
+| trades | 4,424 | 340 |
+| net | **+$3,457.59** | **-$10,145.03** |
+| profit factor | 1.07 | **0.49** |
+| expected payoff | +0.78 | **-29.84** |
+| win rate | 87.73% | 62.65% |
+| balance DD | 29.11% | **101.35%** |
+| equity DD | 43.34% | **101.43%** |
+| max consecutive losses | 7 (-$4,088) | 10 (-$1,338) |
+
+M1 returned the identical figure again, so the timeframe-independence of D-144
+holds over this window too.
+
+**The two-month result was a survivor, and this is what it was hiding.** Same
+expert, same settings, same broker - only the window moved. +34.6% over two
+months was not an edge; it was one calm stretch that happened to contain no gold
+trend large enough to break a basket. The win rate falling from 88% to 63% is
+the mechanism becoming visible: baskets that normally close for ~$1 instead kept
+escalating until margin ran out. For a martingale, the sample either contains
+the tail event or it does not, and the reported statistics look excellent right
+up until it does.
+
+**The wipeout is still the optimistic case.** MT5 states the reason in the
+report itself:
+
+```
+History Quality:  0% real ticks   (2024-2026)
+History Quality:  8% real ticks   (2026-07/08)
+```
+
+`Model=4` cannot supply real ticks this broker never retained, so every price in
+the 2024 window was interpolated from M1 bars. That understates precisely the
+intrabar spikes that break baskets. The real outcome would have been worse and
+sooner. Note also that the two-month test was only 8% real - the number that
+looked like a result was itself almost entirely synthetic.
+
+**Rule this establishes: never accept a martingale or grid EA's backtest from a
+single window.** Balance drawdown near or above 100% is not a bad score on a
+scale, it is account death, and it is the only statistic in the table that
+matters. Cross-reference D-143, where adding a grid to our own expert turned a
+15% drawdown into 65-74% while the win rate went up.
