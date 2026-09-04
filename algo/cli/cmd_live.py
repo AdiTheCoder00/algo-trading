@@ -15,8 +15,8 @@ from algo.core.logging import configure_logging
 if TYPE_CHECKING:  # annotations only - the bodies import these lazily so
     # `algo live --help` does not drag in a broker SDK.
     from algo.config.schema import AppConfig
-    from algo.core.clock import SystemClock
-    from algo.data.smartapi_feed import SmartConnectTransport
+    from algo.core.clock import Clock
+    from algo.data.smartapi_feed import CandleTransport
     from algo.exchange.master import InstrumentMaster
 
 app = typer.Typer()
@@ -202,8 +202,8 @@ def _run_paper_loop(
     master: InstrumentMaster,
     live_master: InstrumentMaster,
     market_data_key: str,
-    transport: SmartConnectTransport,
-    clock: SystemClock,
+    transport: CandleTransport,
+    clock: Clock,
     passes: int,
     poll_interval_s: float,
     wait_for_bar_min: float,
@@ -260,11 +260,14 @@ def _run_paper_loop(
     underlying = config.instruments[0].underlying
     exchange = config.instruments[0].exchange
     futures = master.future_rows(underlying, exchange)
-    if not futures or futures[-1].expiry is None:
+    if not futures or futures[0].expiry is None:
         typer.echo("  paper loop: no futures contract in the master snapshot")
         return
+    # The front month: `future_rows` sorts ascending by expiry, so [0] is the
+    # nearest. This is the contract the loop asks for bars on, and the near month
+    # is the liquid one — the farthest listed contract barely trades.
     instrument = FutureId(
-        underlying=underlying, expiry=futures[-1].expiry, exchange=exchange
+        underlying=underlying, expiry=futures[0].expiry, exchange=exchange
     )
 
     calendar = mcx_calendar(
@@ -439,7 +442,7 @@ def _quote_chain(
     master: InstrumentMaster,
     config: AppConfig,
     expiry: str,
-    clock: SystemClock,
+    clock: Clock,
 ) -> None:
     """One chain snapshot for the given expiry, printed as a table."""
     from datetime import date as _date
@@ -475,10 +478,10 @@ def _quote_chain(
 
 
 def _bars_from_candles(
-    transport: SmartConnectTransport,
+    transport: CandleTransport,
     master: InstrumentMaster,
     config: AppConfig,
-    clock: SystemClock,
+    clock: Clock,
 ) -> None:
     """One read of today's closed bars, as the live loop would get them."""
     from algo.core.bar import Timeframe
@@ -493,7 +496,7 @@ def _bars_from_candles(
     if not futures:
         typer.echo("  candle proof: no futures contract in the master snapshot")
         return
-    row = futures[-1]
+    row = futures[0]  # front month; future_rows sorts ascending by expiry
     if row.expiry is None:
         typer.echo("  candle proof: futures contract has no expiry; skipping")
         return

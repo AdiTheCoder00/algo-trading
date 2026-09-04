@@ -450,6 +450,40 @@ class InstrumentMaster:
             )
         )
 
+    def future_for_option_expiry(
+        self, underlying: str, exchange: Exchange, option_expiry: date
+    ) -> MasterRow | None:
+        """The futures contract an option cycle settles into: the earliest one
+        expiring on or after the option.
+
+        This is the project's one pairing rule, stated identically by
+        `expiries_from_master` (algo/exchange/expiries.py) and
+        `bhavcopy.nearest_futures_expiry`, and it exists here so a caller holding
+        `MasterRow`s does not write a fourth copy of it. D-023: the pairing must be
+        the same everywhere, or live and backtest disagree about what a cycle's
+        underlying is — and the futures price is what anchors strike selection, so
+        disagreeing means selecting different strikes from the same chain.
+
+        Options expire *before* the future they settle into, so the answer is
+        almost never the contract sharing the option's own expiry date, and it is
+        never simply the front month: polling a back-month chain while the front
+        month is still listed must return the back-month future.
+
+        Returns None when the underlying has no futures listed at all. When the
+        master lists futures but all of them expire before the option — an
+        incomplete snapshot — the last (farthest) contract is returned rather than
+        an earlier one the option cannot settle into.
+        """
+        rows = self.future_rows(underlying, exchange)
+        if not rows:
+            return None
+        # `future_rows` is sorted ascending and drops rows with no expiry, so the
+        # first match is the earliest on or after, with no min() needed.
+        for row in rows:
+            if row.expiry is not None and row.expiry >= option_expiry:
+                return row
+        return rows[-1]
+
     # ------------------------------------------------------------ snapshots
     def save_snapshot(self, path: Path | str) -> None:
         """Freeze the fetched rows to disk, with the fetch time attached.

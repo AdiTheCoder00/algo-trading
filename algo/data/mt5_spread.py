@@ -39,10 +39,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from algo.core.clock import SystemClock
 from algo.core.errors import DataError
 
 #: Hours in a trading week, indexed Monday 00:00 UTC = 0.
@@ -188,7 +189,7 @@ def measure_spread_profile(
         p90_by_hour=p90_by_hour,
         samples=taken,
         ticks=total_ticks,
-        measured_at=now or datetime.now(UTC),
+        measured_at=now or SystemClock().now(),
         fallback=_quantile(every, 0.5),
     )
 
@@ -226,5 +227,9 @@ def load_profile(symbol: str, path: Path = DEFAULT_CACHE) -> SpreadProfile | Non
             measured_at=datetime.fromisoformat(raw["measured_at"]),
             fallback=Decimal(raw["fallback"]),
         )
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, InvalidOperation):
+        # InvalidOperation is listed explicitly because it is NOT a ValueError -
+        # it descends from ArithmeticError - so a cache whose numbers are corrupt
+        # escaped this handler and raised, which is exactly what the docstring
+        # above promises it will not do.
         return None

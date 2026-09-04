@@ -19,6 +19,7 @@ from algo.core.instrument import FutureId, OptionId
 from algo.core.timeutil import utc
 from algo.exchange.master import (
     InstrumentMaster,
+    MasterRow,
     parse_master,
     parse_master_csv,
 )
@@ -193,6 +194,66 @@ class TestExpiries:
     def test_future_rows_nearest_first(self, master: InstrumentMaster) -> None:
         rows = master.future_rows("GOLDM", Exchange.MCX)
         assert [r.expiry for r in rows] == [date(2026, 9, 4)]
+
+
+class TestFutureForOptionExpiry:
+    """The one pairing rule: the contract an option cycle settles into.
+
+    Every master here lists three futures so that the front month, the farthest
+    contract and the correct answer are three *different* dates. A fixture with a
+    single futures row — which is what `master` above has — cannot tell them apart,
+    which is exactly how `KotakChainFeed` shipped anchoring its chain on the
+    farthest listed contract while its comment claimed the nearest.
+    """
+
+    OPTION_EXPIRY = date(2026, 9, 25)
+
+    def _master(self, *expiries: date) -> InstrumentMaster:
+        return InstrumentMaster(
+            [
+                MasterRow(
+                    symboltoken=str(index),
+                    tradingsymbol=f"GOLDM{expiry:%d%b%y}FUT".upper(),
+                    exch_seg="MCX",
+                    name="GOLDM",
+                    instrumenttype="FUTCOM",
+                    expiry=expiry,
+                    lot_size=Decimal("100"),
+                )
+                for index, expiry in enumerate(expiries)
+            ],
+            fetched_at=FETCHED_AT,
+        )
+
+    def test_it_is_neither_the_front_month_nor_the_farthest(self) -> None:
+        master = self._master(date(2026, 8, 28), date(2026, 9, 30), date(2026, 10, 30))
+        rows = master.future_rows("GOLDM", Exchange.MCX)
+
+        row = master.future_for_option_expiry("GOLDM", Exchange.MCX, self.OPTION_EXPIRY)
+
+        assert row is not None
+        assert row.expiry == date(2026, 9, 30)
+        assert row.expiry != rows[0].expiry  # not the front month
+        assert row.expiry != rows[-1].expiry  # not the farthest — the old behaviour
+
+    def test_a_contract_expiring_on_the_option_date_still_counts(self) -> None:
+        """"On or after" is inclusive: MCX lists cycles whose option and future
+        share a date, and excluding it would skip to the next month."""
+        master = self._master(date(2026, 9, 25), date(2026, 10, 30))
+        row = master.future_for_option_expiry("GOLDM", Exchange.MCX, self.OPTION_EXPIRY)
+        assert row is not None and row.expiry == date(2026, 9, 25)
+
+    def test_an_incomplete_master_falls_back_to_the_farthest_listed(self) -> None:
+        """Every listed contract expires before the option, so none of them is one
+        the option can settle into. The farthest is the least wrong, and picking an
+        earlier one would be actively misleading."""
+        master = self._master(date(2026, 7, 31), date(2026, 8, 28))
+        row = master.future_for_option_expiry("GOLDM", Exchange.MCX, self.OPTION_EXPIRY)
+        assert row is not None and row.expiry == date(2026, 8, 28)
+
+    def test_no_futures_at_all_is_none_rather_than_a_guess(self) -> None:
+        master = self._master()
+        assert master.future_for_option_expiry("GOLDM", Exchange.MCX, self.OPTION_EXPIRY) is None
 
 
 class TestSnapshots:

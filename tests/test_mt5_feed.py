@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import numpy as np
 import pytest
@@ -62,6 +63,21 @@ class FakeTerminal:
         self._tick = tick
         self._bars = bars
 
+    # -- protocol members this module never reaches, present so the fake
+    #    satisfies `Mt5Terminal` structurally and no call site needs a
+    #    `type: ignore` that would equally hide a genuinely wrong argument.
+    def initialize(self, *args: Any, **kwargs: Any) -> bool:
+        return True
+
+    def shutdown(self) -> None:
+        return None
+
+    def symbol_select(self, symbol: str, enable: bool) -> bool:
+        return True
+
+    def symbol_info(self, symbol: str) -> Any:
+        return None
+
     def last_error(self) -> tuple[int, str]:
         return (-1, "fake")
 
@@ -94,19 +110,22 @@ class FakeTerminal:
         return np.array(rows, dtype=_DTYPE)
 
 
-def _feed(terminal: FakeTerminal, **kwargs: object) -> Mt5BarFeed:
+def _feed(terminal: FakeTerminal, *, server_offset: timedelta | None = None) -> Mt5BarFeed:
+    # An explicit keyword rather than `**kwargs: object`, which typed the offset
+    # as `object` and needed a suppression to pass - one that would equally have
+    # hidden a genuinely wrong argument.
     return Mt5BarFeed(
-        terminal=terminal,  # type: ignore[arg-type]
+        terminal=terminal,
         symbol="XAUUSD",
         timeframe=TF,
-        server_offset=kwargs.get("server_offset", terminal.offset),  # type: ignore[arg-type]
+        server_offset=terminal.offset if server_offset is None else server_offset,
     )
 
 
 class TestMeasuringTheServerClock:
     def test_it_measures_rather_than_assumes(self) -> None:
         assert measure_server_offset(
-            FakeTerminal(offset_hours=3),  # type: ignore[arg-type]
+            FakeTerminal(offset_hours=3),
             "XAUUSD",
             now=NOW,
         ) == timedelta(hours=3)
@@ -115,7 +134,7 @@ class TestMeasuringTheServerClock:
         """The whole point: EET brokers shift to +2 for a third of the year, and
         a hard-coded +3 would misalign every bar by an hour."""
         assert measure_server_offset(
-            FakeTerminal(offset_hours=2),  # type: ignore[arg-type]
+            FakeTerminal(offset_hours=2),
             "XAUUSD",
             now=NOW,
         ) == timedelta(hours=2)
@@ -126,17 +145,17 @@ class TestMeasuringTheServerClock:
         terminal = FakeTerminal(offset_hours=3)
         terminal.offset = timedelta(hours=3, seconds=4)
 
-        assert measure_server_offset(terminal, "XAUUSD", now=NOW) == timedelta(hours=3)  # type: ignore[arg-type]
+        assert measure_server_offset(terminal, "XAUUSD", now=NOW) == timedelta(hours=3)
 
     def test_no_tick_raises_rather_than_defaulting_to_zero(self) -> None:
         """Assuming UTC when the clock cannot be read is how every bar ends up
         silently shifted."""
         with pytest.raises(DataError, match="server clock cannot be measured"):
-            measure_server_offset(FakeTerminal(tick=False), "XAUUSD", now=NOW)  # type: ignore[arg-type]
+            measure_server_offset(FakeTerminal(tick=False), "XAUUSD", now=NOW)
 
     def test_an_implausible_offset_is_refused(self) -> None:
         with pytest.raises(DataError, match="no broker runs"):
-            measure_server_offset(FakeTerminal(offset_hours=40), "XAUUSD", now=NOW)  # type: ignore[arg-type]
+            measure_server_offset(FakeTerminal(offset_hours=40), "XAUUSD", now=NOW)
 
 
 class TestTheFormingBarIsNeverReturned:
@@ -201,7 +220,7 @@ class TestItFailsHonestly:
     def test_a_timeframe_mt5_does_not_have_is_refused(self) -> None:
         with pytest.raises(DataError, match="no 7-minute timeframe"):
             Mt5BarFeed(
-                terminal=FakeTerminal(),  # type: ignore[arg-type]
+                terminal=FakeTerminal(),
                 symbol="XAUUSD",
                 timeframe=Timeframe(minutes=7),
                 server_offset=timedelta(hours=3),
@@ -210,3 +229,108 @@ class TestItFailsHonestly:
     def test_a_nonsense_count_is_refused(self) -> None:
         with pytest.raises(DataError, match="at least 1"):
             _feed(FakeTerminal()).closed_bars(0)
+
+
+class TestTheOffsetBoundaries:
+    """`_MAX_PLAUSIBLE_OFFSET_HOURS` is the line between a real broker clock and
+    a stale tick. The existing refusal test uses 40h, far outside it; these pin
+    the edge, where an off-by-one would let a stale tick through or reject a
+    legitimate broker."""
+
+    def test_the_largest_plausible_offset_is_accepted(self) -> None:
+        assert measure_server_offset(
+            FakeTerminal(offset_hours=14), "XAUUSD", now=NOW
+        ) == timedelta(hours=14)
+
+    def test_half_an_hour_past_the_limit_is_refused(self) -> None:
+        with pytest.raises(DataError, match="which no broker runs"):
+            measure_server_offset(FakeTerminal(offset_hours=14.5), "XAUUSD", now=NOW)
+
+    def test_a_broker_west_of_utc_keeps_its_sign(self) -> None:
+        """Negative offsets round through the same `round()` as positive ones, and
+        a sign dropped here shifts every bar the wrong way by twice the offset."""
+        assert measure_server_offset(
+            FakeTerminal(offset_hours=-5), "XAUUSD", now=NOW
+        ) == timedelta(hours=-5)
+
+    def test_a_broker_on_utc_measures_zero_rather_than_failing(self) -> None:
+        """Zero is a real answer, not a missing one - the falsy trap this must
+        not fall into, since `not timedelta(0)` is True."""
+        measured = measure_server_offset(FakeTerminal(offset_hours=0), "XAUUSD", now=NOW)
+
+        assert measured == timedelta(0)
+        assert isinstance(measured, timedelta)
+
+    def test_an_off_grid_offset_snaps_to_the_nearest_half_hour(self) -> None:
+        """Broker clocks sit on whole or half hours; 2h50m is latency around 3h,
+        not a 2h50m broker."""
+        assert measure_server_offset(
+            FakeTerminal(offset_hours=2 + 50 / 60), "XAUUSD", now=NOW
+        ) == timedelta(hours=3)
+        assert measure_server_offset(
+            FakeTerminal(offset_hours=2 + 10 / 60), "XAUUSD", now=NOW
+        ) == timedelta(hours=2)
+
+    def test_a_tick_stamped_zero_is_treated_as_no_tick(self) -> None:
+        """The guard is `not tick.time`, not `tick is None`. A terminal that
+        returns a tick object with an empty timestamp would otherwise measure an
+        offset against the epoch and get ~56 years."""
+
+        class ZeroTick:
+            time = 0
+
+        class ZeroTickTerminal(FakeTerminal):
+            def symbol_info_tick(self, symbol: str) -> Any:
+                return ZeroTick()
+
+        with pytest.raises(DataError, match="no tick for"):
+            measure_server_offset(ZeroTickTerminal(), "XAUUSD", now=NOW)
+
+
+class TestConstruction:
+    def test_the_symbol_is_readable_back(self) -> None:
+        """`BarFeed` consumers read `.symbol` to label what they are trading."""
+        assert _feed(FakeTerminal()).symbol == "XAUUSD"
+
+    def test_a_timeframe_the_terminal_does_not_expose_is_refused(self) -> None:
+        """Distinct from the unknown-timeframe case: M1 is a timeframe this module
+        supports, but an older MT5 module may not expose the constant. Guessing an
+        integer for it would request an unknown timeframe from the terminal."""
+        with pytest.raises(DataError, match="exposes no TIMEFRAME_M1"):
+            Mt5BarFeed(
+                terminal=FakeTerminal(),
+                symbol="XAUUSD",
+                timeframe=Timeframe(minutes=1),
+                server_offset=timedelta(hours=3),
+            )
+
+
+class TestCountHandling:
+    def test_the_default_asks_for_five_hundred_closed_bars(self) -> None:
+        terminal = FakeTerminal(bars=600)
+        bars = _feed(terminal).closed_bars()
+
+        assert terminal.requested == [501]
+        assert len(bars) == 500
+
+    def test_asking_for_one_returns_the_last_closed_bar_not_the_forming_one(
+        self,
+    ) -> None:
+        """The smallest case, where an off-by-one is easiest to get wrong and
+        hands a strategy a bar whose close can still move."""
+        terminal = FakeTerminal(bars=9)
+        bars = _feed(terminal).closed_bars(1)
+
+        assert terminal.requested == [2]
+        assert len(bars) == 1
+        assert bars[0].ts == NOW - timedelta(minutes=30)
+
+    def test_only_a_forming_bar_available_yields_nothing_rather_than_raising(
+        self,
+    ) -> None:
+        """One row back means the terminal has only the bar still being built.
+        That is an empty result, not an error - history is still downloading, and
+        the live loop polls again rather than dying."""
+        bars = _feed(FakeTerminal(bars=1)).closed_bars(4)
+
+        assert bars == []
