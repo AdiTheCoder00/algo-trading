@@ -78,3 +78,30 @@ def trade_log_digest(trades: Sequence[Trade]) -> str:
     The golden test does both — the digest fails fast, the file shows why.
     """
     return stable_hash({"rows": trade_rows(trades)})
+
+
+def write_extended_trade_log(
+    trades: Sequence[Trade], path: Path, columns: Sequence[str]
+) -> Path:
+    """The standard log, plus the named keys from each trade's `context`.
+
+    `TRADE_COLUMNS` is deliberately not widened. It backs the golden file, and a
+    strategy that wants to record its own indicator readings should not be able
+    to change the shape of every other strategy's log to do it. So this writes a
+    superset alongside, byte-stable in exactly the same way: sorted nothing,
+    formatted nothing, `str()` on the way out.
+
+    A trade whose context lacks a requested key gets an empty cell rather than an
+    error - "this run did not record that" and "this run recorded nothing" stay
+    distinguishable.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fields = [*TRADE_COLUMNS, *columns]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        for trade in trades:
+            row = trade.to_log_row()
+            row.update({key: trade.context.get(key, "") for key in columns})
+            writer.writerow(row)
+    return path

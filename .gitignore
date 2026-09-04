@@ -19,6 +19,11 @@ report.html
 tearsheet-sample.html
 trades.csv
 dashboard/public-tearsheet.html
+# Study artefacts that a run regenerates. The run REPORT is committed - it is
+# the finding - but the tearsheet and the per-trade log are large, derived, and
+# reproduced byte for byte by `scripts/backtest_xauusd_rsi_stoch.py`.
+/reports/**/*.html
+/reports/**/*_trades.csv
 
 # Python
 .venv/

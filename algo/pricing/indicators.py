@@ -115,3 +115,129 @@ def warmup_bars(*, slow: int = 26, signal: int = 9) -> int:
     is smaller than a tick, not a point of exactness.
     """
     return slow + signal + 2
+
+
+def rsi(values: Sequence[float], period: int = 14) -> list[float]:
+    """Wilder's RSI, seeded with a simple average - TradingView's `ta.rsi`.
+
+    Two seeding conventions exist and they do not agree. TradingView computes
+    `ta.rma`, which averages the first `period` changes arithmetically and then
+    smooths recursively; a plain recursive EMA seeded on the first change gives
+    visibly different values for hundreds of bars. The strategy this feeds
+    compares RSI against 40, 60, 25 and 75 - fixed levels, where a systematic
+    offset does not average out, it changes which bars are signals. So this
+    matches TradingView rather than being merely "an RSI".
+
+    The first `period` entries are `float('nan')`: there is no RSI before there
+    are `period` changes to average, and returning 50 or 0 there would let a
+    caller trade a value that does not exist. Callers must skip NaN.
+    """
+    if period < 1:
+        raise DomainError(f"RSI period must be at least 1, got {period}")
+    n = len(values)
+    out = [float("nan")] * n
+    if n <= period:
+        return out
+
+    gains = 0.0
+    losses = 0.0
+    for i in range(1, period + 1):
+        change = float(values[i]) - float(values[i - 1])
+        if change >= 0:
+            gains += change
+        else:
+            losses -= change
+    avg_gain = gains / period
+    avg_loss = losses / period
+    out[period] = _rsi_from(avg_gain, avg_loss)
+
+    for i in range(period + 1, n):
+        change = float(values[i]) - float(values[i - 1])
+        gain = change if change > 0 else 0.0
+        loss = -change if change < 0 else 0.0
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+        out[i] = _rsi_from(avg_gain, avg_loss)
+    return out
+
+
+def _rsi_from(avg_gain: float, avg_loss: float) -> float:
+    """RSI from the two smoothed averages.
+
+    `avg_loss == 0` is not a division by zero to be guarded with an epsilon: it
+    means no down move in the window, which is exactly RSI 100. The mirrored
+    case - no up move - is RSI 0, and both flat is 50 rather than undefined.
+    """
+    if avg_loss == 0.0:
+        return 100.0 if avg_gain > 0.0 else 50.0
+    return 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+
+
+@dataclass(frozen=True, slots=True)
+class StochRsi:
+    """Stochastic RSI: the RSI's own position in its recent range, smoothed."""
+
+    k: list[float]
+    d: list[float]
+    #: The unsmoothed stochastic of the RSI, before the %K smoothing. Carried
+    #: because it is what a reader checking against a chart's source sees.
+    raw: list[float]
+
+
+def stoch_rsi(
+    values: Sequence[float],
+    *,
+    rsi_period: int = 14,
+    stoch_period: int = 14,
+    smooth_k: int = 3,
+    smooth_d: int = 3,
+) -> StochRsi:
+    """TradingView's Stochastic RSI (14, 14, 3, 3).
+
+    The chain is exactly the one in TradingView's built-in script: RSI, then
+    `ta.stoch` of that RSI against its own high and low over `stoch_period`,
+    then `%K = SMA(stoch, smooth_k)` and `%D = SMA(%K, smooth_d)`. The common
+    mistake is to smooth once and call the result %K and the raw stochastic %D;
+    that produces two lines that cross at different bars from the chart's.
+
+    A flat RSI window - `highest == lowest`, which happens on a quiet
+    five-minute chart more often than it sounds - has no defined position in a
+    zero-width range. That is 50, the midpoint, not 0 and not 100, either of
+    which would read as an extreme that never happened.
+    """
+    if stoch_period < 1 or smooth_k < 1 or smooth_d < 1:
+        raise DomainError("stochastic RSI periods must all be at least 1")
+
+    base = rsi(values, rsi_period)
+    n = len(base)
+    raw = [float("nan")] * n
+    for i in range(n):
+        if i + 1 < stoch_period:
+            continue
+        window = base[i - stoch_period + 1 : i + 1]
+        if any(v != v for v in window):  # NaN in the warmup
+            continue
+        low = min(window)
+        high = max(window)
+        raw[i] = 50.0 if high == low else (base[i] - low) / (high - low) * 100.0
+
+    k = _sma(raw, smooth_k)
+    d = _sma(k, smooth_d)
+    return StochRsi(k=k, d=d, raw=raw)
+
+
+def _sma(values: Sequence[float], period: int) -> list[float]:
+    """Simple moving average that propagates NaN rather than averaging around it.
+
+    A window containing a warmup NaN has no average; filling it from the
+    non-NaN members would put a value on a bar where the indicator does not yet
+    exist, which is the same class of error as look-ahead.
+    """
+    n = len(values)
+    out = [float("nan")] * n
+    for i in range(period - 1, n):
+        window = values[i - period + 1 : i + 1]
+        if any(v != v for v in window):
+            continue
+        out[i] = sum(window) / period
+    return out

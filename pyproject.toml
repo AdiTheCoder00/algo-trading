@@ -169,3 +169,9 @@ ignore = [
 # Same again for the Asia value-area study: a report written to stdout for a
 # human, imported by nothing.
 "scripts/measure_asia_value_area_xauusd.py" = ["T201"]
+# And again for the XAUUSD scalper study and the two build steps that feed it -
+# a run report, a decode progress trace and a calendar transcription, all of
+# them stdout-for-a-human and imported by nothing.
+"scripts/backtest_xauusd_rsi_stoch.py" = ["T201"]
+"scripts/build_xauusd_dataset.py" = ["T201"]
+"scripts/build_us_event_calendar.py" = ["T201", "DTZ007"]
