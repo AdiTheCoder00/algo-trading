@@ -62,7 +62,7 @@ no path by which bar `i+1` reaches a decision made on bar `i`.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -321,6 +321,7 @@ def run_scalper(
     indicators: Indicators | None = None,
     slippage: SlippageModel | None = None,
     tick: Decimal = Decimal("0.001"),
+    entry: Callable[[int], Side | None] | None = None,
 ) -> ScalperResult:
     """Walk `m5` once, trading the baseline rules and charging real costs.
 
@@ -328,6 +329,19 @@ def run_scalper(
     for the indicators themselves - recomputing RSI over 100,000 bars for each
     of a dozen stop-loss variants is pure waste, and the series are identical
     by construction. Pass `None` and they are computed here.
+
+    `entry` replaces the specified entry rule with an arbitrary one, taking the
+    index of a closed M5 bar and returning a side or `None`. Everything else -
+    the warmup, the one-position rule, the news and daily-loss gates, the fill
+    at the next bar's open, and all three exits - is untouched, which is what
+    makes a comparison between two entries a comparison of the entries rather
+    than of two different backtests.
+
+    **The callable must read no index above the one it is given.** Nothing here
+    can enforce that: it closes over its own arrays and the runner cannot see
+    inside it. `study_xauusd_signal.py` builds its candidates from causal
+    series and has a test that truncating the history does not change an
+    answer, which is the only real check available.
     """
     if not m5 or not h1:
         raise DataError("the scalper needs both M5 and H1 bars")
@@ -504,13 +518,17 @@ def run_scalper(
         if open_trade is None and pending is None and i + 1 < len(m5):
             h1_index = ind.h1_index[i]
             if i >= M5_WARMUP and h1_index >= H1_WARMUP:
-                side = entry_side(
-                    trend=ind.h1_trend[h1_index],
-                    previous_rsi=ind.m5_rsi[i - 1],
-                    rsi=ind.m5_rsi[i],
-                    stoch_k=ind.stoch_k[i],
-                    stoch_d=ind.stoch_d[i],
-                    params=params,
+                side = (
+                    entry(i)
+                    if entry is not None
+                    else entry_side(
+                        trend=ind.h1_trend[h1_index],
+                        previous_rsi=ind.m5_rsi[i - 1],
+                        rsi=ind.m5_rsi[i],
+                        stoch_k=ind.stoch_k[i],
+                        stoch_d=ind.stoch_d[i],
+                        params=params,
+                    )
                 )
                 if side is not None:
                     result.signals_seen += 1
@@ -557,13 +575,17 @@ def run_scalper(
             # 900 setups and could act on 300" are different claims about it.
             h1_index = ind.h1_index[i]
             if i >= M5_WARMUP and h1_index >= H1_WARMUP:
-                blocked = entry_side(
-                    trend=ind.h1_trend[h1_index],
-                    previous_rsi=ind.m5_rsi[i - 1],
-                    rsi=ind.m5_rsi[i],
-                    stoch_k=ind.stoch_k[i],
-                    stoch_d=ind.stoch_d[i],
-                    params=params,
+                blocked = (
+                    entry(i)
+                    if entry is not None
+                    else entry_side(
+                        trend=ind.h1_trend[h1_index],
+                        previous_rsi=ind.m5_rsi[i - 1],
+                        rsi=ind.m5_rsi[i],
+                        stoch_k=ind.stoch_k[i],
+                        stoch_d=ind.stoch_d[i],
+                        params=params,
+                    )
                 )
                 if blocked is not None:
                     result.signals_seen += 1

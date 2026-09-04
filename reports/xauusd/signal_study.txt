@@ -1,0 +1,124 @@
+====================================================================================================
+A NEW ENTRY SIGNAL: MEASURE FIRST, BUILD SECOND
+====================================================================================================
+
+  Phase 1 asks whether anything here predicts the next four hours of gold at all, on the
+  in-sample window only, sampled every 48th bar so the forward windows do not overlap. Phase 2
+  builds entries only from what Phase 1 supports and tests them out of sample. Nothing in Phase
+  2 was chosen by looking at a Phase 2 result.
+
+  in sample         2024-01-01 .. 2024-12-10  (66,549 M5 bars)
+  out of sample     2024-12-10 .. 2025-05-13  (28,522 M5 bars)
+  horizon           48 bars (4 hours), the strategy's own cap
+  the bar to clear  a decile spread of $0.55 - what a round trip costs
+
+====================================================================================================
+PHASE 1: DOES ANYTHING PREDICT?  (in sample, non-overlapping)
+====================================================================================================
+
+    feature                     IC      t      n  top decile    bottom   spread $
+    mom 1h                  0.0081   0.30   1385      -0.241    -0.437      0.196
+    mom 4h                 -0.0131  -0.49   1385      -0.511     0.081     -0.592
+    mom 24h                -0.0187  -0.69   1380       0.038     0.916     -0.879
+    reversion z            -0.0160  -0.59   1385      -0.591     0.686     -1.277
+    rsi 14                 -0.0206  -0.77   1385      -0.427     0.099     -0.527
+    stoch %K                0.0089   0.33   1385      -0.254    -0.320      0.066
+    vol compression         0.0058   0.22   1384      -0.127     0.892     -1.019
+    range position         -0.0247  -0.92   1380       0.152    -1.276      1.428
+    h1 trend separation     0.0001   0.01   1382       0.450     0.398      0.052
+    tick imbalance 5m      -0.0378  -1.41   1386       0.733     1.410     -0.677
+    tick imbalance 1h      -0.0081  -0.30   1385       0.271     0.569     -0.298
+    tick activity           0.0008   0.03   1380      -0.223     1.067     -1.291
+
+  IC is the rank correlation with the forward four-hour move. t is its significance on the
+  non-overlapping sample - |t| above about 2 is the conventional bar. 'spread $' is the gap in
+  average forward move between the feature's top and bottom decile, in dollars an ounce: that is
+  the gross edge a perfect user of the feature would capture, before paying $0.55 to take the
+  trade.
+
+  Nothing reached |t| >= 2 on the non-overlapping sample. The strongest is
+  tick imbalance 5m at t = -1.41, which is what a null result
+  looks like when twelve features are tried.
+
+  7 features DO have a decile spread wider than the $0.55 cost bar:
+    range position         spread $+1.428   t -0.92 (sign disagrees with its IC)
+    tick activity          spread $-1.291   t +0.03 (sign disagrees with its IC)
+    reversion z            spread $-1.277   t -0.59
+    vol compression        spread $-1.019   t +0.22 (sign disagrees with its IC)
+    mom 24h                spread $-0.879   t -0.69
+    tick imbalance 5m      spread $-0.677   t -1.41
+    mom 4h                 spread $-0.592   t -0.49
+
+  That is not a contradiction of the line above, it is the reason the line above is the one to
+  believe. A decile spread is the mean of a few hundred forward moves whose own standard
+  deviation is several dollars, so a spread of a dollar or so is exactly the size of its own
+  error bar - which is what a t of one says. Where the spread's sign also disagrees with the
+  feature's rank correlation there is not even a monotone relationship to be noisy about: the
+  extremes are moving one way and the middle the other, which is the shape of nothing.
+
+====================================================================================================
+PHASE 2: THE BEST OF THEM, TRADED
+====================================================================================================
+
+  The three features with the largest absolute decile spread are traded as entries regardless of
+  whether they cleared the bar - if the bar is the honest test, then watching the best-looking
+  features fail it in a real backtest is the demonstration, not a waste. Everything except the
+  entry is the baseline: same 6xATR stop, same four-hour cap, same RSI reversal, same news and
+  daily gates, same costs.
+
+    entry                              trades    win%      net $      PF    exp $        window
+    range position                       1282   48.6%    -318.55   0.915    -0.25     in sample
+    tick activity                        1582   46.1%    -814.07   0.834    -0.51     in sample
+    reversion z                          1518   45.2%    -813.10   0.836    -0.54     in sample
+    control: a deterministic coin        1724   44.5%  -1,265.64   0.770    -0.73     in sample
+
+    range position                        527   52.9%     +68.45   1.029    +0.13 out of sample
+    tick activity                         636   45.4%    -961.77   0.700    -1.51 out of sample
+    reversion z                           547   40.6%    -704.31   0.755    -1.29 out of sample
+    control: a deterministic coin         640   44.8%    -827.99   0.744    -1.29 out of sample
+
+    range position                        901   53.6%  +1,320.22   1.154    +1.47   mt5 holdout
+    tick activity (mt5 holdout)          no usable values in this window
+    reversion z                           854   49.1%  -1,630.30   0.842    -1.91   mt5 holdout
+    control: a deterministic coin         996   51.5%    +335.16   1.033    +0.34   mt5 holdout
+
+====================================================================================================
+VERDICT
+====================================================================================================
+
+  Phase 1: nothing predicts.
+      0 of 12 features reached |t| >= 2 against the forward four-hour move on non-overlapping
+      in-sample data. The strongest of the twelve is tick imbalance 5m at t = -1.41 - and with
+      twelve features tried, one at |t| around 1.4 is what you expect from noise alone. Several
+      features have decile spreads wider than the $0.55 cost bar - range position is $+1.43 - but a
+      spread that size on this sample is indistinguishable from zero, and in several cases its sign
+      disagrees with the feature's own rank correlation.
+
+  Phase 2: the control settles it.
+      A deterministic coin - an entry with no information in it whatsoever, taken at the same
+      quintile thresholds - makes in sample -0.73, out of sample -1.29, mt5 holdout +0.34 a trade.
+      Read the holdout figure there before reading anything else in that table: in a market that
+      trended as hard as gold did through 2026, a four-hour position taken at random makes money, so
+      every positive number in the holdout column is the market and not the signal.
+
+  Phase 2: nothing is consistent either.
+      No feature is positive in every window while beating the control in every window. The one that
+      comes closest changes sign between the in-sample and out-of-sample halves, which is the same
+      thing the entry study found: these are not weak signals, they are absent ones.
+
+  The tick data was the best hope, and it did not rescue this.
+      Order flow does predict at very short horizons - that is what makes market making work - but
+      the horizon here is four hours, and one bar of imbalance, or an hour of it, carries nothing
+      about it - t = -1.41 at best. The features that are not rearrangements of OHLC sit in the
+      table indistinguishable from the ones that are.
+
+  The recommendation.
+      Stop looking for a five-minute entry on XAUUSD with these inputs. A round trip costs $0.55 and
+      the best four-hour decile spread any of twelve features can show is $1.43 with a t-statistic
+      under one - and that spread is the gross move available to someone who could pick the extreme
+      decile and trade it perfectly. What would change the answer is a cheaper venue, a longer
+      horizon where the available move grows faster than the cost, or an input this dataset does not
+      contain: real traded volume, the options surface, positioning. Each of those is a different
+      project and deserves this same order of work - measure whether the input predicts before
+      building anything that trades on it.
+

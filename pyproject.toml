@@ -177,3 +177,4 @@ ignore = [
 "scripts/build_us_event_calendar.py" = ["T201", "DTZ007"]
 "scripts/study_xauusd_stop.py" = ["T201"]
 "scripts/study_xauusd_entry.py" = ["T201"]
+"scripts/study_xauusd_signal.py" = ["T201"]

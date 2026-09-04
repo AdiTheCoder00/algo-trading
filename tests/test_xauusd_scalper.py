@@ -813,3 +813,119 @@ def test_a_filter_reduces_trades_and_is_counted_by_name() -> None:
     assert len(filtered.trades) < len(unfiltered.trades)
     assert filtered.blocked_by_filter.get("trend separation", 0) > 0
     assert not unfiltered.blocked_by_filter, "the baseline blocks nothing by filter"
+
+
+# ---------------------------------------------------------- tick flow and features
+
+
+def test_flow_counts_mid_moves_and_survives_a_round_trip(tmp_path: Path) -> None:
+    from algo.data.dukascopy import Tick, bars_with_microstructure, load_flow, save_flow
+
+    base = datetime(2024, 1, 2, 0, 0, tzinfo=UTC)
+    # Up, up, flat, down: two upticks, one downtick, one tick that moved nothing.
+    mids = [Decimal("2000"), Decimal("2001"), Decimal("2002"), Decimal("2002"), Decimal("2001")]
+    ticks = [
+        Tick(ts=base + timedelta(seconds=30 * i), bid=mid, ask=mid + Decimal("0.4"))
+        for i, mid in enumerate(mids, start=1)
+    ]
+    bars, spreads, flows = bars_with_microstructure(ticks, M5)
+    assert len(bars) == len(spreads) == len(flows) == 1
+    assert flows[0].ticks == 5
+    assert flows[0].upticks == 2
+    assert flows[0].downticks == 1
+    assert flows[0].imbalance == pytest.approx((2 - 1) / 3)
+    assert spreads[0] == Decimal("0.4")
+
+    path = save_flow(bars, flows, tmp_path / "flow.csv")
+    restored = load_flow(path)
+    assert restored[bars[0].ts] == flows[0]
+
+
+def test_a_flat_bar_has_no_imbalance_rather_than_a_division_by_zero() -> None:
+    from algo.data.dukascopy import Flow
+
+    assert Flow(ticks=100, upticks=0, downticks=0).imbalance == 0.0
+
+
+def test_microstructure_and_spread_builders_agree_on_bars() -> None:
+    """Two entry points over the same ticks must not disagree about the bars."""
+    from algo.data.dukascopy import Tick, bars_with_microstructure, bars_with_spread
+
+    base = datetime(2024, 1, 2, 0, 0, tzinfo=UTC)
+    ticks = [
+        Tick(
+            ts=base + timedelta(seconds=20 * i),
+            bid=Decimal(2000 + (i % 13)),
+            ask=Decimal(2000 + (i % 13)) + Decimal("0.4"),
+        )
+        for i in range(1, 400)
+    ]
+    plain_bars, plain_spreads = bars_with_spread(ticks, M5)
+    micro_bars, micro_spreads, _flows = bars_with_microstructure(ticks, M5)
+    assert [b.ts for b in plain_bars] == [b.ts for b in micro_bars]
+    assert [(b.open, b.high, b.low, b.close) for b in plain_bars] == [
+        (b.open, b.high, b.low, b.close) for b in micro_bars
+    ]
+    assert plain_spreads == micro_spreads
+
+
+def test_a_custom_entry_replaces_the_specified_one() -> None:
+    """The hook the signal study runs on. Everything else must stay put."""
+    m5, h1, baseline = _forced_run()
+
+    def never(_i: int) -> Side | None:
+        return None
+
+    silent = run_scalper(
+        m5, h1, costs=FREE, calendar=_calendar(), entry=never
+    )
+    assert not silent.trades, "an entry that never fires must produce no trades"
+    assert silent.bars_seen == baseline.bars_seen, "the walk itself is unchanged"
+
+    def always_long(i: int) -> Side | None:
+        return Side.BUY if i % 500 == 0 else None
+
+    forced = run_scalper(
+        m5, h1, costs=FREE, calendar=_calendar(), entry=always_long
+    )
+    assert forced.trades
+    assert all(t.side is Side.BUY for t in forced.trades)
+    # The exits are still the baseline's - a custom entry does not get to
+    # change how a position is closed.
+    assert {t.exit_reason.value for t in forced.trades} <= {
+        "stop loss",
+        "rsi reversal",
+        "max hold",
+        "end of data",
+    }
+
+
+def test_the_study_features_are_causal() -> None:
+    """Truncating the history must not change a feature value that survives.
+
+    The signal study's whole Phase 1 rests on this: a feature that reads ahead
+    is guaranteed to look predictive and guaranteed to be worthless. Asserted
+    here rather than trusted, because nothing in `run_scalper` can check what a
+    closure passed to `entry` reads.
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from study_xauusd_signal import build_features
+
+    m5, h1, _result = _forced_run()
+    m5, h1 = m5[:4000], [b for b in h1 if b.ts <= m5[3999].ts]
+    cut = 3000
+    short_h1 = [b for b in h1 if b.ts <= m5[cut - 1].ts]
+
+    full = {f.name: f.values for f in build_features(m5, {}, h1)}
+    partial = {f.name: f.values for f in build_features(m5[:cut], {}, short_h1)}
+
+    for name, values in full.items():
+        for i in range(cut):
+            a, b = values[i], partial[name][i]
+            if a != a or b != b:
+                continue
+            assert a == pytest.approx(b, abs=1e-9), (
+                f"{name} at bar {i} changed when later bars were added: {b} -> {a}"
+            )

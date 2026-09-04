@@ -539,3 +539,121 @@ def load_spread_series(path: Path) -> dict[datetime, Decimal]:
         ts, spread = line.split(",")
         out[datetime.fromisoformat(ts)] = Decimal(spread)
     return out
+
+
+@dataclass(frozen=True, slots=True)
+class Flow:
+    """Tick-level activity inside one bar - what OHLC throws away.
+
+    A bar says where price started and ended. The ticks say how it got there:
+    how many quote updates it took, and how many of them moved the mid up
+    against how many moved it down. That is the closest thing a CFD feed has to
+    order flow - there is no traded volume and no side - and it is a genuinely
+    different input from anything derived from the four prices, which is the
+    only reason it is worth extracting.
+
+    `upticks` and `downticks` count mid changes, not quotes: a tick that repeats
+    the previous mid is neither, and on gold most ticks are neither.
+    """
+
+    ticks: int
+    upticks: int
+    downticks: int
+
+    @property
+    def imbalance(self) -> float:
+        """(up - down) / (up + down), or 0 when the mid never moved."""
+        moved = self.upticks + self.downticks
+        return 0.0 if moved == 0 else (self.upticks - self.downticks) / moved
+
+
+def bars_with_microstructure(
+    ticks: Sequence[Tick] | Iterator[Tick], timeframe: Timeframe
+) -> tuple[list[Bar], list[Decimal], list[Flow]]:
+    """Bars, the median spread inside each, and each one's tick flow.
+
+    One pass, because the archive takes minutes to decode and the three outputs
+    all come from the same stream. See `bars_with_spread` for why the spread is
+    per bar rather than a profile.
+    """
+    step = timedelta(minutes=timeframe.minutes)
+    bars: list[Bar] = []
+    spreads: list[Decimal] = []
+    flows: list[Flow] = []
+
+    bucket_ts: datetime | None = None
+    o = hi = lo = c = None
+    count = up = down = 0
+    inside: list[Decimal] = []
+    previous_mid: Decimal | None = None
+
+    def flush() -> None:
+        bars.append(
+            Bar(
+                ts=bucket_ts,  # type: ignore[arg-type]
+                timeframe=timeframe,
+                open=o,  # type: ignore[arg-type]
+                high=hi,  # type: ignore[arg-type]
+                low=lo,  # type: ignore[arg-type]
+                close=c,  # type: ignore[arg-type]
+                volume=count,
+            )
+        )
+        spreads.append(_median(inside))
+        flows.append(Flow(ticks=count, upticks=up, downticks=down))
+
+    for tick in ticks:
+        mid = tick.mid
+        close_ts = _bucket_close(tick.ts, step)
+        if bucket_ts is None or close_ts != bucket_ts:
+            if bucket_ts is not None:
+                flush()
+            bucket_ts, o, hi, lo, c = close_ts, mid, mid, mid, mid
+            count = up = down = 0
+            inside = []
+        hi = max(hi, mid)  # type: ignore[type-var]
+        lo = min(lo, mid)  # type: ignore[type-var,assignment]
+        c = mid
+        count += 1
+        inside.append(tick.spread)
+        # Compared against the previous tick's mid across the whole stream, not
+        # reset at the bar boundary: the first tick of a bar did move relative to
+        # the last tick of the one before, and pretending otherwise would drop
+        # one observation per bar and bias the count toward zero.
+        if previous_mid is not None:
+            if mid > previous_mid:
+                up += 1
+            elif mid < previous_mid:
+                down += 1
+        previous_mid = mid
+
+    if bucket_ts is not None:
+        flush()
+    return bars, spreads, flows
+
+
+def save_flow(bars: Sequence[Bar], flows: Sequence[Flow], path: Path) -> Path:
+    if len(bars) != len(flows):
+        raise DataError(f"{len(bars)} bars but {len(flows)} flow records")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["ts,ticks,upticks,downticks"]
+    lines.extend(
+        f"{bar.ts.isoformat()},{flow.ticks},{flow.upticks},{flow.downticks}"
+        for bar, flow in zip(bars, flows, strict=True)
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def load_flow(path: Path) -> dict[datetime, Flow]:
+    if not path.exists():
+        raise DataError(f"flow series not found: {path}")
+    out: dict[datetime, Flow] = {}
+    for line in path.read_text(encoding="utf-8").splitlines()[1:]:
+        if not line:
+            continue
+        ts, ticks, up, down = line.split(",")
+        out[datetime.fromisoformat(ts)] = Flow(
+            ticks=int(ticks), upticks=int(up), downticks=int(down)
+        )
+    return out

@@ -25,10 +25,11 @@ from pathlib import Path
 from algo.core.bar import Timeframe
 from algo.data.dukascopy import (
     SpreadReservoir,
-    bars_with_spread,
+    bars_with_microstructure,
     hour_files,
     iter_ticks,
     regrid_bars,
+    save_flow,
     save_spread_series,
 )
 from algo.data.mt5_spread import save_profile
@@ -66,7 +67,7 @@ def main() -> None:
             reservoir.add(tick)
             yield tick
 
-    m5, m5_spreads = bars_with_spread(stream(), M5)
+    m5, m5_spreads, m5_flow = bars_with_microstructure(stream(), M5)
 
     if not m5:
         raise SystemExit("the archive decoded to no bars at all")
@@ -85,6 +86,7 @@ def main() -> None:
     write_parquet_bars(h1, args.out / "h1.parquet")
     save_profile(profile, args.out / "spread.json")
     save_spread_series(m5, m5_spreads, args.out / "m5_spread.csv")
+    save_flow(m5, m5_flow, args.out / "m5_flow.csv")
 
     print()
     print(f"M5   {len(m5):,} bars  {m5[0].ts} .. {m5[-1].ts}")
@@ -98,6 +100,12 @@ def main() -> None:
     print(
         f"per-bar spread  median {ordered[len(ordered) // 2]}  "
         f"p10 {ordered[len(ordered) // 10]}  p90 {ordered[len(ordered) * 9 // 10]}"
+    )
+    moved = sum(f.upticks + f.downticks for f in m5_flow)
+    print(
+        f"tick flow       {moved:,} of {reservoir.ticks:,} ticks moved the mid "
+        f"({moved / reservoir.ticks:.1%}); median "
+        f"{sorted(f.ticks for f in m5_flow)[len(m5_flow) // 2]} ticks a bar"
     )
     print(f"written to {args.out}")
 
