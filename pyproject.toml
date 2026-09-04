@@ -160,3 +160,4 @@ ignore = [
 # there is no engine here to keep clean, and routing a chat reply through a
 # structlog line would make it unreadable.
 "scripts/ask_nemotron.py" = ["T201"]
+"scripts/measure_stop_trail_matrix_xauusd.py" = ["T201"]
