@@ -3294,3 +3294,57 @@ a losing signal wins more often and loses more.
 | 5 | Backtest evaluates stops at bar granularity and is therefore optimistic vs live | Q15 |
 | 6 | Mandatory pre-expiry exit overrides any strategy intent | D-016, Q4 |
 | 7 | Build order changed — M1.5 inserted before M2 | D-019 |
+
+### D-144 - Gold Sniping ignores the chart timeframe entirely, and its 88% win rate is a martingale
+
+You asked to test the Market EA `Gold Sniping` over two months on M1, M5, M15,
+M30 and H1. All five ran: XAUUSD, 2026.07.01-08.31, every tick based on real
+ticks, $10,000 deposit, five separately written reports.
+
+**Every timeframe returned the identical result, to the cent.**
+
+| TF | trades | net | PF | win rate | balance DD | equity DD |
+|---|---|---|---|---|---|---|
+| M1  | 4,424 | +$3,457.59 | 1.07 | 87.73% | 29.11% | 43.34% |
+| M5  | 4,424 | +$3,457.59 | 1.07 | 87.73% | 29.11% | 43.34% |
+| M15 | 4,424 | +$3,457.59 | 1.07 | 87.73% | 29.11% | 43.34% |
+| M30 | 4,424 | +$3,457.59 | 1.07 | 87.73% | 29.11% | 43.34% |
+| H1  | 4,424 | +$3,457.59 | 1.07 | 87.73% | 29.11% | 43.34% |
+
+Not a caching artefact: each report was deleted before its run, each was written
+at a distinct time, and the tester journal shows five separate `automatic
+testing started` lines. **The EA never reads the chart period.** It is driven by
+price and tick events. There is no timeframe to optimise, and any claim of a
+recommended timeframe for it is empty. This is the same class of finding as
+D-141, where two gold EAs ignored the chart *symbol*.
+
+**The win rate is structural, not skill.** From the tester log: baskets close on
+about $1.00 of profit and reopen with `Rest period = 0 minutes`, and lot size
+escalates on adverse moves (0.01 -> 0.02 -> ...). The statistics agree:
+
+- 87.73% of trades win, yet PF is only **1.07** - gross profit $54,891 against
+  gross loss $51,434. The 12% of losers give back nearly everything.
+- Largest win **+$506** vs largest loss **-$734**.
+- Max consecutive losses: **7, costing -$4,088** - 41% of the account in one run.
+- Equity DD (43.34%) exceeds balance DD (29.11%), the martingale signature: it
+  carries unrealised losses rather than taking them.
+
++34.6% in two months, at a 43% equity drawdown, with the drawdown bounded only
+by the worst gold trend that happened to fall inside the window. For a
+martingale the entire risk lives in the tail, and **a two-month sample cannot
+contain it.** These numbers describe a survivor, not an edge.
+
+**Two limits on the measurement itself.** This broker retains only ~5 days of
+real XAUUSD ticks, so despite `Model=4` most of the window is ticks synthesised
+from M1 bars - which flatters basket EAs specifically, by understating the
+intrabar spikes that break baskets. The report does not say so. And two months
+is too short a window to locate the failure point of a martingale.
+
+**Why the first attempt reported "no report" on three timeframes.** The tester
+log directory had grown to **10.2 GB**, throttling each run past the 420 s cap.
+I labelled that failure "licence?" in the moment - a guess, and wrong. Cleared
+the logs, raised the cap, and every run completed in 6.4-6.8 minutes. Same
+lesson as D-140: a run that dies for an environmental reason and a run with
+nothing to report look identical from the outside unless the cause is read
+rather than assumed. The re-run script now captures the tester log tail on
+failure so there is something to read.
