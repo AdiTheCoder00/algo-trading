@@ -48,6 +48,12 @@ DEFAULT_CACHE = Path("state/mt5_server_offset.json")
 #: measured against are listed - an unlisted interval is refused rather than
 #: guessed at.
 TIMEFRAME_CONSTANTS: dict[int, str] = {
+    # M1 is listed since the Asia value-area study, which builds a 15-minute
+    # volume profile and therefore cannot be served by any coarser interval:
+    # three M5 bars is not a distribution. Verified against the terminal the
+    # same way as the rest - `copy_rates_range` returns M1 back to 2026-05-26
+    # on this broker, and nothing earlier.
+    1: "TIMEFRAME_M1",
     5: "TIMEFRAME_M5",
     15: "TIMEFRAME_M15",
     30: "TIMEFRAME_M30",
@@ -180,6 +186,17 @@ def fetch_history(
             "history for this symbol."
         )
 
+    return _to_bars(raw, timeframe=timeframe, offset=offset)
+
+
+def _to_bars(raw: Any, *, timeframe: Timeframe, offset: timedelta) -> list[Bar]:
+    """MT5's structured array into `Bar`s, stamped in UTC, oldest first.
+
+    Shared by both fetchers so the two ways of asking the terminal for history
+    cannot disagree about what a bar is - `volume` is tick volume, which is the
+    only volume a CFD feed has, and the timestamp is shifted out of server time
+    exactly once.
+    """
     bars = [
         Bar(
             ts=datetime.fromtimestamp(int(row["time"]), UTC) - offset,
@@ -194,3 +211,61 @@ def fetch_history(
     ]
     bars.sort(key=lambda b: b.ts)
     return bars
+
+
+def fetch_history_range(
+    terminal: Mt5Terminal,
+    *,
+    symbol: str,
+    timeframe: Timeframe,
+    start: datetime,
+    end: datetime,
+    offset: timedelta,
+) -> list[Bar]:
+    """Closed bars between two **UTC** instants, oldest first.
+
+    `fetch_history` counts backwards from the newest bar, which the terminal
+    caps at its "max bars in chart" setting - 50,000 here, about seven weeks of
+    M1. The server holds more than that, and a study that silently measured
+    seven weeks when fourteen were available would be answering a different
+    question than the one asked. `copy_rates_range` reaches the rest.
+
+    The range is inclusive of both ends in MT5, and the caller passes UTC while
+    the terminal thinks in server time, so the bounds are shifted by `offset`
+    on the way in and the timestamps shifted back on the way out.
+
+    Long spans come back as `None` rather than as an error, so the caller is
+    expected to walk the history in chunks; `end` is not clamped here, but the
+    still-forming bar is dropped, matching `fetch_history`'s start_pos=1 rule.
+    """
+    constant = TIMEFRAME_CONSTANTS.get(timeframe.minutes)
+    if constant is None:
+        raise DataError(
+            f"MT5 has no {timeframe.minutes}-minute timeframe; available: "
+            f"{sorted(TIMEFRAME_CONSTANTS)}"
+        )
+    resolved = getattr(terminal, constant, None)
+    if resolved is None:
+        raise DataError(f"the MT5 module exposes no {constant}")
+    copy_range = getattr(terminal, "copy_rates_range", None)
+    if copy_range is None:
+        raise DataError(
+            "this terminal exposes no copy_rates_range; only the real "
+            "MetaTrader5 module and a fake that implements it can serve a "
+            "dated range"
+        )
+    if end <= start:
+        raise DataError(f"end {end} must be after start {start}")
+
+    raw = copy_range(symbol, resolved, start + offset, end + offset)
+    if raw is None or len(raw) == 0:
+        return []
+
+    bars = _to_bars(raw, timeframe=timeframe, offset=offset)
+    # MT5 stamps a bar with its **open** instant (this module and `Mt5BarFeed`
+    # both carry that through unchanged), so the bar still forming is the one
+    # whose open is within one interval of now. Dropping it is the same rule
+    # `fetch_history` gets from start_pos=1.
+    duration = timedelta(minutes=timeframe.minutes)
+    newest_closed = datetime.now(UTC) - duration
+    return [b for b in bars if b.ts <= newest_closed]
