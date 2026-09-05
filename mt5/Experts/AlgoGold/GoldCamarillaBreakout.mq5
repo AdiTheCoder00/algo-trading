@@ -1725,17 +1725,6 @@ void PaintDashboard(void)
 
    int r = 0;
 
-//--- P&L FIRST. The previous layout put it last, past a DASH_MAX_ROWS ceiling
-//--- that silently dropped it - so the one number most often wanted was the one
-//--- the panel never showed. It leads now.
-   g_dash.SetSection(r++,"-- P&L --");
-   g_dash.Set(r++,"NET TODAY",StringFormat("%+.2f",net),(net>=0?cOk:cBad));
-   g_dash.Set(r++,"  floating",StringFormat("%+.2f",floating),
-              (floating>=0?cOk:cBad));
-   g_dash.Set(r++,"  realised",StringFormat("%+.2f",today),(today>=0?cOk:cBad));
-   g_dash.Set(r++,"7 DAYS",StringFormat("%+.2f",week),(week>=0?cOk:cBad));
-   g_dash.Set(r++,"EQUITY",StringFormat("%.2f",AccountInfoDouble(ACCOUNT_EQUITY)),cWhite);
-
    g_dash.SetSection(r++,"-- POSITION --");
    if(pos.exists)
      {
@@ -1840,6 +1829,20 @@ void PaintDashboard(void)
               StringFormat("%s  %s",_Symbol,StringSubstr(EnumToString(g_tf),7)),cWhite);
    g_dash.Set(r++,"SPREAD",
               StringFormat("%d pts",(int)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD)),cDim);
+
+//--- P&L LAST, by request. It is the block the eye goes to, and putting it at
+//--- the foot means its position does not shift when a section above grows or
+//--- shrinks - the POSITION block alone changes height depending on whether a
+//--- trade is open. A number that moves around is a number that gets misread.
+   g_dash.SetSection(r++,"-- P&L --");
+   //--- The one number the panel is asked for first, so it is the one row that
+   //--- is larger and bold. Green above zero, red at or below it.
+   g_dash.SetBig(r++,"NET TODAY",StringFormat("%+.2f",net),(net>=0?cOk:cBad));
+   g_dash.Set(r++,"  floating",StringFormat("%+.2f",floating),
+              (floating>=0?cOk:cBad));
+   g_dash.Set(r++,"  realised",StringFormat("%+.2f",today),(today>=0?cOk:cBad));
+   g_dash.Set(r++,"7 DAYS",StringFormat("%+.2f",week),(week>=0?cOk:cBad));
+   g_dash.Set(r++,"EQUITY",StringFormat("%.2f",AccountInfoDouble(ACCOUNT_EQUITY)),cWhite);
 
    ChartRedraw(0);
   }

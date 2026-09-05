@@ -55,16 +55,22 @@ private:
    int               m_rows;
    int               m_valueDx;   // label-to-value column gap
    string            m_font;
+   //--- OBJ_LABEL has no bold flag; weight comes from the font NAME.
+   string            m_fontBold;
 
    string            Name(const string part) const { return m_prefix+part; }
    void              MakeLabel(const string part,const int x,const int y,
                                const int size,const color clr,const string text);
+   void              MakeLabelFont(const string part,const int x,const int y,
+                                   const int size,const color clr,const string text,
+                                   const string font);
    void              EnsureBackdrop(void);
 
 public:
                      CGoldDashboard(void): m_prefix(""),m_active(false),m_x(12),m_y(18),
                                            m_rowH(16),m_width(250),m_rows(0),m_valueDx(118),
-                                           m_font("Consolas") {}
+                                           m_font("Consolas"),
+                                           m_fontBold("Consolas Bold") {}
 
    bool              Create(const string prefix,const string title,const int x=12,const int y=18,
                             const int width=250);
@@ -74,6 +80,11 @@ public:
    void              Set(const int row,const string label,const string value,const color clr=clrWhite);
    //--- A group caption. Same row budget as any other row; no value column.
    void              SetSection(const int row,const string caption);
+   //--- Same row, but the VALUE is two sizes larger and bold. For the one
+   //--- number a person looks for first; everything else stays uniform so
+   //--- that emphasis keeps meaning something.
+   void              SetBig(const int row,const string label,const string value,
+                            const color clr=clrWhite);
    void              SetTitle(const string title);
    //--- Recreate anything the user deleted by hand. Call once per repaint.
    void              Refresh(const string title);
@@ -153,6 +164,16 @@ void CGoldDashboard::Refresh(const string title)
 void CGoldDashboard::MakeLabel(const string part,const int x,const int y,
                                const int size,const color clr,const string text)
   {
+   MakeLabelFont(part,x,y,size,clr,text,m_font);
+  }
+
+//+------------------------------------------------------------------+
+//| The same, with the font named explicitly.                        |
+//+------------------------------------------------------------------+
+void CGoldDashboard::MakeLabelFont(const string part,const int x,const int y,
+                                   const int size,const color clr,const string text,
+                                   const string font)
+  {
    const string n = Name(part);
    if(ObjectFind(0,n)<0)
       ObjectCreate(0,n,OBJ_LABEL,0,0,0);
@@ -163,7 +184,7 @@ void CGoldDashboard::MakeLabel(const string part,const int x,const int y,
    ObjectSetInteger(0,n,OBJPROP_COLOR,clr);
    ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
    ObjectSetInteger(0,n,OBJPROP_HIDDEN,true);
-   ObjectSetString(0,n,OBJPROP_FONT,m_font);
+   ObjectSetString(0,n,OBJPROP_FONT,font);
    ObjectSetString(0,n,OBJPROP_TEXT,text);
   }
 
@@ -212,6 +233,25 @@ void CGoldDashboard::SetSection(const int row,const string caption)
    const int y = m_y + m_rowH*(row+2);
    MakeLabel("L"+IntegerToString(row),m_x,           y,8,C'90,150,200',caption);
    MakeLabel("V"+IntegerToString(row),m_x+m_valueDx, y,8,C'90,150,200',"");
+   if(row+1>m_rows)
+      m_rows = row+1;
+  }
+
+//+------------------------------------------------------------------+
+//| A row whose value is emphasised: two sizes up, and bold.         |
+//|                                                                  |
+//| The value sits two pixels higher than a normal row so the larger  |
+//| glyphs stay centred on the same baseline rather than drifting     |
+//| down into the row beneath.                                        |
+//+------------------------------------------------------------------+
+void CGoldDashboard::SetBig(const int row,const string label,const string value,
+                            const color clr)
+  {
+   if(!m_active || row<0 || row>=DASH_MAX_ROWS)
+      return;
+   const int y = m_y + m_rowH*(row+2);
+   MakeLabel("L"+IntegerToString(row),m_x,y,8,C'130,140,160',label);
+   MakeLabelFont("V"+IntegerToString(row),m_x+m_valueDx,y-2,10,clr,value,m_fontBold);
    if(row+1>m_rows)
       m_rows = row+1;
   }
