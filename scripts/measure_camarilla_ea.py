@@ -114,7 +114,8 @@ def camarilla(prev_high: float, prev_low: float, prev_close: float) -> dict[str,
 
 
 def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BACK,
-        grace_bars: int = GRACE_BARS) -> tuple[Result, dict]:
+        grace_bars: int = GRACE_BARS, grace_minutes: int = GRACE_MINUTES,
+        use_struct: bool = True) -> tuple[Result, dict]:
     mt5.symbol_select(symbol, True)
     info = mt5.symbol_info(symbol)
     m1 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 1, bars)
@@ -163,7 +164,7 @@ def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BA
             closed = False
 
             # 1. structural stop, intrabar, with a gap fill
-            if struct_level > 0:
+            if use_struct and struct_level > 0:
                 if pos.side == BUY and lo[i] <= struct_level:
                     fill = min(struct_level, o[i])
                     pos.exit_i, pos.exit_price, pos.reason = i, fill, "structural stop"
@@ -192,7 +193,7 @@ def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BA
                 elapsed_bars = i - pos.entry_i
                 elapsed_min = (t[i] - t[pos.entry_i]).total_seconds() / 60
                 grace_done = (elapsed_bars >= grace_bars + 1
-                              and elapsed_min >= GRACE_MINUTES)
+                              and elapsed_min >= grace_minutes)
                 colour = 1 if c[i] > o[i] else (-1 if c[i] < o[i] else 0)
                 against = colour == -pos.side
                 if against and not grace_done:
@@ -337,6 +338,9 @@ def main() -> int:
     ap.add_argument("--bars", type=int, default=50000)
     ap.add_argument("--pair", default="1", help="Camarilla pair: 1..4")
     ap.add_argument("--struct-back", type=int, default=STRUCT_BACK)
+    ap.add_argument("--grace-minutes", type=int, default=GRACE_MINUTES)
+    ap.add_argument("--no-struct", action="store_true",
+                    help="Disable the structural stop entirely")
     ap.add_argument("--grace-bars", type=int, default=GRACE_BARS)
     args = ap.parse_args()
 
@@ -345,7 +349,9 @@ def main() -> int:
     try:
         for symbol in args.symbols.split(","):
             res, meta = run(symbol, args.bars, args.pair,
-                            struct_back=args.struct_back, grace_bars=args.grace_bars)
+                            struct_back=args.struct_back, grace_bars=args.grace_bars,
+                            grace_minutes=args.grace_minutes,
+                            use_struct=not args.no_struct)
             report(symbol, res, meta)
     finally:
         mt5.shutdown()

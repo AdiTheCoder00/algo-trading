@@ -717,6 +717,33 @@ input int    InpReentryMaxBars    = 10;    // Forget the re-entry after this man
 //| percentage/ATR stop and the trail produce - whichever level is    |
 //| TIGHTER wins. With all of those at zero it is simply the stop.    |
 //|                                                                  |
+//| ====================================================================
+//| IT IS OFF BY DEFAULT, AND THE MEASUREMENT SAYS THAT COSTS MONEY
+//| ====================================================================
+//| The shipped configuration exits on the opposite-colour candle     |
+//| alone, from the sixth candle. That was chosen deliberately after  |
+//| this level was measured taking four trades in five and losing     |
+//| about 88% of them. Turning it off does NOT improve the result,    |
+//| and the reason is worth stating so the trade-off is a choice      |
+//| rather than a surprise.                                           |
+//|                                                                  |
+//| Measured on 50,000 M1 bars per symbol, net:                       |
+//|                                                                  |
+//|   symbol        with this level    without it                    |
+//|   XAUUSD             -848.51        -1158.93                     |
+//|   FixedVol100        -245.70         -336.21                     |
+//|   BTCUSD            -1179.81        -2049.00                     |
+//|                                                                  |
+//| Removing it does not remove the stop; it hands the job to the     |
+//| opposite-side Donchian flatten, which fires only once price has   |
+//| made a fresh lookback-bar move AGAINST the position. That exit    |
+//| took 9.4% of trades with a 0.0% win rate and a mean of -4.00 on   |
+//| XAUUSD, against -1.59 for this level. A later stop is a worse     |
+//| stop, and trade count roughly doubles, so spread doubles with it. |
+//|                                                                  |
+//| Set InpStructStopEnabled true to put it back. Reproduce both      |
+//| columns with scripts/measure_camarilla_ea.py.                     |
+//|                                                                  |
 //| NO PYTHON COUNTERPART.                                            |
 //+------------------------------------------------------------------+
 enum ENUM_STRUCT_STOP_MODE
@@ -746,7 +773,10 @@ enum ENUM_STRUCT_STOP_MODE
 //| ====================================================================
 //| "Wait five minutes" and "check from the sixth candle" are the     |
 //| same instruction on an M1 chart and different ones everywhere     |
-//| else - on M5, five bars is twenty-five minutes. Rather than pick  |
+//| else - on M5, five bars is twenty-five minutes. THE MINUTE GATE   |
+//| IS OFF BY DEFAULT: the rule is "from the sixth candle", and a     |
+//| candle count says that on every timeframe while a minute count    |
+//| only says it on M1. Rather than pick                             |
 //| one and be wrong on the other, both are inputs and BOTH must have |
 //| elapsed. On M1 they coincide exactly; on anything slower the bar  |
 //| count dominates, which is the conservative reading. Set either to |
@@ -771,10 +801,10 @@ enum ENUM_STRUCT_STOP_MODE
 //+------------------------------------------------------------------+
 input group "--- Entry grace (no Python counterpart) ---"
 input int  InpEntryGraceBars    = 5;   // Candles after the POSITIONAL candle to skip. 0 = off
-input int  InpEntryGraceMinutes = 5;   // Minutes after the fill to skip. 0 = off
+input int  InpEntryGraceMinutes = 0;   // Minutes after the fill to skip. 0 = off (default)
 
 input group "--- Structural stop: candle low/high (no Python counterpart) ---"
-input bool InpStructStopEnabled = true;               // Stop at a recent candle's low (buy) / high (sell)
+input bool InpStructStopEnabled = false;              // Candle-two-back level. OFF - the exit is the opposite-colour candle
 input int  InpStructStopBack    = 2;                  // Candles before the last CLOSED one. 2 = "two candles before"
 input bool InpStructStopRatchet = true;               // Only ever tighten the level, never widen it
 input ENUM_STRUCT_STOP_MODE InpStructStopMode = STRUCT_STOP_BROKER; // How it fires
