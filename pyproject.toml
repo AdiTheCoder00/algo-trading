@@ -187,3 +187,6 @@ ignore = [
 # plus its random-block controls, written to stdout for a human to read. Nothing
 # imports it.
 "scripts/measure_camarilla_filter.py" = ["T201"]
+# And the AMA/DEMA orientation check, which is the evidence behind a bug fix:
+# a table written to stdout for a human, imported by nothing.
+"scripts/measure_ama_dema_orientation.py" = ["T201"]

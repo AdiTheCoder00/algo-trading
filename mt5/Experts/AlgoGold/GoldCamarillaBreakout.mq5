@@ -546,24 +546,49 @@ input double              InpCamBufferPct = 0.0;                    // Break mus
 //+------------------------------------------------------------------+
 //| TREND CONFIRMATION - an adaptive MA against a double EMA.         |
 //|                                                                  |
-//| A second gate on top of the Camarilla one. A BUY needs AMA above  |
-//| DEMA, a SELL needs AMA below it, so a breakout past H1 that the   |
+//| A second gate on top of the Camarilla one. A BUY needs DEMA above |
+//| AMA, a SELL needs DEMA below it, so a breakout past H1 that the   |
 //| two averages disagree with is refused. Both are read on the last  |
 //| CLOSED bar for the same reason everything else here is: bar zero's|
 //| values still move.                                                |
 //|                                                                  |
 //| ====================================================================
-//| WHY THESE TWO AGAINST EACH OTHER
+//| DEMA ABOVE AMA IS THE UPTREND. THIS WAS SHIPPED INVERTED ONCE.
 //| ====================================================================
-//| AMA (Kaufman) varies its own smoothing with the efficiency ratio: |
-//| it tracks price closely when a move is directional and flattens   |
-//| when it is not. DEMA removes most of a conventional EMA's lag at  |
-//| a fixed period. Crossing one against the other is therefore a     |
-//| comparison of "where price is going when it is actually going     |
-//| somewhere" against "where it has been, with the lag taken out" -  |
-//| the AMA leads in a trend and falls behind in chop, which is what  |
-//| makes the sign of the difference informative rather than just a   |
-//| slower copy of price.                                             |
+//| The first version of this gate required AMA above DEMA to buy, on |
+//| the reasoning that Kaufman's AMA speeds up in a directional move  |
+//| and should therefore lead. That reasoning is wrong, and it was    |
+//| wrong in the direction that matters: the expert permitted longs   |
+//| in downtrends and shorts in uptrends for as long as it stood.     |
+//|                                                                  |
+//| Measured on H1 closes, 8,246 bars of FixedVol100 and 20,000 each  |
+//| of BTCUSD and XAUUSD, taking "uptrend" to mean simply that close  |
+//| is above the close twenty bars earlier:                           |
+//|                                                                  |
+//|   symbol         UPTREND bars          DOWNTREND bars            |
+//|                DEMA>AMA  AMA>DEMA    DEMA>AMA  AMA>DEMA          |
+//|   FixedVol100     82.5%     17.5%       20.1%     79.9%          |
+//|   BTCUSD          79.8%     20.2%       22.7%     77.3%          |
+//|   XAUUSD          83.2%     16.8%       22.8%     77.2%          |
+//|                                                                  |
+//| Four times out of five, in every symbol and both directions.      |
+//| Reproduce it with scripts/measure_ama_dema_orientation.py.        |
+//|                                                                  |
+//| The mechanism, stated so the error is not repeated: DEMA removes  |
+//| most of a conventional EMA's lag, and at period 14 it sits very   |
+//| close to price. AMA only reaches its fast constant when the       |
+//| efficiency ratio approaches 1, which over a 9-bar window is rare; |
+//| the rest of the time it decays toward the SLOW leg, which at 30   |
+//| is far behind. So DEMA is the faster line here in almost every    |
+//| regime, and the faster line is the one that sits above in a rise. |
+//| "Adaptive" does not mean "fast".                                  |
+//|                                                                  |
+//| Note that forward-return tests were NOT what settled this, and    |
+//| were nearly used to. Mean forward returns after each state differ |
+//| by single-digit basis points and point in different directions on |
+//| different symbols and horizons - noise. The claim being tested is |
+//| about what the two lines MEAN concurrently, and the concurrent    |
+//| measurement above is unambiguous.                                 |
 //|                                                                  |
 //| ====================================================================
 //| IT FAILS CLOSED, UNLIKE THE CAMARILLA FILTER
@@ -573,7 +598,7 @@ input double              InpCamBufferPct = 0.0;                    // Break mus
 //| letting it through. The two gates differ deliberately: the        |
 //| Camarilla filter is a PROHIBITION ("not inside this zone") and an |
 //| unreadable prohibition should not halt trading for a session,     |
-//| while this is a REQUIREMENT ("AMA above DEMA") and a requirement  |
+//| while this is a REQUIREMENT ("DEMA above AMA") and a requirement  |
 //| that cannot be evaluated has not been met. It only ever blocks    |
 //| entries, so the failure mode is no new trades, never an unmanaged |
 //| position - and it clears itself within a few bars.                |
@@ -581,7 +606,7 @@ input double              InpCamBufferPct = 0.0;                    // Break mus
 //| NO PYTHON COUNTERPART.                                            |
 //+------------------------------------------------------------------+
 input group "--- Trend confirmation: AMA vs DEMA (no Python counterpart) ---"
-input bool   InpTrendEnabled    = true;    // Require AMA above DEMA to buy, below to sell
+input bool   InpTrendEnabled    = true;    // Require DEMA above AMA to buy, below to sell
 //--- MT5's own Adaptive Moving Average defaults are period 9, fast 2, slow 30.
 //--- Only the fast leg differs here, at 4: a slower fast leg makes the adaptive
 //--- step less jumpy in the efficient case, so the AMA crosses the DEMA a
@@ -1348,14 +1373,18 @@ int OnInit()
      {
       const int tDigits = (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
       double ama=0.0, dema=0.0;
-      PrintFormat("trend filter ON: AMA(%d, fast %d, slow %d) vs DEMA(%d) on %s",
-                  InpAmaPeriod,InpAmaFast,InpAmaSlow,InpDemaPeriod,
+      //--- DEMA named first throughout, because DEMA-above-AMA is the buy
+      //--- condition and reading it in that order is how the sign stays
+      //--- straight. MQL5's PrintFormat has no positional arguments, so the
+      //--- argument list is reordered rather than the format string.
+      PrintFormat("trend filter ON: DEMA(%d) vs AMA(%d, fast %d, slow %d) on %s",
+                  InpDemaPeriod,InpAmaPeriod,InpAmaFast,InpAmaSlow,
                   StringSubstr(EnumToString(
                      InpTrendTimeframe==PERIOD_CURRENT ? g_tf : InpTrendTimeframe),7));
       if(TrendValues(ama,dema))
-         PrintFormat("  AMA %.*f, DEMA %.*f -> %s permitted right now",
-                     tDigits,ama,tDigits,dema,
-                     (ama>dema ? "BUY only" : "SELL only"));
+         PrintFormat("  DEMA %.*f, AMA %.*f -> %s permitted right now",
+                     tDigits,dema,tDigits,ama,
+                     (dema>ama ? "BUY only" : "SELL only"));
       else
          Print("  not readable yet - entries are REFUSED until the buffers fill. "
                "This is deliberate: an unmet requirement is not a passed one.");
@@ -1631,11 +1660,12 @@ void PaintDashboard(void)
          g_dash.Set(r++,"AMA/DEMA","warming up",cHot);
       else
         {
-         g_dash.Set(r++,"AMA/DEMA",
-                    StringFormat("%.*f / %.*f  (%+.*f)",digits,ama,digits,dema,
-                                 digits,ama-dema),cDim);
-         g_dash.Set(r++,"TREND",(ama>dema?"UP - longs only":"DOWN - shorts only"),
-                    (ama>dema?cOk:cBad));
+         //--- DEMA first, because DEMA-minus-AMA is the sign that decides.
+         g_dash.Set(r++,"DEMA/AMA",
+                    StringFormat("%.*f / %.*f  (%+.*f)",digits,dema,digits,ama,
+                                 digits,dema-ama),cDim);
+         g_dash.Set(r++,"TREND",(dema>ama?"UP - longs only":"DOWN - shorts only"),
+                    (dema>ama?cOk:cBad));
         }
      }
 
@@ -2064,16 +2094,16 @@ bool TrendBlocks(const ENUM_POSITION_TYPE side,string &why)
    const int digits=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
    if(side==POSITION_TYPE_BUY)
      {
-      if(ama>dema)
+      if(dema>ama)
          return false;
-      why=StringFormat("a BUY needs AMA above DEMA, but AMA %.*f <= DEMA %.*f",
-                       digits,ama,digits,dema);
+      why=StringFormat("a BUY needs DEMA above AMA, but DEMA %.*f <= AMA %.*f",
+                       digits,dema,digits,ama);
       return true;
      }
-   if(ama<dema)
+   if(dema<ama)
       return false;
-   why=StringFormat("a SELL needs AMA below DEMA, but AMA %.*f >= DEMA %.*f",
-                    digits,ama,digits,dema);
+   why=StringFormat("a SELL needs DEMA below AMA, but DEMA %.*f >= AMA %.*f",
+                    digits,dema,digits,ama);
    return true;
   }
 
