@@ -119,6 +119,30 @@
 //| Inputs. Every default is the Python default for the same name.   |
 //+------------------------------------------------------------------+
 input group "--- Signal (algo/strategy/trendline_breakout.py) ---"
+//--- THE DONCHIAN CHANNEL IS OFF BY DEFAULT.
+//---
+//--- With it on, a fresh lookback-bar break is the TRIGGER: entry is an event,
+//--- and it also supplies an exit (the opposite-side break flattens). With it
+//--- off both of those go, and what remains - the Camarilla gate and the trend
+//--- gate - are STATES rather than events. They can be true on every bar, so
+//--- something has to decide when a standing state becomes an entry. That is
+//--- InpEntryNeedsColour: the just-closed candle must close in the direction
+//--- being taken, which is the same test the exit uses in reverse.
+//---
+//--- The gate then picks the SIDE, which it can do unambiguously: price cannot
+//--- be above H1 and below L1 at the same time.
+//---
+//--- MEASURED, REMOVING IT COSTS MONEY. Net over 50,000 M1 bars, XAUUSD:
+//---   Donchian on, level stop on    -848    1442 trades,  476 spread
+//---   Donchian on, level stop off  -1159    2562 trades,  845 spread
+//---   Donchian OFF (this default)  -1266    2884 trades,  952 spread
+//---   Donchian OFF, no colour      -1412    3238 trades, 1069 spread
+//--- The pattern is the same on FixedVol100 and BTCUSD. Each mechanism removed
+//--- raises the trade count, and spread rises with it; gross stays negative
+//--- throughout, so none of these settings has an edge to protect either way.
+//--- Set InpUseDonchian true to put the trigger and the break-exit back.
+input bool   InpUseDonchian       = false;   // Donchian break as trigger AND opposite-break exit
+input bool   InpEntryNeedsColour  = true;    // With Donchian off: entry candle must close in the trade's direction
 input int    InpLookback          = 20;      // Channel length, bars. Minimum 2
 
 //+------------------------------------------------------------------+
@@ -2540,7 +2564,8 @@ void OnClosedBar()
 
 //--- 3. Warmup.
    double channelHigh = 0.0, channelLow = 0.0;
-   if(!ChannelFromPriorBars(channelHigh,channelLow))
+   const bool haveChannel = ChannelFromPriorBars(channelHigh,channelLow);
+   if(!haveChannel && InpUseDonchian)
      {
       PrintFormat("no entry: not enough closed bars for a %d-bar channel",InpLookback);
       return;
@@ -2549,14 +2574,17 @@ void OnClosedBar()
    g_chanHigh = channelHigh;
    g_chanLow  = channelLow;
 
-   const bool brokeUp   = (close>channelHigh);
-   const bool brokeDown = (close<channelLow);
+   const bool brokeUp   = (InpUseDonchian && haveChannel && close>channelHigh);
+   const bool brokeDown = (InpUseDonchian && haveChannel && close<channelLow);
 
 //--- 4. Held: a breakout is its own exit signal for the opposite side.
    if(pos.exists)
      {
-      const bool wantsClose = (pos.side==POSITION_TYPE_BUY  && brokeDown) ||
-                              (pos.side==POSITION_TYPE_SELL && brokeUp);
+      //--- Only when the channel IS the signal. With InpUseDonchian off there is
+      //--- no break to reverse on, and the colour rule is the whole exit.
+      const bool wantsClose = InpUseDonchian &&
+                              ((pos.side==POSITION_TYPE_BUY  && brokeDown) ||
+                               (pos.side==POSITION_TYPE_SELL && brokeUp));
       if(!wantsClose)
          return;
 
@@ -2618,6 +2646,41 @@ void OnClosedBar()
          wantReason = StringFormat("re-entry after a candle exit: this bar closed %s "
                                    "again (%.2f -> %.2f), %d bar(s) of allowance left",
                                    (colour>0?"up":"down"),barOpen,close,g_reentryLeft);
+        }
+     }
+
+//--- No Donchian: the Camarilla pair picks the side - price cannot be above the
+//--- upper level and below the lower one at once - and the candle colour is
+//--- what turns a standing state into an entry. CamarillaBlocks re-checks the
+//--- level below against the real fill price; this is only the side choice.
+   if(!InpUseDonchian && wantSide<0 && CamarillaRefresh(TimeCurrent()))
+     {
+      const double camUp = CamLevel(CamPairName(true))*(1.0+InpCamBufferPct/100.0);
+      const double camDn = CamLevel(CamPairName(false))*(1.0-InpCamBufferPct/100.0);
+      int candidate = -1;
+      if(camUp>0.0 && close>camUp)
+         candidate = (int)POSITION_TYPE_BUY;
+      else if(camDn>0.0 && close<camDn)
+         candidate = (int)POSITION_TYPE_SELL;
+
+      if(candidate>=0)
+        {
+         const int colour = BarColour(barOpen,close);
+         const bool agrees = (candidate==(int)POSITION_TYPE_BUY  && colour>0) ||
+                             (candidate==(int)POSITION_TYPE_SELL && colour<0);
+         if(!InpEntryNeedsColour || agrees)
+           {
+            wantSide   = candidate;
+            wantReason = StringFormat("camarilla state: close %.2f %s %s %.2f%s",
+                                      close,
+                                      (candidate==(int)POSITION_TYPE_BUY?"above":"below"),
+                                      CamPairName(candidate==(int)POSITION_TYPE_BUY),
+                                      (candidate==(int)POSITION_TYPE_BUY?camUp:camDn),
+                                      (InpEntryNeedsColour
+                                       ? StringFormat(", candle closed %s",
+                                                      (colour>0?"up":"down"))
+                                       : ""));
+           }
         }
      }
 

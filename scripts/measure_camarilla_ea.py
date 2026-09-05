@@ -115,7 +115,8 @@ def camarilla(prev_high: float, prev_low: float, prev_close: float) -> dict[str,
 
 def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BACK,
         grace_bars: int = GRACE_BARS, grace_minutes: int = GRACE_MINUTES,
-        use_struct: bool = True) -> tuple[Result, dict]:
+        use_struct: bool = True, use_donchian: bool = True,
+        entry_needs_colour: bool = True) -> tuple[Result, dict]:
     mt5.symbol_select(symbol, True)
     info = mt5.symbol_info(symbol)
     m1 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 1, bars)
@@ -203,7 +204,7 @@ def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BA
                     closed = True
 
             # 4. opposite Donchian break
-            if not closed:
+            if not closed and use_donchian:
                 ch = max(h[i - LOOKBACK:i])
                 cl = min(lo[i - LOOKBACK:i])
                 if (pos.side == BUY and c[i] < cl) or (pos.side == SELL and c[i] > ch):
@@ -239,17 +240,28 @@ def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BA
             if reentry_left <= 0:
                 reentry_side = 0
 
-        ch = max(h[i - LOOKBACK:i])
-        cl = min(lo[i - LOOKBACK:i])
         want = 0
-        if c[i] > ch:
-            want = BUY
-        elif c[i] < cl:
-            want = SELL
-        elif reentry_side:
-            colour = 1 if c[i] > o[i] else (-1 if c[i] < o[i] else 0)
-            if colour == reentry_side:
+        colour = 1 if c[i] > o[i] else (-1 if c[i] < o[i] else 0)
+        if use_donchian:
+            ch = max(h[i - LOOKBACK:i])
+            cl = min(lo[i - LOOKBACK:i])
+            if c[i] > ch:
+                want = BUY
+            elif c[i] < cl:
+                want = SELL
+            elif reentry_side and colour == reentry_side:
                 want = reentry_side
+        else:
+            # No trigger left, so the gates pick the side: price can only be
+            # above H1 or below L1, never both. The candle colour is what turns
+            # a standing state back into an event.
+            if lv is not None:
+                if c[i] > lv[up_key]:
+                    want = BUY
+                elif c[i] < lv[dn_key]:
+                    want = SELL
+            if want and entry_needs_colour and colour != want:
+                want = 0
         if want == 0:
             continue
 
@@ -341,6 +353,10 @@ def main() -> int:
     ap.add_argument("--grace-minutes", type=int, default=GRACE_MINUTES)
     ap.add_argument("--no-struct", action="store_true",
                     help="Disable the structural stop entirely")
+    ap.add_argument("--no-donchian", action="store_true",
+                    help="Remove the Donchian trigger and the opposite-break exit")
+    ap.add_argument("--no-entry-colour", action="store_true",
+                    help="With --no-donchian, do not require the candle to agree")
     ap.add_argument("--grace-bars", type=int, default=GRACE_BARS)
     args = ap.parse_args()
 
@@ -351,7 +367,9 @@ def main() -> int:
             res, meta = run(symbol, args.bars, args.pair,
                             struct_back=args.struct_back, grace_bars=args.grace_bars,
                             grace_minutes=args.grace_minutes,
-                            use_struct=not args.no_struct)
+                            use_struct=not args.no_struct,
+                            use_donchian=not args.no_donchian,
+                            entry_needs_colour=not args.no_entry_colour)
             report(symbol, res, meta)
     finally:
         mt5.shutdown()
