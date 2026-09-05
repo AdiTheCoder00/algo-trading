@@ -1592,7 +1592,7 @@ int OnInit()
 
    if(InpShowDashboard)
       g_dash.Create("AGCam_",StringFormat("ALGOGOLD CAMARILLA  (%d)",(int)InpMagic),
-                    InpDashX,InpDashY);
+                    InpDashX,InpDashY,330);
 
    g_lastBarTime = iTime(_Symbol,g_tf,0);
    PrintFormat("Donchian(%d) on %s %s | stop %.2f%% | trail %.2f%% from %.2f%% | magic %d",
@@ -1703,130 +1703,17 @@ void PaintDashboard(void)
    const double bid    = SymbolInfoDouble(_Symbol,SYMBOL_BID);
    const GoldPosition pos = g_trader.Snapshot();
 
-   const color cOk = C'120,220,140', cBad = C'240,110,110', cDim = C'150,160,180', cHot = C'255,200,90';
+   const color cOk  = C'120,220,140', cBad = C'240,110,110';
+   const color cDim = C'150,160,180', cHot = C'255,200,90', cWhite = C'225,232,242';
 
-   int r = 0;
-   g_dash.Set(r++,"SYMBOL / TF",
-              StringFormat("%s  %s",_Symbol,StringSubstr(EnumToString(g_tf),7)),clrWhite);
-
-   const bool canTrade = (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)
-                         && (bool)MQLInfoInteger(MQL_TRADE_ALLOWED);
-   g_dash.Set(r++,"STATUS",
-              (canTrade ? (InpAllowNewEntries ? "TRADING" : "MANAGE ONLY") : "ALGO OFF"),
-              (canTrade && InpAllowNewEntries) ? cOk : cHot);
-
-//--- The channel is the signal. Nothing else in MT5 shows it.
-   if(g_chanHigh>0.0)
+//--- Floating P&L across our tickets, and the day's realised, so the two can be
+//--- added into the one number a person actually looks for.
+   double floating = 0.0;
+   for(int i=PositionsTotal()-1; i>=0; i--)
      {
-      g_dash.Set(r++,"CHANNEL HI",StringFormat("%.*f  (%+.*f)",digits,g_chanHigh,
-                                               digits,g_chanHigh-bid),cDim);
-      g_dash.Set(r++,"CHANNEL LO",StringFormat("%.*f  (%+.*f)",digits,g_chanLow,
-                                               digits,g_chanLow-bid),cDim);
-     }
-   else
-      g_dash.Set(r++,"CHANNEL","warming up",cDim);
-
-   g_dash.Set(r++,"SPREAD",StringFormat("%d pts",(int)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD)),cDim);
-
-//--- Camarilla proximity. The bands are invisible on the chart unless the
-//--- indicator happens to be attached too, and "why did it not enter?" is
-//--- exactly the question this panel exists to answer.
-   if(!InpCamEnabled)
-      g_dash.Set(r++,"CAMARILLA","off",cDim);
-   else if(!CamarillaRefresh(TimeCurrent()))
-      g_dash.Set(r++,"CAMARILLA","no daily bar",cHot);
-   else
-     {
-      const int n = CamarillaNearest(bid);
-      string buyWhy="", sellWhy="";
-      //--- Both sides, because a directional region refuses one and allows the
-      //--- other, and a panel that showed only "BLOCKED" would hide which.
-      const bool noBuy  = CamarillaBlocks(bid,POSITION_TYPE_BUY,buyWhy);
-      const bool noSell = CamarillaBlocks(bid,POSITION_TYPE_SELL,sellWhy);
-      g_dash.Set(r++,"CAMARILLA",
-                 StringFormat("%s %.*f  (%+.*f)",g_camName[n],
-                              digits,g_camLevel[n],digits,g_camLevel[n]-bid),cDim);
-      string zone = "clear";
-      if(noBuy && noSell)
-         zone = "BLOCKED";
-      else if(noBuy)
-         zone = "no LONG";
-      else if(noSell)
-         zone = "no SHORT";
-      g_dash.Set(r++,"CAM ZONE",zone,((noBuy||noSell)?cHot:cOk));
-     }
-
-   if(!InpStructStopEnabled)
-      g_dash.Set(r++,"STRUCT SL","off",cDim);
-   else if(g_structStop>0.0)
-      g_dash.Set(r++,"STRUCT SL",
-                 StringFormat("%.*f  (%+.*f)",digits,g_structStop,
-                              digits,g_structStop-bid),cHot);
-   else
-      g_dash.Set(r++,"STRUCT SL","-",cDim);
-
-   if(!InpCandleExitEnabled)
-      g_dash.Set(r++,"CANDLE EXIT","off",cDim);
-   else if(pos.exists)
-     {
-      string dashGraceWhy="";
-      const bool armed = EntryGraceElapsed(pos,dashGraceWhy);
-      g_dash.Set(r++,"CANDLE EXIT",(armed?"armed":"in grace"),(armed?cOk:cHot));
-     }
-   else if(g_reentrySide>=0)
-      g_dash.Set(r++,"RE-ENTRY",
-                 StringFormat("%s armed, %d bar(s) left",
-                              (g_reentrySide==(int)POSITION_TYPE_BUY?"BUY":"SELL"),
-                              g_reentryLeft),cHot);
-   else
-      g_dash.Set(r++,"RE-ENTRY","-",cDim);
-
-//--- The two averages and, more usefully, which side they currently permit.
-   if(!InpTrendEnabled)
-      g_dash.Set(r++,"AMA/DEMA","off",cDim);
-   else
-     {
-      double ama=0.0, dema=0.0;
-      if(!TrendValues(ama,dema))
-         g_dash.Set(r++,"AMA/DEMA","warming up",cHot);
-      else
-        {
-         //--- DEMA first, because DEMA-minus-AMA is the sign that decides.
-         g_dash.Set(r++,"DEMA/AMA",
-                    StringFormat("%.*f / %.*f  (%+.*f)",digits,dema,digits,ama,
-                                 digits,dema-ama),cDim);
-         g_dash.Set(r++,"TREND",(dema>ama?"UP - longs only":"DOWN - shorts only"),
-                    (dema>ama?cOk:cBad));
-        }
-     }
-
-   if(pos.exists)
-     {
-      double floating = 0.0;
-      for(int i=PositionsTotal()-1; i>=0; i--)
-        {
-         if(PositionGetSymbol(i)!=_Symbol) continue;
-         if(PositionGetInteger(POSITION_MAGIC)!=InpMagic) continue;
-         floating += PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
-        }
-      g_dash.Set(r++,"POSITION",
-                 StringFormat("%s %.2f @ %.*f",(pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),
-                              pos.volume,digits,pos.entry),
-                 (pos.side==POSITION_TYPE_BUY?cOk:cBad));
-      g_dash.Set(r++,"TICKETS",StringFormat("%d",pos.tickets),cDim);
-      g_dash.Set(r++,"FLOATING",StringFormat("%+.2f",floating),(floating>=0?cOk:cBad));
-      //--- Trail and salvage state exist nowhere else in the terminal.
-      const bool armed = TrailIsArmed(g_trail,EffectiveTrailActivationPct(pos.entry));
-      g_dash.Set(r++,"TRAIL",(armed?"ARMED":"not armed"),(armed?cOk:cDim));
-      g_dash.Set(r++,"SALVAGE",(g_salvageMarked?"MARKED":"clean"),(g_salvageMarked?cHot:cDim));
-     }
-   else
-     {
-      g_dash.Set(r++,"POSITION","flat",cDim);
-      g_dash.Set(r++,"TICKETS","0",cDim);
-      g_dash.Set(r++,"FLOATING","0.00",cDim);
-      g_dash.Set(r++,"TRAIL","-",cDim);
-      g_dash.Set(r++,"SALVAGE","-",cDim);
+      if(PositionGetSymbol(i)!=_Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=InpMagic) continue;
+      floating += PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
      }
 
    MqlDateTime t; TimeToStruct(TimeCurrent(),t);
@@ -1834,9 +1721,125 @@ void PaintDashboard(void)
    const datetime dayStart = StructToTime(t);
    const double today = RealisedSince(dayStart);
    const double week  = RealisedSince(dayStart-6*86400);
-   g_dash.Set(r++,"TODAY",StringFormat("%+.2f",today),(today>=0?cOk:cBad));
+   const double net   = today+floating;
+
+   int r = 0;
+
+//--- P&L FIRST. The previous layout put it last, past a DASH_MAX_ROWS ceiling
+//--- that silently dropped it - so the one number most often wanted was the one
+//--- the panel never showed. It leads now.
+   g_dash.SetSection(r++,"-- P&L --");
+   g_dash.Set(r++,"NET TODAY",StringFormat("%+.2f",net),(net>=0?cOk:cBad));
+   g_dash.Set(r++,"  floating",StringFormat("%+.2f",floating),
+              (floating>=0?cOk:cBad));
+   g_dash.Set(r++,"  realised",StringFormat("%+.2f",today),(today>=0?cOk:cBad));
    g_dash.Set(r++,"7 DAYS",StringFormat("%+.2f",week),(week>=0?cOk:cBad));
-   g_dash.Set(r++,"EQUITY",StringFormat("%.2f",AccountInfoDouble(ACCOUNT_EQUITY)),clrWhite);
+   g_dash.Set(r++,"EQUITY",StringFormat("%.2f",AccountInfoDouble(ACCOUNT_EQUITY)),cWhite);
+
+   g_dash.SetSection(r++,"-- POSITION --");
+   if(pos.exists)
+     {
+      g_dash.Set(r++,"SIDE",
+                 StringFormat("%s %.2f @ %.*f",(pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),
+                              pos.volume,digits,pos.entry),
+                 (pos.side==POSITION_TYPE_BUY?cOk:cBad));
+      const double away = (pos.side==POSITION_TYPE_BUY) ? bid-pos.entry : pos.entry-bid;
+      g_dash.Set(r++,"MOVE",StringFormat("%+.*f  (%d tickets)",digits,away,pos.tickets),
+                 (away>=0?cOk:cBad));
+      //--- Whether the colour rule may act yet is the difference between "this
+      //--- will close on the next red bar" and "it cannot for another N bars".
+      string graceWhy="";
+      if(!InpCandleExitEnabled)
+         g_dash.Set(r++,"CANDLE EXIT","off",cDim);
+      else if(EntryGraceElapsed(pos,graceWhy))
+         g_dash.Set(r++,"CANDLE EXIT","ARMED",cOk);
+      else
+         g_dash.Set(r++,"CANDLE EXIT","in grace",cHot);
+      const bool armed = TrailIsArmed(g_trail,EffectiveTrailActivationPct(pos.entry));
+      g_dash.Set(r++,"TRAIL",(armed?"armed":"not armed"),(armed?cOk:cDim));
+      if(InpStructStopEnabled && g_structStop>0.0)
+         g_dash.Set(r++,"STRUCT SL",
+                    StringFormat("%.*f  (%+.*f)",digits,g_structStop,
+                                 digits,g_structStop-bid),cHot);
+      else
+         g_dash.Set(r++,"STRUCT SL",(InpStructStopEnabled?"-":"off"),cDim);
+     }
+   else
+     {
+      g_dash.Set(r++,"SIDE","flat",cDim);
+      if(g_reentrySide>=0)
+         g_dash.Set(r++,"RE-ENTRY",
+                    StringFormat("%s armed, %d bar(s)",
+                                 (g_reentrySide==(int)POSITION_TYPE_BUY?"BUY":"SELL"),
+                                 g_reentryLeft),cHot);
+      else
+         g_dash.Set(r++,"RE-ENTRY","-",cDim);
+     }
+
+//--- SIGNAL. None of this is visible anywhere else in the terminal, which is
+//--- the whole reason the panel exists.
+   g_dash.SetSection(r++,"-- SIGNAL --");
+
+   if(!InpCamEnabled)
+      g_dash.Set(r++,"CAMARILLA","off",cDim);
+   else if(!CamarillaRefresh(TimeCurrent()))
+      g_dash.Set(r++,"CAMARILLA","no daily bar",cHot);
+   else
+     {
+      const string upName = CamPairName(true), dnName = CamPairName(false);
+      const double up = CamLevel(upName)*(1.0+InpCamBufferPct/100.0);
+      const double dn = CamLevel(dnName)*(1.0-InpCamBufferPct/100.0);
+      g_dash.Set(r++,upName,StringFormat("%.*f  (%+.*f)",digits,up,digits,up-bid),
+                 (bid>up?cOk:cDim));
+      g_dash.Set(r++,dnName,StringFormat("%.*f  (%+.*f)",digits,dn,digits,dn-bid),
+                 (bid<dn?cOk:cDim));
+      string buyWhy="", sellWhy="";
+      const bool noBuy  = CamarillaBlocks(bid,POSITION_TYPE_BUY,buyWhy);
+      const bool noSell = CamarillaBlocks(bid,POSITION_TYPE_SELL,sellWhy);
+      string zone = "clear";
+      if(noBuy && noSell)
+         zone = "BLOCKED";
+      else if(noBuy)
+         zone = "SELL side only";
+      else if(noSell)
+         zone = "BUY side only";
+      g_dash.Set(r++,"CAM ZONE",zone,((noBuy&&noSell)?cHot:cOk));
+     }
+
+   if(!InpTrendEnabled)
+      g_dash.Set(r++,"TREND","off",cDim);
+   else
+     {
+      double ama=0.0, dema=0.0;
+      if(!TrendValues(ama,dema))
+         g_dash.Set(r++,"TREND","warming up",cHot);
+      else
+        {
+         g_dash.Set(r++,"TREND",(dema>ama?"UP - buy only":"DOWN - sell only"),
+                    (dema>ama?cOk:cBad));
+         //--- DEMA first: DEMA minus AMA is the sign that decides.
+         g_dash.Set(r++,"  DEMA-AMA",StringFormat("%+.*f",digits,dema-ama),
+                    (dema>ama?cOk:cBad));
+        }
+     }
+
+   if(InpUseDonchian && g_chanHigh>0.0)
+      g_dash.Set(r++,"DONCHIAN",StringFormat("%.*f / %.*f",digits,g_chanHigh,
+                                             digits,g_chanLow),cDim);
+   else if(!InpUseDonchian)
+      g_dash.Set(r++,"DONCHIAN","off",cDim);
+
+//--- MARKET. Last, because it is the part MT5 already shows elsewhere.
+   g_dash.SetSection(r++,"-- MARKET --");
+   const bool canTrade = (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)
+                         && (bool)MQLInfoInteger(MQL_TRADE_ALLOWED);
+   g_dash.Set(r++,"STATUS",
+              (canTrade ? (InpAllowNewEntries ? "TRADING" : "MANAGE ONLY") : "ALGO OFF"),
+              (canTrade && InpAllowNewEntries) ? cOk : cHot);
+   g_dash.Set(r++,"SYMBOL / TF",
+              StringFormat("%s  %s",_Symbol,StringSubstr(EnumToString(g_tf),7)),cWhite);
+   g_dash.Set(r++,"SPREAD",
+              StringFormat("%d pts",(int)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD)),cDim);
 
    ChartRedraw(0);
   }

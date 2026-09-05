@@ -36,7 +36,12 @@
 #ifndef ALGOGOLD_DASHBOARD_MQH
 #define ALGOGOLD_DASHBOARD_MQH
 
-#define DASH_MAX_ROWS 16
+//--- Set() silently ignores any row at or past this. GoldCamarillaBreakout grew
+//--- past sixteen and lost its P&L rows off the bottom without a word, which is
+//--- the worst way for a panel to fail: it looked complete. Raised with room to
+//--- spare, and the backdrop now sizes to the rows actually used rather than to
+//--- this ceiling, so a short panel does not paint a tall empty box.
+#define DASH_MAX_ROWS 28
 
 class CGoldDashboard
   {
@@ -48,6 +53,7 @@ private:
    int               m_rowH;
    int               m_width;
    int               m_rows;
+   int               m_valueDx;   // label-to-value column gap
    string            m_font;
 
    string            Name(const string part) const { return m_prefix+part; }
@@ -57,13 +63,17 @@ private:
 
 public:
                      CGoldDashboard(void): m_prefix(""),m_active(false),m_x(12),m_y(18),
-                                           m_rowH(16),m_width(250),m_rows(0),m_font("Consolas") {}
+                                           m_rowH(16),m_width(250),m_rows(0),m_valueDx(118),
+                                           m_font("Consolas") {}
 
-   bool              Create(const string prefix,const string title,const int x=12,const int y=18);
+   bool              Create(const string prefix,const string title,const int x=12,const int y=18,
+                            const int width=250);
    void              Destroy(void);
    bool              Active(void) const { return m_active; }
    //--- row 0..DASH_MAX_ROWS-1; label is fixed-width, value is coloured
    void              Set(const int row,const string label,const string value,const color clr=clrWhite);
+   //--- A group caption. Same row budget as any other row; no value column.
+   void              SetSection(const int row,const string caption);
    void              SetTitle(const string title);
    //--- Recreate anything the user deleted by hand. Call once per repaint.
    void              Refresh(const string title);
@@ -72,7 +82,8 @@ public:
 //+------------------------------------------------------------------+
 //| Build the panel. Silently does nothing where nobody can see it.  |
 //+------------------------------------------------------------------+
-bool CGoldDashboard::Create(const string prefix,const string title,const int x,const int y)
+bool CGoldDashboard::Create(const string prefix,const string title,const int x,const int y,
+                            const int width)
   {
    const bool tester = (bool)MQLInfoInteger(MQL_TESTER);
    const bool visual = (bool)MQLInfoInteger(MQL_VISUAL_MODE);
@@ -82,6 +93,10 @@ bool CGoldDashboard::Create(const string prefix,const string title,const int x,c
    m_prefix = prefix;
    m_x = x;
    m_y = y;
+   m_width = (width>160 ? width : 160);
+   //--- 118 of 250 is the gap the panel shipped with; keep that proportion so a
+   //--- wider panel puts its values further right instead of leaving a gutter.
+   m_valueDx = m_width-132;
    m_active = true;
 
    EnsureBackdrop();
@@ -109,7 +124,10 @@ void CGoldDashboard::EnsureBackdrop(void)
    ObjectSetInteger(0,bg,OBJPROP_XDISTANCE,m_x-8);
    ObjectSetInteger(0,bg,OBJPROP_YDISTANCE,m_y-8);
    ObjectSetInteger(0,bg,OBJPROP_XSIZE,m_width);
-   ObjectSetInteger(0,bg,OBJPROP_YSIZE,m_rowH*(DASH_MAX_ROWS+1)+16);
+   //--- Sized to the rows in use, not to the ceiling. m_rows settles on the
+   //--- first paint; 8 keeps the box sane before any row has been written.
+   const int shown = (m_rows>8 ? m_rows : 8);
+   ObjectSetInteger(0,bg,OBJPROP_YSIZE,m_rowH*(shown+2)+16);
    ObjectSetInteger(0,bg,OBJPROP_BGCOLOR,C'18,20,26');
    ObjectSetInteger(0,bg,OBJPROP_BORDER_TYPE,BORDER_FLAT);
    ObjectSetInteger(0,bg,OBJPROP_COLOR,C'60,66,80');
@@ -165,8 +183,8 @@ void CGoldDashboard::Set(const int row,const string label,const string value,con
    if(!m_active || row<0 || row>=DASH_MAX_ROWS)
       return;
    const int y = m_y + m_rowH*(row+2);
-   MakeLabel("L"+IntegerToString(row),m_x,     y,8,C'130,140,160',label);
-   MakeLabel("V"+IntegerToString(row),m_x+118, y,8,clr,           value);
+   MakeLabel("L"+IntegerToString(row),m_x,           y,8,C'130,140,160',label);
+   MakeLabel("V"+IntegerToString(row),m_x+m_valueDx, y,8,clr,           value);
    if(row+1>m_rows)
       m_rows = row+1;
   }
@@ -181,6 +199,21 @@ void CGoldDashboard::Destroy(void)
    ObjectsDeleteAll(0,m_prefix);
    m_active = false;
    ChartRedraw(0);
+  }
+
+//+------------------------------------------------------------------+
+//| A group caption: dimmer, and with the value column blanked so a   |
+//| leftover value from a previous layout cannot hang beside it.      |
+//+------------------------------------------------------------------+
+void CGoldDashboard::SetSection(const int row,const string caption)
+  {
+   if(!m_active || row<0 || row>=DASH_MAX_ROWS)
+      return;
+   const int y = m_y + m_rowH*(row+2);
+   MakeLabel("L"+IntegerToString(row),m_x,           y,8,C'90,150,200',caption);
+   MakeLabel("V"+IntegerToString(row),m_x+m_valueDx, y,8,C'90,150,200',"");
+   if(row+1>m_rows)
+      m_rows = row+1;
   }
 
 #endif // ALGOGOLD_DASHBOARD_MQH
