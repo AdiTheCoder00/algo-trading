@@ -725,6 +725,54 @@ enum ENUM_STRUCT_STOP_MODE
    STRUCT_STOP_ON_CLOSE    // Only when a bar CLOSES against the position past the level
   };
 
+//+------------------------------------------------------------------+
+//| ENTRY GRACE - do not let the colour rule act on a fresh position. |
+//|                                                                  |
+//| The candle-colour exit closes on the FIRST bar that closes        |
+//| against the position. Immediately after a fill that is a hair     |
+//| trigger: a breakout bar is often followed by one bar of           |
+//| retracement that resolves back in favour, and exiting on it pays  |
+//| the spread twice to end a trade that had not yet been given a     |
+//| chance to be right.                                               |
+//|                                                                  |
+//| So the colour rule is held off for a grace period, counted from   |
+//| the fill. THE POSITIONAL CANDLE - the bar the fill landed on - is |
+//| excluded by construction: counting starts on the bar after it. At |
+//| the default of 5, bars 1 to 5 after the positional candle are     |
+//| skipped and the first bar the rule may act on is the 6th.         |
+//|                                                                  |
+//| ====================================================================
+//| BARS AND MINUTES BOTH, BECAUSE THEY ONLY AGREE ON M1
+//| ====================================================================
+//| "Wait five minutes" and "check from the sixth candle" are the     |
+//| same instruction on an M1 chart and different ones everywhere     |
+//| else - on M5, five bars is twenty-five minutes. Rather than pick  |
+//| one and be wrong on the other, both are inputs and BOTH must have |
+//| elapsed. On M1 they coincide exactly; on anything slower the bar  |
+//| count dominates, which is the conservative reading. Set either to |
+//| 0 to disable that half.                                           |
+//|                                                                  |
+//| ====================================================================
+//| IT DOES NOT DELAY THE STOP. DELIBERATELY.
+//| ====================================================================
+//| Only the CANDLE-COLOUR exit waits. The structural stop, the       |
+//| percentage/ATR stop and the trail all stay live from the first    |
+//| tick, because a grace period on protection is not a grace period  |
+//| at all - it is an unprotected window placed exactly where the     |
+//| position is newest and the entry least confirmed. The colour rule |
+//| is a signal and can afford to wait; a stop cannot.                |
+//|                                                                  |
+//| The opposite-side breakout flatten also stays live: that is a     |
+//| directional verdict from the same channel that opened the trade,  |
+//| and suppressing it would hold a position the signal has already   |
+//| reversed on.                                                      |
+//|                                                                  |
+//| NO PYTHON COUNTERPART.                                            |
+//+------------------------------------------------------------------+
+input group "--- Entry grace (no Python counterpart) ---"
+input int  InpEntryGraceBars    = 5;   // Candles after the POSITIONAL candle to skip. 0 = off
+input int  InpEntryGraceMinutes = 5;   // Minutes after the fill to skip. 0 = off
+
 input group "--- Structural stop: candle low/high (no Python counterpart) ---"
 input bool InpStructStopEnabled = true;               // Stop at a recent candle's low (buy) / high (sell)
 input int  InpStructStopBack    = 2;                  // Candles before the last CLOSED one. 2 = "two candles before"
@@ -1390,6 +1438,29 @@ int OnInit()
                "This is deliberate: an unmet requirement is not a passed one.");
      }
 
+//--- ENTRY GRACE.
+   if(InpEntryGraceBars<=0 && InpEntryGraceMinutes<=0)
+      Print("entry grace: OFF - the colour rule may close a position on the very "
+            "bar after the fill");
+   else
+     {
+      PrintFormat("entry grace: the candle-colour exit is held off for %d bar(s) after "
+                  "the positional candle AND %d minute(s) after the fill, whichever "
+                  "finishes last - so it first acts on bar %d",
+                  InpEntryGraceBars,InpEntryGraceMinutes,InpEntryGraceBars+1);
+      const int perBar = PeriodSeconds(g_tf);
+      if(perBar>0 && InpEntryGraceBars>0)
+        {
+         const int barsAsMinutes = InpEntryGraceBars*perBar/60;
+         PrintFormat("  on this timeframe %d bar(s) is %d minute(s), so the %s gate "
+                     "is the binding one",
+                     InpEntryGraceBars,barsAsMinutes,
+                     (barsAsMinutes>=InpEntryGraceMinutes ? "BAR" : "MINUTE"));
+        }
+      Print("  the stop and the trail are NOT delayed - protection stays live from "
+            "the first tick");
+     }
+
 //--- STRUCTURAL STOP.
    if(!InpStructStopEnabled)
       Print("structural stop: OFF");
@@ -1642,6 +1713,12 @@ void PaintDashboard(void)
 
    if(!InpCandleExitEnabled)
       g_dash.Set(r++,"CANDLE EXIT","off",cDim);
+   else if(pos.exists)
+     {
+      string dashGraceWhy="";
+      const bool armed = EntryGraceElapsed(pos,dashGraceWhy);
+      g_dash.Set(r++,"CANDLE EXIT",(armed?"armed":"in grace"),(armed?cOk:cHot));
+     }
    else if(g_reentrySide>=0)
       g_dash.Set(r++,"RE-ENTRY",
                  StringFormat("%s armed, %d bar(s) left",
@@ -1981,6 +2058,45 @@ bool CamarillaRefresh(const datetime ref)
    g_camRange = range;
    g_camClose = c;
    g_camValid = true;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| True once a position is old enough for the colour rule to act.   |
+//| `why` explains the wait when it is not.                           |
+//+------------------------------------------------------------------+
+bool EntryGraceElapsed(const GoldPosition &pos,string &why)
+  {
+   why="";
+   if(InpEntryGraceBars<=0 && InpEntryGraceMinutes<=0)
+      return true;
+
+//--- The bar the fill landed on. Everything is counted from the one AFTER it,
+//--- so the positional candle can never itself close the trade.
+   const int entryShift = iBarShift(_Symbol,g_tf,pos.openTime,false);
+   if(entryShift<0)
+     {
+      //--- The entry bar has aged out of the series, which can only mean the
+      //--- position is far older than any grace period. Do not hold an exit
+      //--- hostage to a lookup failure.
+      return true;
+     }
+   const int elapsedBars = entryShift-1;
+
+   if(InpEntryGraceBars>0 && elapsedBars<InpEntryGraceBars+1)
+     {
+      why=StringFormat("bar %d after the positional candle; the colour rule starts "
+                       "at bar %d",elapsedBars,InpEntryGraceBars+1);
+      return false;
+     }
+
+   const long heldSeconds = (long)(TimeCurrent()-pos.openTime);
+   if(InpEntryGraceMinutes>0 && heldSeconds<(long)InpEntryGraceMinutes*60)
+     {
+      why=StringFormat("held %d second(s); the colour rule starts at %d minute(s)",
+                       (int)heldSeconds,InpEntryGraceMinutes);
+      return false;
+     }
    return true;
   }
 
@@ -2360,7 +2476,15 @@ void OnClosedBar()
 //--- 2b. Candle-colour exit. After the protective exits, so a stop that
 //---     fired keeps precedence, and before the channel is rebuilt, because
 //---     this rule does not need it.
-   if(InpCandleExitEnabled && pos.exists)
+   string graceWhy="";
+   const bool graceDone = (!pos.exists) || EntryGraceElapsed(pos,graceWhy);
+   if(InpCandleExitEnabled && pos.exists && !graceDone)
+     {
+      //--- Said once per bar rather than per tick: this runs on the closed bar,
+      //--- and a held position inside its grace is worth one line, not silence.
+      PrintFormat("candle exit held off: %s",graceWhy);
+     }
+   if(InpCandleExitEnabled && pos.exists && graceDone)
      {
       const int colour = BarColour(barOpen,close);
       const bool against = (pos.side==POSITION_TYPE_BUY  && colour<0) ||
