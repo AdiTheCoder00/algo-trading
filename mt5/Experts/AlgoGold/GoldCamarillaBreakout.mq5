@@ -266,8 +266,8 @@ input double InpTakeProfitMoney   = 0.0;     // Target as PROFIT in account curr
 //---
 //--- NO PYTHON COUNTERPART. trailing_profit_stop.py is percentage-based; a
 //--- money trail is a live-only divergence the backtest has never scored.
-input double InpTrailActivationMoney = 5.0;  // Arm the trail at this PROFIT in account currency. 0 = use percent
-input double InpTrailMoney           = 1.0;  // Trail this many account-currency units behind the peak. 0 = use percent
+input double InpTrailActivationMoney = 0.0;  // Arm the trail at this PROFIT in account currency. 0 = use percent
+input double InpTrailMoney           = 0.0;  // Trail behind the peak, account currency. 0 = OFF (default)
 
 //+------------------------------------------------------------------+
 //| SALVAGE EXIT - take the first profit on a trade that started badly|
@@ -805,6 +805,27 @@ enum ENUM_STRUCT_STOP_MODE
 //| elapsed. On M1 they coincide exactly; on anything slower the bar  |
 //| count dominates, which is the conservative reading. Set either to |
 //| 0 to disable that half.                                           |
+//|                                                                  |
+//| ====================================================================
+//| THE COLOUR RULE IS THE ONLY EXIT IN THE SHIPPED CONFIGURATION
+//| ====================================================================
+//| Once a trade is open, exactly one thing can close it: a candle    |
+//| closing against it, from the sixth candle. Every other exit this  |
+//| expert owns is off by default - the flat and ATR stops, the       |
+//| take-profit, the structural level, the money trail, salvage, the  |
+//| basket target, and the opposite-side Donchian flatten.            |
+//|                                                                  |
+//| The TRAIL is the one worth naming, because it was on and it does  |
+//| not announce itself: it arms silently at a profit threshold and   |
+//| then closes on a retracement, with no relation to candle colour.  |
+//| A position closing while its candle was still the right colour    |
+//| was the trail, not the colour rule. It is now zero.                |
+//|                                                                  |
+//| The trend gate is an ENTRY gate only and always was. If DEMA      |
+//| crosses back over AMA while a position is open, nothing happens - |
+//| the position waits for its candle. That is deliberate: two exits  |
+//| that can disagree produce behaviour nobody can attribute after    |
+//| the fact.                                                         |
 //|                                                                  |
 //| ====================================================================
 //| IT DOES NOT DELAY THE STOP. DELIBERATELY.
