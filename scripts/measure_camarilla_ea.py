@@ -55,9 +55,11 @@ from scripts.measure_ama_dema_orientation import ama, dema
 # ---- the expert's shipped defaults -----------------------------------------
 LOOKBACK = 20
 CAM_BUFFER_PCT = 0.0
-STRUCT_BACK = 2
-GRACE_BARS = 5
-GRACE_MINUTES = 5
+STRUCT_BACK = 8          # candles before the SIGNAL candle, frozen at entry
+GRACE_BARS = 4
+GRACE_MINUTES = 0
+PROFIT_LOCK = 1.50       # arm here, then floor = max(lock, peak - trail)
+PROFIT_TRAIL = 0.20
 REENTRY_MAX_BARS = 10
 AMA_P, AMA_F, AMA_S = 9, 4, 30
 DEMA_P = 14
@@ -116,10 +118,14 @@ def camarilla(prev_high: float, prev_low: float, prev_close: float) -> dict[str,
 def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BACK,
         grace_bars: int = GRACE_BARS, grace_minutes: int = GRACE_MINUTES,
         use_struct: bool = True, use_donchian: bool = True,
-        entry_needs_colour: bool = True) -> tuple[Result, dict]:
+        entry_needs_colour: bool = True, tf: int = 1,
+        lock: float = PROFIT_LOCK, lock_trail: float = PROFIT_TRAIL,
+        lock_optimistic: bool = False) -> tuple[Result, dict]:
     mt5.symbol_select(symbol, True)
     info = mt5.symbol_info(symbol)
-    m1 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 1, bars)
+    tf_const = {1: mt5.TIMEFRAME_M1, 5: mt5.TIMEFRAME_M5,
+                15: mt5.TIMEFRAME_M15, 60: mt5.TIMEFRAME_H1}[tf]
+    m1 = mt5.copy_rates_from_pos(symbol, tf_const, 1, bars)
     d1 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 1, 400)
     if m1 is None or len(m1) < 500 or d1 is None or len(d1) < 3:
         raise SystemExit(f"{symbol}: not enough history")
@@ -151,6 +157,8 @@ def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BA
     struct_level = 0.0
     peak = 0.0
     trail_armed = False
+    lock_armed = False
+    lock_peak = 0.0
     reentry_side = 0
     reentry_left = 0
     warm = max(LOOKBACK, AMA_S * 3, DEMA_P * 3) + struct_back + 2
@@ -164,30 +172,46 @@ def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BA
         if pos is not None:
             closed = False
 
-            # 1. structural stop, intrabar, with a gap fill
-            if use_struct and struct_level > 0:
-                if pos.side == BUY and lo[i] <= struct_level:
-                    fill = min(struct_level, o[i])
-                    pos.exit_i, pos.exit_price, pos.reason = i, fill, "structural stop"
-                    closed = True
-                elif pos.side == SELL and h[i] >= struct_level:
-                    fill = max(struct_level, o[i])
-                    pos.exit_i, pos.exit_price, pos.reason = i, fill, "structural stop"
-                    closed = True
+            # 1. profit lock, before anything else - the expert checks it first
+            #    and on the tick. In a bar replay the order of the high and the
+            #    low inside one bar is unknown; arming from the high and then
+            #    testing the floor against the low within the SAME bar is the
+            #    realistic reading, since that is what a retracement looks like.
+            if not closed and lock > 0:
+                best = h[i] if pos.side == BUY else lo[i]
+                worst = lo[i] if pos.side == BUY else h[i]
+                best_profit = (best - pos.entry_price) * pos.side * mpp
+                worst_profit = (worst - pos.entry_price) * pos.side * mpp
 
-            # 2. money trail
-            if not closed:
-                peak = max(peak, h[i]) if pos.side == BUY else min(peak, lo[i])
-                open_profit = (peak - pos.entry_price) * pos.side * mpp
-                if open_profit >= arm_money:
-                    trail_armed = True
-                if trail_armed:
-                    dist = trail_money / mpp
-                    level = peak - dist if pos.side == BUY else peak + dist
-                    hit = lo[i] <= level if pos.side == BUY else h[i] >= level
-                    if hit:
-                        pos.exit_i, pos.exit_price, pos.reason = i, level, "trail"
+                def _raise():
+                    nonlocal lock_armed, lock_peak
+                    if not lock_armed and best_profit >= lock:
+                        lock_armed, lock_peak = True, best_profit
+                    elif lock_armed:
+                        lock_peak = max(lock_peak, best_profit)
+
+                # Optimistic: this bar's extreme lifts the peak BEFORE the floor
+                # is tested, i.e. the high is assumed to come before the low.
+                if lock_optimistic:
+                    _raise()
+                if lock_armed:
+                    floor = max(lock, lock_peak - lock_trail)
+                    if worst_profit < floor:
+                        fill = pos.entry_price + pos.side * (floor / mpp)
+                        pos.exit_i, pos.exit_price, pos.reason = i, fill, "profit lock"
                         closed = True
+                # Conservative: the floor was tested against the peak carried in
+                # from earlier bars, and only now does this bar raise it.
+                if not closed and not lock_optimistic:
+                    _raise()
+
+            # 2. S-N failure line: frozen at entry, tested on the CLOSE
+            if not closed and use_struct and struct_level > 0:
+                beyond = (c[i] < struct_level if pos.side == BUY
+                          else c[i] > struct_level)
+                if beyond:
+                    pos.exit_i, pos.exit_price, pos.reason = i, c[i], "failure line"
+                    closed = True
 
             # 3. candle colour, once the grace has elapsed
             if not closed:
@@ -225,13 +249,7 @@ def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BA
                 trail_armed = False
                 continue
 
-            # ratchet the structural level from the candle STRUCT_BACK back
-            raw = lo[i - struct_back] if pos.side == BUY else h[i - struct_back]
-            if struct_level <= 0:
-                struct_level = raw
-            else:
-                struct_level = (max(struct_level, raw) if pos.side == BUY
-                                else min(struct_level, raw))
+            # The failure line is FROZEN at entry - nothing to advance.
             continue
 
         # ---------------- flat ----------------
@@ -282,11 +300,15 @@ def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BA
         pos = Trade(side=want, entry_i=i, entry_price=fill)
         pos.spread = half_spread * mpp
         peak = h[i] if want == BUY else lo[i]
+        # S-N measured from the SIGNAL candle, which is this bar.
         struct_level = lo[i - struct_back] if want == BUY else h[i - struct_back]
         trail_armed = False
+        lock_armed = False
+        lock_peak = 0.0
         reentry_side, reentry_left = 0, 0
 
     meta = {
+        "tf": {1: "M1", 5: "M5", 15: "M15", 60: "H1"}[tf],
         "bars": len(c),
         "from": t[warm],
         "to": t[-1],
@@ -302,7 +324,7 @@ def report(symbol: str, res: Result, meta: dict) -> None:
     mpp = meta["mpp"]
     trades = [tr for tr in res.trades if tr.exit_i >= 0]
     print("\n" + "=" * 86)
-    print(f"{symbol}   M1   {meta['bars']} bars   "
+    print(f"{symbol}   {meta['tf']}   {meta['bars']} bars   "
           f"{meta['from']:%Y-%m-%d} .. {meta['to']:%Y-%m-%d}   "
           f"{meta['lots']} lots, spread {meta['half_spread'] * 2:.{meta['digits']}f}")
     if not trades:
@@ -351,6 +373,11 @@ def main() -> int:
     ap.add_argument("--pair", default="1", help="Camarilla pair: 1..4")
     ap.add_argument("--struct-back", type=int, default=STRUCT_BACK)
     ap.add_argument("--grace-minutes", type=int, default=GRACE_MINUTES)
+    ap.add_argument("--tf", type=int, default=1, choices=[1, 5, 15, 60])
+    ap.add_argument("--lock", type=float, default=PROFIT_LOCK)
+    ap.add_argument("--lock-trail", type=float, default=PROFIT_TRAIL)
+    ap.add_argument("--lock-optimistic", action="store_true",
+                    help="Assume the bar high precedes the low while armed")
     ap.add_argument("--no-struct", action="store_true",
                     help="Disable the structural stop entirely")
     ap.add_argument("--no-donchian", action="store_true",
@@ -369,7 +396,10 @@ def main() -> int:
                             grace_minutes=args.grace_minutes,
                             use_struct=not args.no_struct,
                             use_donchian=not args.no_donchian,
-                            entry_needs_colour=not args.no_entry_colour)
+                            entry_needs_colour=not args.no_entry_colour,
+                            tf=args.tf, lock=args.lock,
+                            lock_trail=args.lock_trail,
+                            lock_optimistic=args.lock_optimistic)
             report(symbol, res, meta)
     finally:
         mt5.shutdown()
