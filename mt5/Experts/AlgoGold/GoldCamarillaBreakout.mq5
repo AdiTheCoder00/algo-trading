@@ -505,6 +505,53 @@ input double InpProfitTrailMoney  = 0.20;    // Once armed, exit if profit falls
 input bool   InpLockExitSkipBar  = true;     // After a profit-lock exit, no entry on that bar's close
 
 //+------------------------------------------------------------------+
+//| SPIKE EXIT - one candle moves this far, act on it either way.     |
+//|                                                                  |
+//| Measured on THIS CANDLE ALONE, not on the trade's total. A        |
+//| position that ground up to five dollars over twenty bars is not   |
+//| what this is for; a bar that moves five dollars by itself is.     |
+//|                                                                  |
+//|     profit side:  gain = min(bar move, total floating)            |
+//|     loss side:    loss = max(bar move, total floating)            |
+//|                                                                  |
+//| Those two clamps are the same idea from either end. A position    |
+//| opened part-way through the bar did not live through the whole    |
+//| bar's move, so the bar overstates what it made or lost and the    |
+//| total floating is the truth. min() on the profit side and max()   |
+//| on the loss side both pick the smaller claim.                     |
+//|                                                                  |
+//| ====================================================================
+//| THE TWO SIDES ARE NOT THE SAME RULE
+//| ====================================================================
+//| The profit side is opportunism: a bar that jumps five dollars is  |
+//| the same bar that can hand it all back before the next tick, so   |
+//| the money is taken while it is there.                             |
+//|                                                                  |
+//| The loss side is the only thing in this expert that reacts to a   |
+//| violent bar WHILE it is happening. The colour rule and the S-N    |
+//| failure line both wait for a close; on a bar that runs five       |
+//| dollars against the position, waiting for the close is how a      |
+//| small loss becomes the day's largest. It is not a stop - there is |
+//| no level on the book - but it is the nearest thing to one here.   |
+//|                                                                  |
+//| Both are checked before everything else on the tick, and neither  |
+//| waits for the entry grace: a trade that has already moved five    |
+//| dollars either way has had its chance, whatever bar it is on.     |
+//|                                                                  |
+//| Both land mid-bar, so the same no-re-entry-on-this-bar's-close    |
+//| rule that covers the profit lock covers these.                    |
+//|                                                                  |
+//| MIND THE MONEY-TO-PRICE CONVERSION, which depends on InpLots:     |
+//|   XAUUSD      0.01 lots -> 5.00 price                             |
+//|   FixedVol100 0.10 lots -> 50.0 price                             |
+//|   BTCUSD      0.03 lots -> 166.7 price                            |
+//| Init prints the resolved distance for the symbol in front, which  |
+//| is the number to check against a normal bar for that symbol.      |
+//+------------------------------------------------------------------+
+input double InpSpikeTakeMoney   = 5.00;     // Close if THIS candle alone produced this PROFIT. 0 = off
+input double InpSpikeStopMoney   = 5.00;     // Close if THIS candle alone produced this LOSS. 0 = off
+
+//+------------------------------------------------------------------+
 //| CAMARILLA LEVEL FILTER - keep entries away from the pivots.       |
 //|                                                                  |
 //| Ported from "Camarilla Channel.mq5" (MetaQuotes, shipped under    |
@@ -1721,6 +1768,25 @@ int OnInit()
             "the first tick");
      }
 
+//--- SPIKE EXIT, resolved into price for the lots configured.
+   if(InpSpikeTakeMoney<=0.0 && InpSpikeStopMoney<=0.0)
+      Print("spike exit: OFF");
+   else
+     {
+      const double perPrice = MoneyPerPrice();
+      if(perPrice>0.0)
+         PrintFormat("spike exit: take %.2f / stop %.2f in ONE bar = %.*f / %.*f of "
+                     "price at %.2f lots",
+                     InpSpikeTakeMoney,InpSpikeStopMoney,
+                     (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS),
+                     (InpSpikeTakeMoney>0.0 ? InpSpikeTakeMoney/perPrice : 0.0),
+                     (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS),
+                     (InpSpikeStopMoney>0.0 ? InpSpikeStopMoney/perPrice : 0.0),
+                     g_trader.Lots());
+      else
+         Print("spike exit: ON, but the symbol reports no usable tick value");
+     }
+
 //--- STRUCTURAL STOP.
    if(!InpStructStopEnabled)
       Print("structural stop: OFF");
@@ -1847,8 +1913,13 @@ void OnTick()
 //--- the recovery when it appears. The expensive part (replaying the bars to
 //--- decide whether the position was marked) is cached and refreshed on the
 //--- bar boundary below, so this path is only a P&L read.
-//--- Profit lock FIRST of all: "the moment it crosses below" is the whole
-//--- point, so nothing else acts on a tick where the floor has broken.
+//--- Spike exit before everything. On the profit side a bar that jumps this
+//--- far can hand it back before the next tick; on the loss side this is the
+//--- only rule that reacts to a violent bar while it is still forming.
+   if(CheckSpikeExit())
+      return;
+//--- Profit lock next: "the moment it crosses below" is the whole point, so
+//--- nothing else acts on a tick where the floor has broken.
    if(CheckProfitLock())
       return;
 //--- Basket take profit next: it closes everything, so there is no point
@@ -2252,6 +2323,77 @@ double FloatingProfit()
       profit += PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
      }
    return profit;
+  }
+
+//+------------------------------------------------------------------+
+//| Close at once when the CURRENT bar alone has moved far enough,    |
+//| in either direction. Returns true if it closed.                   |
+//+------------------------------------------------------------------+
+bool CheckSpikeExit()
+  {
+   if(InpSpikeTakeMoney<=0.0 && InpSpikeStopMoney<=0.0)
+      return false;
+
+   const GoldPosition pos = g_trader.Snapshot();
+   if(!pos.exists)
+      return false;
+
+   const double tickValue = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+   const double tickSize  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   if(tickValue<=0.0 || tickSize<=0.0 || pos.volume<=0.0)
+      return false;
+   const double perPrice = (tickValue/tickSize)*pos.volume;
+
+   const double barOpen = iOpen(_Symbol,g_tf,0);
+   const double bid     = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   const double ask     = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   if(barOpen<=0.0 || bid<=0.0 || ask<=0.0)
+      return false;
+
+//--- Priced at what closing would actually fetch: a long leaves at the bid.
+   const double now  = (pos.side==POSITION_TYPE_BUY) ? bid : ask;
+   const double move = (pos.side==POSITION_TYPE_BUY) ? (now-barOpen) : (barOpen-now);
+   const double barMoney = move*perPrice;
+   const double floating = FloatingProfit();
+   const int    digits   = (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+
+   string reason = "";
+
+//--- Profit side. A position opened part-way through the bar did not earn the
+//--- whole bar's move, so the total floating caps the claim.
+   if(InpSpikeTakeMoney>0.0 && barMoney>=InpSpikeTakeMoney)
+     {
+      const double gain = MathMin(barMoney,floating);
+      if(gain>=InpSpikeTakeMoney)
+         reason = StringFormat("spike take: this bar alone produced %.2f "
+                               "(open %.*f, now %.*f) - closing at once",
+                               gain,digits,barOpen,digits,now);
+     }
+
+//--- Loss side, same clamp from the other end.
+   if(reason=="" && InpSpikeStopMoney>0.0 && barMoney<=-InpSpikeStopMoney)
+     {
+      const double loss = MathMax(barMoney,floating);
+      if(loss<=-InpSpikeStopMoney)
+         reason = StringFormat("spike stop: this bar alone lost %.2f "
+                               "(open %.*f, now %.*f) - closing at once",
+                               loss,digits,barOpen,digits,now);
+     }
+
+   if(reason=="")
+      return false;
+
+   PrintFormat("%s",reason);
+   g_trader.CloseAll(reason);
+   TrailClear(g_trail);
+   ReentryClear();
+   g_structStop  = 0.0;
+   g_lockArmed   = false;
+   g_lockPeak    = 0.0;
+//--- Mid-bar exit, so the rule that stops the lock re-entering on this bar's
+//--- close applies here too.
+   g_lockExitBar = iTime(_Symbol,g_tf,0);
+   return true;
   }
 
 //+------------------------------------------------------------------+
