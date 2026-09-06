@@ -193,3 +193,6 @@ ignore = [
 # And the full-expert replica, whose exit-reason breakdown is a report for a
 # human. Imported by nothing.
 "scripts/measure_camarilla_ea.py" = ["T201"]
+# And the reversion research, whose table is a report for a human. Imported by
+# nothing.
+"scripts/research_camarilla_reversion.py" = ["T201"]
