@@ -821,8 +821,28 @@ input int    InpReentryMaxBars    = 10;    // Forget the re-entry after this man
 //+------------------------------------------------------------------+
 enum ENUM_STRUCT_STOP_MODE
   {
-   STRUCT_STOP_BROKER = 0, // Real level on the book - fires intrabar, any colour (default)
-   STRUCT_STOP_ON_CLOSE    // Only when a bar CLOSES against the position past the level
+   STRUCT_STOP_BROKER = 0, // Real level on the book - fires intrabar, any colour
+   STRUCT_STOP_ON_CLOSE    // Only when a bar CLOSES beyond the level (default)
+  };
+
+//--- WHERE THE LEVEL COMES FROM, which is a separate question from when it
+//--- fires.
+//---
+//--- ENTRY freezes one level at the moment of entry: the low (long) or high
+//--- (short) of the candle InpStructStopBack bars before the SIGNAL candle. At
+//--- the default of 4 that is S-4, and it never moves for the life of the
+//--- trade. It is a line drawn behind the entry, and breaking it says the move
+//--- the entry was taken on has failed.
+//---
+//--- ROLLING is the original behaviour: recomputed every bar from the candle
+//--- InpStructStopBack before the last closed one, ratcheting so it only ever
+//--- tightens. That is a trailing structure stop rather than a failure line,
+//--- and it measured badly - it took four trades in five and lost about 88% of
+//--- them, because on M1 the candle two back sits inside the noise.
+enum ENUM_STRUCT_ANCHOR
+  {
+   STRUCT_ANCHOR_ENTRY = 0, // One level frozen at entry, from S-N (default)
+   STRUCT_ANCHOR_ROLLING    // Recomputed and ratcheted every bar
   };
 
 //+------------------------------------------------------------------+
@@ -919,10 +939,11 @@ input int  InpEntryGraceBars    = 4;   // Candles after the POSITIONAL candle to
 input int  InpEntryGraceMinutes = 0;   // Minutes after the fill to skip. 0 = off (default)
 
 input group "--- Structural stop: candle low/high (no Python counterpart) ---"
-input bool InpStructStopEnabled = false;              // Candle-two-back level. OFF - the exit is the opposite-colour candle
-input int  InpStructStopBack    = 2;                  // Candles before the last CLOSED one. 2 = "two candles before"
+input bool InpStructStopEnabled = true;               // Failure line: exit if a candle CLOSES beyond the S-N level
+input int  InpStructStopBack    = 4;                  // How many candles before the SIGNAL candle. 4 = "S-4"
 input bool InpStructStopRatchet = true;               // Only ever tighten the level, never widen it
-input ENUM_STRUCT_STOP_MODE InpStructStopMode = STRUCT_STOP_BROKER; // How it fires
+input ENUM_STRUCT_ANCHOR    InpStructStopAnchor = STRUCT_ANCHOR_ENTRY;   // Where the level comes from
+input ENUM_STRUCT_STOP_MODE InpStructStopMode   = STRUCT_STOP_ON_CLOSE;  // How it fires
 
 input group "--- Dashboard ---"
 input bool   InpShowDashboard    = true;    // On-chart status panel
@@ -2654,7 +2675,11 @@ void OnClosedBar()
                                       EffectiveTrailActivationPct(pos.entry),
                                       EffectiveTrailPct(TrailReference(pos.entry)));
 
-      const double structural = StructStopAdvance(pos.side);
+      //--- An entry-anchored level is frozen: it was set when the trade opened
+      //--- and recomputing it would turn a failure line into a trailing stop.
+      const double structural = (InpStructStopAnchor==STRUCT_ANCHOR_ENTRY)
+                                ? g_structStop
+                                : StructStopAdvance(pos.side);
       if(InpStructStopEnabled && structural>0.0)
         {
          //--- A structural level on the wrong side of the market is not a stop,
@@ -2686,16 +2711,23 @@ void OnClosedBar()
       const int colour = BarColour(barOpen,close);
       const bool broke = (pos.side==POSITION_TYPE_BUY) ? (low<=g_structStop)
                                                        : (high>=g_structStop);
-      const bool against = (pos.side==POSITION_TYPE_BUY && colour<0) ||
-                           (pos.side==POSITION_TYPE_SELL && colour>0);
+      //--- ON_CLOSE asks whether the bar CLOSED beyond the level, not whether it
+      //--- merely touched it. A wick through and a close back inside is the
+      //--- market rejecting the level, which is the opposite of the level
+      //--- failing, so it must not end the trade.
+      const bool closedBeyond = (pos.side==POSITION_TYPE_BUY)
+                                ? (close<g_structStop)
+                                : (close>g_structStop);
       const bool fires = (InpStructStopMode==STRUCT_STOP_ON_CLOSE)
-                         ? (broke && against)
+                         ? closedBeyond
                          : broke;
       if(fires)
         {
-         const string reason = StringFormat("structural stop: %s bar broke the %s of the "
-                                            "candle %d before it (%.*f), %s position",
+         const string reason = StringFormat("structural stop: %s bar %s the %s of S-%d "
+                                            "(%.*f), %s position",
                                             (colour>0?"up":(colour<0?"down":"doji")),
+                                            (InpStructStopMode==STRUCT_STOP_ON_CLOSE
+                                             ? "CLOSED beyond" : "broke"),
                                             (pos.side==POSITION_TYPE_BUY?"low":"high"),
                                             InpStructStopBack,
                                             (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS),
@@ -2945,14 +2977,19 @@ void OnClosedBar()
 //--- The ratchet starts fresh here: a level carried over from the last trade
 //--- would be anchored to a move this position was not part of.
    g_structStop = 0.0;
-   if(InpStructStopEnabled && InpStructStopMode==STRUCT_STOP_BROKER)
+   if(InpStructStopEnabled)
      {
+      //--- At this instant the "last closed bar" IS the signal candle, so
+      //--- StructStopRaw's shift of 1+InpStructStopBack resolves to S-N exactly.
       const double structural = StructStopAdvance(side);
       if(structural>0.0)
         {
          const double distance = (side==POSITION_TYPE_BUY) ? ref-structural
                                                            : structural-ref;
-         if(distance>0.0)
+         //--- Only a BROKER-mode level goes onto the order. In ON_CLOSE mode the
+         //--- level is a bar-close test and must not sit on the book, or it
+         //--- would fire intrabar and defeat the "closes beyond" rule.
+         if(distance>0.0 && InpStructStopMode==STRUCT_STOP_BROKER)
             slDistance = (slDistance>0.0) ? MathMin(slDistance,distance) : distance;
          else
             PrintFormat("structural stop not attached at entry: the candle %d bars back "
