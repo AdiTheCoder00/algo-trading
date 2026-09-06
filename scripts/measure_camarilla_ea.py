@@ -63,8 +63,6 @@ PROFIT_TRAIL = 0.20
 REENTRY_MAX_BARS = 10
 AMA_P, AMA_F, AMA_S = 9, 4, 30
 DEMA_P = 14
-TRAIL_ARM_MONEY = {"FixedVol100": 14.32, "BTCUSD": 11.26, "XAUUSD": 40.41}
-TRAIL_MONEY = {"FixedVol100": 9.54, "BTCUSD": 7.50, "XAUUSD": 26.94}
 LOTS = {"FixedVol100": 0.10, "BTCUSD": 0.03, "XAUUSD": 0.01}
 
 BUY, SELL = 1, -1
@@ -150,13 +148,10 @@ def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BA
 
     half_spread = info.spread * info.point / 2
     mpp = (info.trade_tick_value / info.trade_tick_size) * LOTS[symbol]
-    arm_money, trail_money = TRAIL_ARM_MONEY[symbol], TRAIL_MONEY[symbol]
 
     res = Result()
     pos: Trade | None = None
     struct_level = 0.0
-    peak = 0.0
-    trail_armed = False
     lock_armed = False
     lock_peak = 0.0
     reentry_side = 0
@@ -183,17 +178,13 @@ def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BA
                 best_profit = (best - pos.entry_price) * pos.side * mpp
                 worst_profit = (worst - pos.entry_price) * pos.side * mpp
 
-                def _raise():
-                    nonlocal lock_armed, lock_peak
+                # Optimistic: this bar's extreme lifts the peak BEFORE the floor
+                # is tested, i.e. the high is assumed to come before the low.
+                if lock_optimistic:
                     if not lock_armed and best_profit >= lock:
                         lock_armed, lock_peak = True, best_profit
                     elif lock_armed:
                         lock_peak = max(lock_peak, best_profit)
-
-                # Optimistic: this bar's extreme lifts the peak BEFORE the floor
-                # is tested, i.e. the high is assumed to come before the low.
-                if lock_optimistic:
-                    _raise()
                 if lock_armed:
                     floor = max(lock, lock_peak - lock_trail)
                     if worst_profit < floor:
@@ -203,7 +194,10 @@ def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BA
                 # Conservative: the floor was tested against the peak carried in
                 # from earlier bars, and only now does this bar raise it.
                 if not closed and not lock_optimistic:
-                    _raise()
+                    if not lock_armed and best_profit >= lock:
+                        lock_armed, lock_peak = True, best_profit
+                    elif lock_armed:
+                        lock_peak = max(lock_peak, best_profit)
 
             # 2. S-N failure line: frozen at entry, tested on the CLOSE
             if not closed and use_struct and struct_level > 0:
@@ -246,7 +240,6 @@ def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BA
                     reentry_side, reentry_left = 0, 0
                 pos = None
                 struct_level = 0.0
-                trail_armed = False
                 continue
 
             # The failure line is FROZEN at entry - nothing to advance.
@@ -299,10 +292,8 @@ def run(symbol: str, bars: int, pair: str = "1", *, struct_back: int = STRUCT_BA
 
         pos = Trade(side=want, entry_i=i, entry_price=fill)
         pos.spread = half_spread * mpp
-        peak = h[i] if want == BUY else lo[i]
         # S-N measured from the SIGNAL candle, which is this bar.
         struct_level = lo[i - struct_back] if want == BUY else h[i - struct_back]
-        trail_armed = False
         lock_armed = False
         lock_peak = 0.0
         reentry_side, reentry_left = 0, 0
