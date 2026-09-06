@@ -838,8 +838,29 @@ enum ENUM_STRUCT_STOP_MODE
 //| So the colour rule is held off for a grace period, counted from   |
 //| the fill. THE POSITIONAL CANDLE - the bar the fill landed on - is |
 //| excluded by construction: counting starts on the bar after it. At |
-//| the default of 5, bars 1 to 5 after the positional candle are     |
-//| skipped and the first bar the rule may act on is the 6th.         |
+//| the default of 4, bars 1 to 4 after the positional candle are     |
+//| skipped and the first bar the rule may TEST is the 5th.           |
+//|                                                                  |
+//| ====================================================================
+//| THE TRIGGER BAR AND THE FILL BAR ARE NOT THE SAME BAR
+//| ====================================================================
+//| A candle's colour is not known until it closes, and the close of  |
+//| bar N is the open of bar N+1. So the rule tests bar P+5, and the  |
+//| order it sends fills at the start of P+6. On the chart the exit   |
+//| arrow sits on P+6, because that is when the deal happened.        |
+//|                                                                  |
+//| This was mistaken for an off-by-one once, so it is worth being    |
+//| concrete. With the previous default of 5, four consecutive live   |
+//| trades on FixedVol100 showed:                                     |
+//|                                                                  |
+//|   entry 11:00, P+6 = 11:06 closed GREEN, deal stamped 11:07:00    |
+//|   entry 11:22, P+6 = 11:28 closed GREEN, deal stamped 11:29:00    |
+//|   entry 11:31, P+6 = 11:37 closed GREEN, deal stamped 11:38:00    |
+//|                                                                  |
+//| and the fill price confirmed it: 5263.215 against an 11:07 open   |
+//| of 5262.268 plus the ~0.95 spread. The rule fired on the sixth    |
+//| bar; only the deal landed on the seventh. Lowering the grace by   |
+//| one moves BOTH down a bar, which is what this default does.       |
 //|                                                                  |
 //| ====================================================================
 //| BARS AND MINUTES BOTH, BECAUSE THEY ONLY AGREE ON M1
@@ -894,7 +915,7 @@ enum ENUM_STRUCT_STOP_MODE
 //| NO PYTHON COUNTERPART.                                            |
 //+------------------------------------------------------------------+
 input group "--- Entry grace (no Python counterpart) ---"
-input int  InpEntryGraceBars    = 5;   // Candles after the POSITIONAL candle to skip. 0 = off
+input int  InpEntryGraceBars    = 4;   // Candles after the POSITIONAL candle to skip. 0 = off
 input int  InpEntryGraceMinutes = 0;   // Minutes after the fill to skip. 0 = off (default)
 
 input group "--- Structural stop: candle low/high (no Python counterpart) ---"
