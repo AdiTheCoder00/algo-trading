@@ -2070,6 +2070,11 @@ void PaintDashboard(void)
    g_dash.Set(r++,"7 DAYS",StringFormat("%+.2f",week),(week>=0?cOk:cBad));
    g_dash.Set(r++,"EQUITY",StringFormat("%.2f",AccountInfoDouble(ACCOUNT_EQUITY)),cWhite);
 
+//--- The panel is three rows shorter when flat than when holding. Without this
+//--- the tail of the taller layout stays on screen with the values it had when
+//--- the last position was open, which reads as live data.
+   g_dash.ClearFrom(r);
+
    ChartRedraw(0);
   }
 

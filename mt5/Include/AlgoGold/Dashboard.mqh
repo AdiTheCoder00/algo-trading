@@ -80,6 +80,11 @@ public:
    void              Set(const int row,const string label,const string value,const color clr=clrWhite);
    //--- A group caption. Same row budget as any other row; no value column.
    void              SetSection(const int row,const string caption);
+   //--- Delete every row from `row` onward. A panel that shrinks - the
+   //--- position block is shorter when flat - otherwise leaves the tail of
+   //--- its longer layout on screen, showing values from the last time it
+   //--- was that tall.
+   void              ClearFrom(const int row);
    //--- Same row, but the VALUE is two sizes larger and bold. For the one
    //--- number a person looks for first; everything else stays uniform so
    //--- that emphasis keeps meaning something.
@@ -185,7 +190,9 @@ void CGoldDashboard::MakeLabelFont(const string part,const int x,const int y,
    ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
    ObjectSetInteger(0,n,OBJPROP_HIDDEN,true);
    ObjectSetString(0,n,OBJPROP_FONT,font);
-   ObjectSetString(0,n,OBJPROP_TEXT,text);
+   //--- An empty OBJPROP_TEXT does not blank the label, it lets MT5 fall back
+   //--- to its own default - the literal word "Label". A space is blank.
+   ObjectSetString(0,n,OBJPROP_TEXT,(text=="" ? " " : text));
   }
 
 //+------------------------------------------------------------------+
@@ -254,6 +261,25 @@ void CGoldDashboard::SetBig(const int row,const string label,const string value,
    MakeLabelFont("V"+IntegerToString(row),m_x+m_valueDx,y-2,10,clr,value,m_fontBold);
    if(row+1>m_rows)
       m_rows = row+1;
+  }
+
+//+------------------------------------------------------------------+
+//| Drop rows `row`..DASH_MAX_ROWS-1, and shrink the backdrop to fit. |
+//+------------------------------------------------------------------+
+void CGoldDashboard::ClearFrom(const int row)
+  {
+   if(!m_active || row<0)
+      return;
+   for(int i=row; i<DASH_MAX_ROWS; i++)
+     {
+      ObjectDelete(0,Name("L"+IntegerToString(i)));
+      ObjectDelete(0,Name("V"+IntegerToString(i)));
+     }
+   if(row<m_rows)
+     {
+      m_rows = row;
+      EnsureBackdrop();
+     }
   }
 
 #endif // ALGOGOLD_DASHBOARD_MQH
