@@ -421,18 +421,24 @@ input double InpBasketTakeMoney   = 2.0;     // Close ALL positions at this comb
 //|     floor = max(InpProfitLockMoney, peak - InpProfitTrailMoney)   |
 //|                                                                  |
 //| Nothing happens until floating profit first reaches the lock. It  |
-//| then cannot fall back through it: at the defaults, once 1.00 is   |
-//| touched the trade closes the moment profit drops below 1.00, and  |
+//| then cannot fall back through it: at the defaults, once 1.50 is   |
+//| touched the trade closes the moment profit drops below 1.50, and  |
 //| as profit climbs the floor follows 0.20 behind the best level     |
 //| seen.                                                             |
 //|                                                                  |
-//|     peak 1.00 -> floor 1.00      peak 1.50 -> floor 1.30          |
-//|     peak 1.20 -> floor 1.00      peak 2.00 -> floor 1.80          |
+//|     peak 1.50 -> floor 1.50      peak 2.00 -> floor 1.80          |
+//|     peak 1.70 -> floor 1.50      peak 2.50 -> floor 2.30          |
 //|                                                                  |
 //| The max() is what stops the two rules contradicting each other: a |
-//| bare trail would put the floor at 0.80 the moment it armed at     |
-//| 1.00, which is not what "exit as soon as it crosses below 1"      |
-//| means.                                                            |
+//| bare trail would put the floor at 1.30 the moment it armed at     |
+//| 1.50, which is not what "exit as soon as it crosses below the     |
+//| lock" means. The trail only binds once the peak passes 1.70.      |
+//|                                                                  |
+//| Raised from 1.00 after a live session in which every profitable   |
+//| exit was this rule firing at about +1.00 while the losing exits,  |
+//| taken by the colour rule, ran from -0.21 to -1.90. Capping wins   |
+//| below the size of the losses is not a survivable shape, and       |
+//| lifting the lock is the direct lever on it.                       |
 //|                                                                  |
 //| ====================================================================
 //| IT RUNS ON THE TICK, AND IT IGNORES THE ENTRY GRACE
@@ -459,7 +465,7 @@ input double InpBasketTakeMoney   = 2.0;     // Close ALL positions at this comb
 //| a trail tighter than the spread is triggered by the book rather   |
 //| than by the market.                                               |
 //+------------------------------------------------------------------+
-input double InpProfitLockMoney   = 1.00;    // Arm once floating profit reaches this. 0 = off
+input double InpProfitLockMoney   = 1.50;    // Arm once floating profit reaches this. 0 = off
 input double InpProfitTrailMoney  = 0.20;    // Once armed, exit if profit falls this far below its peak
 
 //+------------------------------------------------------------------+
@@ -830,9 +836,15 @@ enum ENUM_STRUCT_STOP_MODE
 //---
 //--- ENTRY freezes one level at the moment of entry: the low (long) or high
 //--- (short) of the candle InpStructStopBack bars before the SIGNAL candle. At
-//--- the default of 4 that is S-4, and it never moves for the life of the
+//--- the default of 8 that is S-8, and it never moves for the life of the
 //--- trade. It is a line drawn behind the entry, and breaking it says the move
 //--- the entry was taken on has failed.
+//---
+//--- The default was 4 and was widened to 8 after live observation. Eight bars
+//--- back is a further level, so the line is looser and fires less often - it
+//--- is the difference between "the last few bars failed" and "the swing the
+//--- entry belonged to failed". Neither has been backtested; the number is a
+//--- judgement about how much room a trade should get, and it is one input.
 //---
 //--- ROLLING is the original behaviour: recomputed every bar from the candle
 //--- InpStructStopBack before the last closed one, ratcheting so it only ever
@@ -940,7 +952,7 @@ input int  InpEntryGraceMinutes = 0;   // Minutes after the fill to skip. 0 = of
 
 input group "--- Structural stop: candle low/high (no Python counterpart) ---"
 input bool InpStructStopEnabled = true;               // Failure line: exit if a candle CLOSES beyond the S-N level
-input int  InpStructStopBack    = 4;                  // How many candles before the SIGNAL candle. 4 = "S-4"
+input int  InpStructStopBack    = 8;                  // How many candles before the SIGNAL candle. 8 = "S-8"
 input bool InpStructStopRatchet = true;               // Only ever tighten the level, never widen it
 input ENUM_STRUCT_ANCHOR    InpStructStopAnchor = STRUCT_ANCHOR_ENTRY;   // Where the level comes from
 input ENUM_STRUCT_STOP_MODE InpStructStopMode   = STRUCT_STOP_ON_CLOSE;  // How it fires
