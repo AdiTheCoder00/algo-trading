@@ -489,6 +489,20 @@ input double InpBasketTakeMoney   = 2.0;     // Close ALL positions at this comb
 //+------------------------------------------------------------------+
 input double InpProfitLockMoney   = 1.00;    // Arm once floating profit reaches this. 0 = off
 input double InpProfitTrailMoney  = 0.20;    // Once armed, exit if profit falls this far below its peak
+//--- SKIP THE BAR THE LOCK EXITED IN.
+//---
+//--- The lock fires on a TICK, part-way through a bar. That bar then closes,
+//--- OnClosedBar runs, the expert is flat, and the gates are very likely still
+//--- saying the same thing they said a minute ago - so without this it re-enters
+//--- on the close of the very bar it just took profit in, at a price barely
+//--- different from the one it exited at, paying a fresh spread for the
+//--- privilege.
+//---
+//--- Every other exit already avoids this: the colour rule and the failure line
+//--- both fire INSIDE OnClosedBar and return, so the entry logic never runs on
+//--- that bar. Only the tick-based exits can land mid-bar and leave the entry
+//--- path free to fire on the same close. This closes that gap.
+input bool   InpLockExitSkipBar  = true;     // After a profit-lock exit, no entry on that bar's close
 
 //+------------------------------------------------------------------+
 //| CAMARILLA LEVEL FILTER - keep entries away from the pivots.       |
@@ -1072,6 +1086,9 @@ double           g_structStop    = 0.0;
 int              g_markSlot      = 0;
 datetime         g_markedEntry   = 0;
 bool             g_markOpen      = false;
+//--- The bar a tick-based exit landed in, so the entry path can decline that
+//--- bar's close. Zero when there is nothing to skip.
+datetime         g_lockExitBar   = 0;
 bool             g_lockArmed     = false;
 double           g_lockPeak      = 0.0;
 int              g_reentrySide   = -1;
@@ -2281,6 +2298,8 @@ bool CheckProfitLock()
    g_structStop = 0.0;
    g_lockArmed  = false;
    g_lockPeak   = 0.0;
+   //--- Remember the bar this landed in. The entry path declines its close.
+   g_lockExitBar = iTime(_Symbol,g_tf,0);
    return true;
   }
 
@@ -3140,6 +3159,22 @@ void OnClosedBar()
 
    if(wantSide<0)
       return;
+
+//--- The bar a profit-lock exit landed in does not get to open the next trade.
+//--- Compared against the bar being EVALUATED - shift 1 - not against bar 0,
+//--- which has already moved on by the time this runs.
+   if(InpLockExitSkipBar && g_lockExitBar!=0)
+     {
+      if(iTime(_Symbol,g_tf,1)==g_lockExitBar)
+        {
+         Print("entry suppressed: this is the close of the bar the profit lock "
+               "exited in - the next bar may enter");
+         return;
+        }
+      //--- Past it now; stop carrying the state.
+      g_lockExitBar = 0;
+     }
+
    if(!InpAllowNewEntries)
      {
       Print("entry suppressed: InpAllowNewEntries is false");
