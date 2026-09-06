@@ -414,6 +414,55 @@ input bool   InpCamFilterScaleIn  = false;   // true = the Camarilla filter also
 input double InpBasketTakeMoney   = 2.0;     // Close ALL positions at this combined profit. 0 = off
 
 //+------------------------------------------------------------------+
+//| PROFIT LOCK - arm at a profit, then trail behind the peak.        |
+//|                                                                  |
+//| Two numbers, and the floor is the HIGHER of what they imply:      |
+//|                                                                  |
+//|     floor = max(InpProfitLockMoney, peak - InpProfitTrailMoney)   |
+//|                                                                  |
+//| Nothing happens until floating profit first reaches the lock. It  |
+//| then cannot fall back through it: at the defaults, once 1.00 is   |
+//| touched the trade closes the moment profit drops below 1.00, and  |
+//| as profit climbs the floor follows 0.20 behind the best level     |
+//| seen.                                                             |
+//|                                                                  |
+//|     peak 1.00 -> floor 1.00      peak 1.50 -> floor 1.30          |
+//|     peak 1.20 -> floor 1.00      peak 2.00 -> floor 1.80          |
+//|                                                                  |
+//| The max() is what stops the two rules contradicting each other: a |
+//| bare trail would put the floor at 0.80 the moment it armed at     |
+//| 1.00, which is not what "exit as soon as it crosses below 1"      |
+//| means.                                                            |
+//|                                                                  |
+//| ====================================================================
+//| IT RUNS ON THE TICK, AND IT IGNORES THE ENTRY GRACE
+//| ====================================================================
+//| "The moment it crosses below" cannot be honoured once a minute,   |
+//| so this is checked on every tick rather than on the bar close.    |
+//| The grace does not apply either: the grace exists to stop the     |
+//| colour rule closing a trade that has not been given a chance, and |
+//| a trade that has already reached the lock has had its chance.     |
+//|                                                                  |
+//| ====================================================================
+//| IT IS A SECOND EXIT, AND THE FIRST ONE STILL RUNS
+//| ====================================================================
+//| The colour rule is unchanged. Whichever fires first ends the      |
+//| trade, so a position can now close either because a candle closed |
+//| against it from the sixth candle, or because it gave back its     |
+//| locked profit. Set InpProfitLockMoney to 0 for the colour rule    |
+//| alone.                                                            |
+//|                                                                  |
+//| MIND THE MONEY-TO-PRICE CONVERSION. These are account-currency    |
+//| amounts on the netted position, so the price distance they mean   |
+//| depends on InpLots and on the symbol. Init prints both, and the   |
+//| trail is worth comparing against the SPREAD before it is trusted: |
+//| a trail tighter than the spread is triggered by the book rather   |
+//| than by the market.                                               |
+//+------------------------------------------------------------------+
+input double InpProfitLockMoney   = 1.00;    // Arm once floating profit reaches this. 0 = off
+input double InpProfitTrailMoney  = 0.20;    // Once armed, exit if profit falls this far below its peak
+
+//+------------------------------------------------------------------+
 //| CAMARILLA LEVEL FILTER - keep entries away from the pivots.       |
 //|                                                                  |
 //| Ported from "Camarilla Channel.mq5" (MetaQuotes, shipped under    |
@@ -906,6 +955,10 @@ datetime         g_trendWarnAt   = 0;
 //--- when flat; reset the moment a position opens or closes so a level from
 //--- the previous trade can never be applied to the next one.
 double           g_structStop    = 0.0;
+//--- Profit lock: whether it has armed on the position now held, and the
+//--- best floating profit seen since it did.
+bool             g_lockArmed     = false;
+double           g_lockPeak      = 0.0;
 int              g_reentrySide   = -1;
 int              g_reentryLeft   = 0;
 datetime         g_camWarnAt     = 0;
@@ -1657,7 +1710,11 @@ void OnTick()
 //--- the recovery when it appears. The expensive part (replaying the bars to
 //--- decide whether the position was marked) is cached and refreshed on the
 //--- bar boundary below, so this path is only a P&L read.
-//--- Basket take profit FIRST: it closes everything, so there is no point
+//--- Profit lock FIRST of all: "the moment it crosses below" is the whole
+//--- point, so nothing else acts on a tick where the floor has broken.
+   if(CheckProfitLock())
+      return;
+//--- Basket take profit next: it closes everything, so there is no point
 //--- adding to a position on the same tick that the basket is done.
    if(InpBasketTakeMoney>0.0 && CheckBasketTakeProfit())
       return;
@@ -1765,8 +1822,17 @@ void PaintDashboard(void)
          g_dash.Set(r++,"CANDLE EXIT","ARMED",cOk);
       else
          g_dash.Set(r++,"CANDLE EXIT","in grace",cHot);
-      const bool armed = TrailIsArmed(g_trail,EffectiveTrailActivationPct(pos.entry));
-      g_dash.Set(r++,"TRAIL",(armed?"armed":"not armed"),(armed?cOk:cDim));
+      if(InpProfitLockMoney<=0.0)
+         g_dash.Set(r++,"P LOCK","off",cDim);
+      else if(!g_lockArmed)
+         g_dash.Set(r++,"P LOCK",StringFormat("arms at %+.2f",InpProfitLockMoney),cDim);
+      else
+        {
+         const double lockFloor = MathMax(InpProfitLockMoney,
+                                          g_lockPeak-MathMax(InpProfitTrailMoney,0.0));
+         g_dash.Set(r++,"P LOCK",
+                    StringFormat("floor %+.2f  (peak %+.2f)",lockFloor,g_lockPeak),cOk);
+        }
       if(InpStructStopEnabled && g_structStop>0.0)
          g_dash.Set(r++,"STRUCT SL",
                     StringFormat("%.*f  (%+.*f)",digits,g_structStop,
@@ -1866,6 +1932,76 @@ void PaintDashboard(void)
    g_dash.Set(r++,"EQUITY",StringFormat("%.2f",AccountInfoDouble(ACCOUNT_EQUITY)),cWhite);
 
    ChartRedraw(0);
+  }
+
+//+------------------------------------------------------------------+
+//| Floating P&L across our tickets - price move plus financing, the  |
+//| same pair the dashboard and the basket rule use.                  |
+//+------------------------------------------------------------------+
+double FloatingProfit()
+  {
+   double profit = 0.0;
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      if(PositionGetSymbol(i)!=_Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=InpMagic)
+         continue;
+      profit += PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
+     }
+   return profit;
+  }
+
+//+------------------------------------------------------------------+
+//| Arm at InpProfitLockMoney, then hold a floor that trails the peak.|
+//| Returns true if it closed the position.                           |
+//+------------------------------------------------------------------+
+bool CheckProfitLock()
+  {
+   if(InpProfitLockMoney<=0.0)
+      return false;
+
+   const GoldPosition pos = g_trader.Snapshot();
+   if(!pos.exists)
+     {
+      g_lockArmed = false;
+      g_lockPeak  = 0.0;
+      return false;
+     }
+
+   const double profit = FloatingProfit();
+
+   if(!g_lockArmed)
+     {
+      if(profit < InpProfitLockMoney)
+         return false;
+      g_lockArmed = true;
+      g_lockPeak  = profit;
+      PrintFormat("profit lock ARMED at %.2f - this trade can no longer close below %.2f",
+                  profit,InpProfitLockMoney);
+      return false;
+     }
+
+   if(profit>g_lockPeak)
+      g_lockPeak = profit;
+
+//--- The floor never drops below the lock, however far the trail would take it.
+   const double floorLevel = MathMax(InpProfitLockMoney,
+                                     g_lockPeak-MathMax(InpProfitTrailMoney,0.0));
+   if(profit>=floorLevel)
+      return false;
+
+   const string reason = StringFormat("profit lock: %.2f fell below the %.2f floor "
+                                      "(peak %.2f, trail %.2f)",
+                                      profit,floorLevel,g_lockPeak,InpProfitTrailMoney);
+   PrintFormat("%s",reason);
+   g_trader.CloseAll(reason);
+   TrailClear(g_trail);
+   ReentryClear();
+   g_structStop = 0.0;
+   g_lockArmed  = false;
+   g_lockPeak   = 0.0;
+   return true;
   }
 
 //+------------------------------------------------------------------+
