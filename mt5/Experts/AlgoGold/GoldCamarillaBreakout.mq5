@@ -945,6 +945,39 @@ input bool InpStructStopRatchet = true;               // Only ever tighten the l
 input ENUM_STRUCT_ANCHOR    InpStructStopAnchor = STRUCT_ANCHOR_ENTRY;   // Where the level comes from
 input ENUM_STRUCT_STOP_MODE InpStructStopMode   = STRUCT_STOP_ON_CLOSE;  // How it fires
 
+//+------------------------------------------------------------------+
+//| TRADE MARKERS - colour the entry and exit candles.                |
+//|                                                                  |
+//| MT5 has no per-candle colour: CHART_COLOR_CANDLE_BULL and its     |
+//| bearish twin are chart-wide, so a single candle cannot be tinted  |
+//| by asking the chart. What can be done is to draw a filled         |
+//| rectangle over that candle's high-low range, which reads as the   |
+//| candle having changed colour and is what these are.               |
+//|                                                                  |
+//| The box is drawn in FRONT (OBJPROP_BACK false) and filled, so it  |
+//| covers the candle rather than tinting behind it. Behind would be  |
+//| invisible - the candle body would paint straight over it.         |
+//|                                                                  |
+//| ====================================================================
+//| ONLY THE LAST FEW TRADES, ON PURPOSE
+//| ====================================================================
+//| Marking every trade would put thousands of objects on the chart   |
+//| within a session at M1 speeds, and a chart carrying thousands of  |
+//| objects redraws slowly enough to be felt. The markers therefore   |
+//| cycle through InpMarkTradeCount slots: opening trade number N+1   |
+//| deletes the pair belonging to trade N-1, so exactly the most      |
+//| recent few remain and the object count is bounded no matter how   |
+//| long the expert runs.                                             |
+//|                                                                  |
+//| They are removed on deinit like the panel, so removing the expert |
+//| does not leave boxes behind on the chart.                         |
+//+------------------------------------------------------------------+
+input group "--- Trade markers ---"
+input bool  InpMarkTrades     = true;           // Colour the entry/exit candles on the chart
+input int   InpMarkTradeCount = 2;              // How many recent trades stay marked
+input color InpMarkEntryColor = clrDodgerBlue;  // Entry candle colour
+input color InpMarkExitColor  = clrBlack;       // Exit candle colour
+
 input group "--- Dashboard ---"
 input bool   InpShowDashboard    = true;    // On-chart status panel
 input int    InpDashX            = 12;      // Panel X offset, pixels
@@ -999,6 +1032,11 @@ datetime         g_trendWarnAt   = 0;
 double           g_structStop    = 0.0;
 //--- Profit lock: whether it has armed on the position now held, and the
 //--- best floating profit seen since it did.
+//--- Trade markers: which slot the open trade owns, whose entry has already
+//--- been drawn, and whether an exit box is still owed for it.
+int              g_markSlot      = 0;
+datetime         g_markedEntry   = 0;
+bool             g_markOpen      = false;
 bool             g_lockArmed     = false;
 double           g_lockPeak      = 0.0;
 int              g_reentrySide   = -1;
@@ -1737,6 +1775,9 @@ void OnDeinit(const int reason)
       IndicatorRelease(g_demaHandle);
       g_demaHandle = INVALID_HANDLE;
      }
+   for(int i=0; i<64; i++)
+      MarkerDelete(i);
+   ChartRedraw(0);
    g_dash.Destroy();
    PrintFormat("stopped (reason %d). Open positions are LEFT AS THEY ARE - removing an "
                "expert is not a flatten instruction.",reason);
@@ -1767,6 +1808,7 @@ void OnTick()
    if(InpScaleInEnabled)
       CheckScaleIn();
 
+   UpdateTradeMarkers();
    PaintDashboard();
 
    const datetime current = iTime(_Symbol,g_tf,0);
@@ -1974,6 +2016,87 @@ void PaintDashboard(void)
    g_dash.Set(r++,"EQUITY",StringFormat("%.2f",AccountInfoDouble(ACCOUNT_EQUITY)),cWhite);
 
    ChartRedraw(0);
+  }
+
+//+------------------------------------------------------------------+
+//| Both boxes of one marker slot.                                    |
+//+------------------------------------------------------------------+
+void MarkerDelete(const int slot)
+  {
+   ObjectDelete(0,StringFormat("AGCamMK_%d_IN",slot));
+   ObjectDelete(0,StringFormat("AGCamMK_%d_OUT",slot));
+  }
+
+//+------------------------------------------------------------------+
+//| A filled box over one candle's high-low range.                    |
+//|                                                                  |
+//| Spanning half a bar either side of the bar's own timestamp, not   |
+//| from it to the next one: a candle is drawn CENTRED on its time,   |
+//| so a box from t to t+period would sit half a candle to the right  |
+//| of the candle it is meant to cover.                               |
+//+------------------------------------------------------------------+
+void MarkerDraw(const string name,const datetime barTime,const color clr)
+  {
+   const int shift = iBarShift(_Symbol,g_tf,barTime,false);
+   if(shift<0)
+      return;
+   const double hi = iHigh(_Symbol,g_tf,shift);
+   const double lo = iLow(_Symbol,g_tf,shift);
+   if(hi<=0.0 || lo<=0.0)
+      return;
+
+   const int      half = PeriodSeconds(g_tf)/2;
+   const datetime t0   = iTime(_Symbol,g_tf,shift);
+
+   ObjectDelete(0,name);
+   if(!ObjectCreate(0,name,OBJ_RECTANGLE,0,t0-half,hi,t0+half,lo))
+      return;
+   ObjectSetInteger(0,name,OBJPROP_COLOR,clr);
+   ObjectSetInteger(0,name,OBJPROP_FILL,true);
+   ObjectSetInteger(0,name,OBJPROP_BACK,false);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,name,OBJPROP_SELECTED,false);
+   ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+   ObjectSetInteger(0,name,OBJPROP_ZORDER,0);
+  }
+
+//+------------------------------------------------------------------+
+//| Notice a position appearing or disappearing, and box the candle   |
+//| it happened on. Called on the tick, so an exit is boxed on the    |
+//| bar the deal actually landed in rather than the next one.         |
+//+------------------------------------------------------------------+
+void UpdateTradeMarkers()
+  {
+   if(!InpMarkTrades)
+      return;
+   //--- Chart objects in a non-visual tester run cost time and show nobody
+   //--- anything, the same reason the panel skips them.
+   if((bool)MQLInfoInteger(MQL_TESTER) && !(bool)MQLInfoInteger(MQL_VISUAL_MODE))
+      return;
+
+   const int slots = MathMax(InpMarkTradeCount,1);
+   const GoldPosition pos = g_trader.Snapshot();
+
+   if(pos.exists && pos.openTime!=g_markedEntry)
+     {
+      //--- A new trade takes the next slot, evicting whatever was in it. That
+      //--- is what bounds the object count.
+      g_markSlot = (g_markSlot+1)%slots;
+      MarkerDelete(g_markSlot);
+      MarkerDraw(StringFormat("AGCamMK_%d_IN",g_markSlot),pos.openTime,InpMarkEntryColor);
+      g_markedEntry = pos.openTime;
+      g_markOpen    = true;
+      ChartRedraw(0);
+      return;
+     }
+
+   if(!pos.exists && g_markOpen)
+     {
+      MarkerDraw(StringFormat("AGCamMK_%d_OUT",g_markSlot),
+                 iTime(_Symbol,g_tf,0),InpMarkExitColor);
+      g_markOpen = false;
+      ChartRedraw(0);
+     }
   }
 
 //+------------------------------------------------------------------+
