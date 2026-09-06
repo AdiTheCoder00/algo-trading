@@ -2057,8 +2057,8 @@ void PaintDashboard(void)
 //+------------------------------------------------------------------+
 void MarkerDelete(const int slot)
   {
-   ObjectDelete(0,StringFormat("AGCamMK_%d_IN",slot));
-   ObjectDelete(0,StringFormat("AGCamMK_%d_OUT",slot));
+   ObjectDelete(0,StringFormat("AGMK_%d_IN",slot));
+   ObjectDelete(0,StringFormat("AGMK_%d_OUT",slot));
   }
 
 //+------------------------------------------------------------------+
@@ -2083,8 +2083,20 @@ void MarkerDraw(const string name,const datetime barTime,const color clr)
    const datetime t0   = iTime(_Symbol,g_tf,shift);
 
    ObjectDelete(0,name);
+   ResetLastError();
    if(!ObjectCreate(0,name,OBJ_RECTANGLE,0,t0-half,hi,t0+half,lo))
+     {
+      //--- Said out loud. A marker that silently fails to appear is
+      //--- indistinguishable from an expert that never traded, and telling
+      //--- those apart from a screenshot is impossible.
+      PrintFormat("marker %s could not be created on the %s bar at %s - error %d",
+                  name,EnumToString(g_tf),TimeToString(t0,TIME_MINUTES),GetLastError());
       return;
+     }
+   PrintFormat("marker %s drawn on the bar at %s (%.*f .. %.*f)",
+               name,TimeToString(t0,TIME_MINUTES),
+               (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS),lo,
+               (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS),hi);
    ObjectSetInteger(0,name,OBJPROP_COLOR,clr);
    ObjectSetInteger(0,name,OBJPROP_FILL,true);
    ObjectSetInteger(0,name,OBJPROP_BACK,false);
@@ -2117,7 +2129,7 @@ void UpdateTradeMarkers()
       //--- is what bounds the object count.
       g_markSlot = (g_markSlot+1)%slots;
       MarkerDelete(g_markSlot);
-      MarkerDraw(StringFormat("AGCamMK_%d_IN",g_markSlot),pos.openTime,InpMarkEntryColor);
+      MarkerDraw(StringFormat("AGMK_%d_IN",g_markSlot),pos.openTime,InpMarkEntryColor);
       g_markedEntry = pos.openTime;
       g_markOpen    = true;
       ChartRedraw(0);
@@ -2126,7 +2138,7 @@ void UpdateTradeMarkers()
 
    if(!pos.exists && g_markOpen)
      {
-      MarkerDraw(StringFormat("AGCamMK_%d_OUT",g_markSlot),
+      MarkerDraw(StringFormat("AGMK_%d_OUT",g_markSlot),
                  iTime(_Symbol,g_tf,0),InpMarkExitColor);
       g_markOpen = false;
       ChartRedraw(0);
