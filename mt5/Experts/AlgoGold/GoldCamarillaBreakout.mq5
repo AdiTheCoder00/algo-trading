@@ -1011,6 +1011,7 @@ input bool  InpMarkTrades     = true;           // Colour the entry/exit candles
 input int   InpMarkTradeCount = 2;              // How many recent trades stay marked
 input color InpMarkEntryColor = clrDodgerBlue;  // Entry candle colour
 input color InpMarkExitColor  = clrBlack;       // Exit candle colour
+input color InpMarkSlColor    = clrRed;         // S-N failure line colour
 
 input group "--- Dashboard ---"
 input bool   InpShowDashboard    = true;    // On-chart status panel
@@ -1811,6 +1812,8 @@ void OnDeinit(const int reason)
      }
    for(int i=0; i<64; i++)
       MarkerDelete(i);
+   ObjectDelete(0,"AGMK_SL");
+   ObjectDelete(0,"AGMK_SLTXT");
    ChartRedraw(0);
    g_dash.Destroy();
    PrintFormat("stopped (reason %d). Open positions are LEFT AS THEY ARE - removing an "
@@ -1843,6 +1846,7 @@ void OnTick()
       CheckScaleIn();
 
    UpdateTradeMarkers();
+   UpdateStopLine();
    PaintDashboard();
 
    const datetime current = iTime(_Symbol,g_tf,0);
@@ -2104,6 +2108,71 @@ void MarkerDraw(const string name,const datetime barTime,const color clr)
    ObjectSetInteger(0,name,OBJPROP_SELECTED,false);
    ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
    ObjectSetInteger(0,name,OBJPROP_ZORDER,0);
+  }
+
+//+------------------------------------------------------------------+
+//| The S-N failure line, drawn from the entry bar and rayed right.   |
+//|                                                                  |
+//| A ray rather than a full-width horizontal line: the level only    |
+//| means anything from the entry onwards, and an OBJ_HLINE would     |
+//| paint it across history it had nothing to do with.                |
+//|                                                                  |
+//| Removed the moment the position closes, because a stop level for  |
+//| a trade that no longer exists is worse than no line at all - it   |
+//| reads as a live level.                                            |
+//+------------------------------------------------------------------+
+void UpdateStopLine()
+  {
+   const string ln = "AGMK_SL";
+   const string tx = "AGMK_SLTXT";
+
+   if(!InpMarkTrades || !InpStructStopEnabled ||
+      ((bool)MQLInfoInteger(MQL_TESTER) && !(bool)MQLInfoInteger(MQL_VISUAL_MODE)))
+     {
+      ObjectDelete(0,ln);
+      ObjectDelete(0,tx);
+      return;
+     }
+
+   const GoldPosition pos = g_trader.Snapshot();
+   if(!pos.exists || g_structStop<=0.0)
+     {
+      ObjectDelete(0,ln);
+      ObjectDelete(0,tx);
+      return;
+     }
+
+   const int      digits = (int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+   const datetime from   = pos.openTime;
+   const datetime now    = iTime(_Symbol,g_tf,0);
+
+   if(ObjectFind(0,ln)<0)
+      ObjectCreate(0,ln,OBJ_TREND,0,from,g_structStop,now,g_structStop);
+   ObjectMove(0,ln,0,from,g_structStop);
+   ObjectMove(0,ln,1,now,g_structStop);
+   ObjectSetInteger(0,ln,OBJPROP_RAY_RIGHT,true);
+   ObjectSetInteger(0,ln,OBJPROP_COLOR,InpMarkSlColor);
+   ObjectSetInteger(0,ln,OBJPROP_STYLE,STYLE_DASH);
+   ObjectSetInteger(0,ln,OBJPROP_WIDTH,1);
+   ObjectSetInteger(0,ln,OBJPROP_BACK,false);
+   ObjectSetInteger(0,ln,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,ln,OBJPROP_SELECTED,false);
+   ObjectSetInteger(0,ln,OBJPROP_HIDDEN,true);
+
+   //--- The depth is read from the input rather than hard-coded, so the label
+   //--- cannot go on claiming S-8 after someone sets it to 12.
+   const string text = StringFormat("S-%d  %.*f",InpStructStopBack,digits,g_structStop);
+   if(ObjectFind(0,tx)<0)
+      ObjectCreate(0,tx,OBJ_TEXT,0,now,g_structStop);
+   ObjectMove(0,tx,0,now,g_structStop);
+   ObjectSetString(0,tx,OBJPROP_TEXT,text);
+   ObjectSetString(0,tx,OBJPROP_FONT,"Consolas");
+   ObjectSetInteger(0,tx,OBJPROP_FONTSIZE,8);
+   ObjectSetInteger(0,tx,OBJPROP_COLOR,InpMarkSlColor);
+   ObjectSetInteger(0,tx,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0,tx,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,tx,OBJPROP_SELECTED,false);
+   ObjectSetInteger(0,tx,OBJPROP_HIDDEN,true);
   }
 
 //+------------------------------------------------------------------+
