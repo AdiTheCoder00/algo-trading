@@ -421,24 +421,46 @@ input double InpBasketTakeMoney   = 2.0;     // Close ALL positions at this comb
 //|     floor = max(InpProfitLockMoney, peak - InpProfitTrailMoney)   |
 //|                                                                  |
 //| Nothing happens until floating profit first reaches the lock. It  |
-//| then cannot fall back through it: at the defaults, once 1.50 is   |
-//| touched the trade closes the moment profit drops below 1.50, and  |
+//| then cannot fall back through it: at the defaults, once 1.00 is   |
+//| touched the trade closes the moment profit drops below 1.00, and  |
 //| as profit climbs the floor follows 0.20 behind the best level     |
 //| seen.                                                             |
 //|                                                                  |
-//|     peak 1.50 -> floor 1.50      peak 2.00 -> floor 1.80          |
-//|     peak 1.70 -> floor 1.50      peak 2.50 -> floor 2.30          |
+//|     peak 1.00 -> floor 1.00      peak 1.50 -> floor 1.30          |
+//|     peak 1.20 -> floor 1.00      peak 2.00 -> floor 1.80          |
 //|                                                                  |
 //| The max() is what stops the two rules contradicting each other: a |
-//| bare trail would put the floor at 1.30 the moment it armed at     |
-//| 1.50, which is not what "exit as soon as it crosses below the     |
-//| lock" means. The trail only binds once the peak passes 1.70.      |
+//| bare trail would put the floor at 0.80 the moment it armed at     |
+//| 1.00, which is not what "exit as soon as it crosses below the     |
+//| lock" means. The trail only binds once the peak passes 1.20.      |
 //|                                                                  |
-//| Raised from 1.00 after a live session in which every profitable   |
-//| exit was this rule firing at about +1.00 while the losing exits,  |
-//| taken by the colour rule, ran from -0.21 to -1.90. Capping wins   |
-//| below the size of the losses is not a survivable shape, and       |
-//| lifting the lock is the direct lever on it.                       |
+//| ====================================================================
+//| IT WENT TO 1.50 ON REASONING AND CAME BACK ON MEASUREMENT
+//| ====================================================================
+//| A live session showed every profitable exit was this rule firing  |
+//| at about +1.00, while every losing exit was the colour rule,      |
+//| running from -0.21 to -1.90. Winners capped below the size of the |
+//| losers looked unsurvivable, so the lock was raised to 1.50.       |
+//|                                                                  |
+//| Measured on M5 over one window it is the wrong direction on every |
+//| symbol. Net:                                                      |
+//|                                                                  |
+//|   lock    XAUUSD  FixedVol100   BTCUSD                            |
+//|   1.00      +817         +156     +259                            |
+//|   1.50      +651          +96     +138                            |
+//|   3.00      +476         +108     +130                            |
+//|   5.00      +433          +42      +18                            |
+//|                                                                  |
+//| The lock is not so much capping winners as ending trades before   |
+//| they spend more on spread; the trade count falls with it and the  |
+//| saving outweighs the profit given up. "A bigger target must be    |
+//| better" is the intuition the numbers refuse, and it is worth      |
+//| recording that it was tried rather than quietly reverted.         |
+//|                                                                  |
+//| Caveats that belong with those figures: one window of about a     |
+//| fortnight, and the lock is replayed from bars, which cannot see   |
+//| whether a bar's high came before its low. See                     |
+//| scripts/measure_camarilla_ea.py and its --lock-optimistic flag.   |
 //|                                                                  |
 //| ====================================================================
 //| IT RUNS ON THE TICK, AND IT IGNORES THE ENTRY GRACE
@@ -465,7 +487,7 @@ input double InpBasketTakeMoney   = 2.0;     // Close ALL positions at this comb
 //| a trail tighter than the spread is triggered by the book rather   |
 //| than by the market.                                               |
 //+------------------------------------------------------------------+
-input double InpProfitLockMoney   = 1.50;    // Arm once floating profit reaches this. 0 = off
+input double InpProfitLockMoney   = 1.00;    // Arm once floating profit reaches this. 0 = off
 input double InpProfitTrailMoney  = 0.20;    // Once armed, exit if profit falls this far below its peak
 
 //+------------------------------------------------------------------+
