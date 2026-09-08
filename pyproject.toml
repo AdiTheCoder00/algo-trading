@@ -45,6 +45,20 @@ dev = [
     # it here would also hide the day our own code reaches for the dead alias.
     # Verified against starlette 1.6.0 / fastapi 0.141.1, the current resolution.
     "anyio<4.15",
+    # And one layer up, the reason `filterwarnings = ["error"]` needs no
+    # exception for python-multipart. starlette below 0.39 imports that package
+    # under its old top-level name `multipart`; python-multipart 0.0.13+ warns
+    # whenever it is imported that way. The warning fires at IMPORT time inside
+    # fastapi.security, so under `error` it aborts collection of
+    # tests/test_api.py entirely - the module is not failing, it is not running,
+    # which is the worse failure because it is silent.
+    #
+    # Declared here rather than left to fastapi's own pin: `fastapi>=0.111`
+    # happily resolves 0.112.2, which caps starlette below 0.39 and reintroduces
+    # this. Constraining starlette directly makes the resolver pick a fastapi
+    # that agrees, and states the requirement where the reason for it lives.
+    # Verified at starlette 1.6.0 / fastapi 0.141.1 with the filter removed.
+    "starlette>=0.39",
     # tools/macd_telegram_alert/mt5_xauusd_alert.py imports macd_alert.py's
     # shared MACD/Telegram/state code, and that unconditionally imports ccxt
     # at module level. The tool has its own isolated venv + requirements.txt
@@ -87,23 +101,7 @@ algo = ["exchange/data/*.yaml"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
-filterwarnings = [
-    "error",
-    # NOT ours, and not silenceable at the call site: starlette 0.38.6 imports
-    # the multipart package under its old top-level name, and python-multipart
-    # 0.0.32 warns whenever it is imported that way. The warning fires at
-    # IMPORT time inside fastapi.security, so it aborts collection of
-    # tests/test_api.py entirely rather than failing one test - the whole
-    # module was silently unrunnable, which is worse than a red test.
-    #
-    # Scoped to this one message so `error` still governs everything else.
-    # Remove it when starlette reaches 0.39+, which imports `python_multipart`
-    # directly; that upgrade is deliberately not bundled here, because this
-    # project already pins anyio below 4.15 for starlette's TestClient and
-    # moving one of that pair without measuring the other is how a green suite
-    # turns red for an unrelated reason.
-    "ignore:Please use `import python_multipart` instead.:PendingDeprecationWarning",
-]
+filterwarnings = ["error"]
 
 # ---------------------------------------------------------------- mypy
 # Brief §3: mypy --strict on core modules.
