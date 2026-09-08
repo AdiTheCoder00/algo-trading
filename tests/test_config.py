@@ -168,6 +168,20 @@ class TestOverrides:
 
         assert config.model_dump().get("api_token") is None
 
+    def test_the_nemotron_key_is_not_swept_into_the_config(self) -> None:
+        """Same class as the bearer token, and it was missed when added.
+
+        `.env.example` documents `ALGO_NVIDIA_API_KEY`; `scripts/ask_nemotron.py`
+        and `litellm-config.yaml` read it straight from the environment. Until it
+        was excluded, following the documented setup made *every* command that
+        loads a config fail with "nvidia_api_key - Extra inputs are not
+        permitted", and it failed seventeen config-loading tests whenever the
+        CLI's import-time `load_dotenv()` had found a real one.
+        """
+        config = load_config(REFERENCE_CONFIG, env={"ALGO_NVIDIA_API_KEY": "nvapi-not-a-real-key"})
+
+        assert config.model_dump().get("nvidia_api_key") is None
+
     def test_smartapi_and_kotak_credential_namespaces_are_not_swept_in_either(self) -> None:
         """Same reasoning as the bearer token above, for the two credential
         namespaces `credentials_from_env` reads directly - injecting them into

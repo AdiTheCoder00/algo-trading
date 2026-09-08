@@ -1,24 +1,41 @@
 # MT5 expert advisors
 
-Three MetaTrader 5 experts. Two are ports of the XAUUSD strategies in `algo/strategy/`;
-the third is not a port and has no measured backtest behind it.
+Four MetaTrader 5 experts. Two are ports of the XAUUSD strategies in `algo/strategy/`;
+the other two are not ports. Both of those have now been measured, and **both lost
+money** — see the scalper callout below and D-151 for the fair value gap expert.
 
 | Expert | Ports | `strategy_for` name | Default magic |
 | --- | --- | --- | --- |
 | [GoldMacdCrossover.mq5](Experts/AlgoGold/GoldMacdCrossover.mq5) | [macd_crossover.py](../algo/strategy/macd_crossover.py) | `macd` | 20260901 |
 | [GoldTrendlineBreakout.mq5](Experts/AlgoGold/GoldTrendlineBreakout.mq5) | [trendline_breakout.py](../algo/strategy/trendline_breakout.py) | `breakout` | 20260902 |
 | [GoldIntradayScalper.mq5](Experts/AlgoGold/GoldIntradayScalper.mq5) | **nothing — terminal-side only** | — | 20260903 |
+| [GoldFairValueGap.mq5](Experts/AlgoGold/GoldFairValueGap.mq5) | **nothing — terminal-side only** | — | 20260904 |
+
+> **`GoldFairValueGap` has no edge — measured, not suspected.** Over D-140's three
+> windows it armed 192 setups, entered 10, and closed 7 trades, **all losers, with not
+> one reaching its target**. Replacing its liquidity target with a flat 2R triples the
+> trade count and returns +$20 net across eighteen months — average R of +0.10 / -0.00 /
+> -0.03. **Do not trade it, and do not tune it.** D-151 has the full result, the adverse
+> selection in rule 6 that causes the 0% hit rate, and the two bugs the measurement
+> found. `scripts/measure_fvg_xauusd.py` reproduces it.
 
 The two ports share [ProtectiveExits.mqh](Include/AlgoGold/ProtectiveExits.mqh) — a port
 of `price_stop.py` + `trailing_profit_stop.py` + the sequencing in `protective_exits.py`.
 One shared exit module, for the same reason the Python has one: "the shared, tested piece
 that adds it identically to both rather than two copies that could quietly drift apart."
 
-All three share [Trader.mqh](Include/AlgoGold/Trader.mqh), the execution plumbing. The
-scalper additionally uses [ScalpFilters.mqh](Include/AlgoGold/ScalpFilters.mqh) — session
-window, daily governors and the ATR bracket with its cost gate.
+All four share [Trader.mqh](Include/AlgoGold/Trader.mqh), the execution plumbing. The
+scalper and the FVG expert additionally use
+[ScalpFilters.mqh](Include/AlgoGold/ScalpFilters.mqh) — session window, daily governors,
+the gate telemetry, and (scalper only) the ATR bracket with its cost gate.
 
-All three compile clean (0 errors, 0 warnings) against the standard library shipped with
+**Include `ProtectiveExits.mqh` before `Trader.mqh`.** `Trader.mqh`'s `RebuildTrail`
+takes a `TrailState`, which `ProtectiveExits.mqh` declares, so `Trader.mqh` does not
+compile on its own. Getting the order wrong reports 35 errors *inside `Trader.mqh`* and
+none in the expert being compiled, which is a confusing place to start looking. This
+applies even to an expert that never touches the trail.
+
+All four compile clean (0 errors, 0 warnings) against the standard library shipped with
 the Vantage Markets MT5 terminal, build `X64 Regular`.
 
 > **The scalper does not work — measured, not suspected.** Across three windows and
@@ -71,8 +88,9 @@ position and managed accordingly. Each expert therefore ships a distinct magic, 
 `algo mt5`, they will correctly ignore each other's positions.
 
 The registry, in full — `20260828` Python adapter, `20260901` MACD, `20260902` breakout,
-`20260903` scalper. Two experts sharing a magic is the same failure as sharing the
-Python's: each would net the other's tickets into its own position and manage them.
+`20260903` scalper, `20260904` fair value gap. Two experts sharing a magic is the same
+failure as sharing the Python's: each would net the other's tickets into its own
+position and manage them.
 
 ---
 
@@ -422,3 +440,92 @@ Four things those rows say, none of them comfortable:
 No expert here has traded a live account. `Mt5Broker` in the Python has never placed an
 order either, which is why `algo mt5` runs the paper path. Use the Strategy Tester on real
 ticks, then a demo account, before anything else.
+
+---
+
+## `GoldFairValueGap` — where the rules came from, and what they are worth
+
+**This is the fourth expert, and the second one that is not a port.** It has never been
+backtested. What follows is provenance and specification, not evidence.
+
+### The source
+
+The rules were transcribed from the published description of *"Best Prop Firm GOLD
+Strategy 2026 (High Win Rate XAUUSD Setup)"*, RBI FOREX, 28 Jun 2026,
+`youtube.com/watch?v=WokhegaZ5WM`. That channel had 479 subscribers and the video 502
+views; it is monetised through Vantage / XM / Exness affiliate links and a Telegram
+channel. **Its "high win rate" claim is unverified marketing and is recorded here as a
+claim, not a finding.**
+
+What the source is actually good for is that its rules are *mechanical*. They can be
+written down, coded, and measured. Only the first two of those have happened.
+
+The six rules, as published:
+
+1. Identify a completed 4-hour candle.
+2. Wait for the next 4-hour candle to close above the previous candle's high (buy) or
+   below its low (sell).
+3. A valid setup requires a Fair Value Gap created **during** the breakout.
+4. Wait for price to retrace and tap into the imbalance zone.
+5. Use 15-minute displacement as confirmation before entering.
+6. Target the previous 4-hour buyside/sellside liquidity; move the stop to break even
+   at 1:1.
+
+### What the source left undefined
+
+Three things the rules need in order to be code at all. Each is an input, and each is a
+choice **the source did not endorse** — the place to start if the backtest disappoints.
+
+| Gap in the source | What this expert does instead | Input |
+| --- | --- | --- |
+| "Displacement" is never defined | A closed M15 bar, in the trade direction, with a body ≥ `mult × ATR`, **closing back out of the zone** | `InpDisplaceAtrMult` 0.60 |
+| The stop loss is never given at all — only a break-even rule | Beyond the far edge of the imbalance, plus a buffer. Through that edge, the gap is filled and the premise is gone, so "stopped out" and "setup was wrong" become the same event | `InpStopBufferAtrMult` 0.25 |
+| "Previous buyside liquidity" is not a formula | Extreme of the `InpLiquidityLookback` structure bars **strictly before** the breakout bar — the same exclusion the Donchian channel makes | `InpLiquidityLookback` 12 |
+
+### What it adds that the source does not mention
+
+A minimum reward:risk (`InpMinRewardRisk` 1.5), a session window, and the same daily
+governors the scalper uses. The source has no risk framework beyond the break-even move.
+`InpMaxTradesPerDay` defaults to 3 — the setup is meant to be rare, and a rule that fires
+often on H4 is a rule that has been mis-implemented.
+
+### Behaviours worth knowing before reading the log
+
+- **One position at a time.** No pyramiding, no reversal in one step.
+- **Bar-close decisions only.** Break-even is evaluated on M15 closes, not ticks. A wick
+  that touches 1R and retraces inside the same bar does not arm it. This is deliberate:
+  the alternative depends on tick density and cannot be reproduced by a backtest.
+- **Transient gates leave the setup armed; structural ones clear it.** Session, daily
+  governor and spread are transient. A target behind price, or a reward:risk under the
+  floor, is structural — waiting does not make those true.
+- **A new break supersedes an armed setup** rather than queueing behind it. Two live
+  setups would mean two contradictory biases.
+- **`GateStats` is reused, not forked.** Two of its rows always read zero here — there is
+  no cooldown gate and no spread-multiple cost gate. The "cost gate" row counts
+  reward:risk rejections instead.
+
+### What the measurement said
+
+`scripts/measure_fvg_xauusd.py` reimplements these rules against real MT5 bars with
+D-121's costs. It does **not** run the compiled `.ex5` — the Strategy Tester needs the
+terminal closed, and the terminal is forward-testing on demo. The divergences are listed
+in the script's docstring.
+
+| Window | Setups | Confirmed | Entered | Trades | PF | Net | Targets hit |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026.06–08 | 47 | 15 | 2 | 1 | 0.00 | -$65 | 0 |
+| 2026.01–05 | 56 | 23 | 2 | 1 | 0.00 | -$121 | 0 |
+| 2025.06–12 | 89 | 32 | 6 | 5 | 0.00 | -$184 | 0 |
+
+**Rule 6 is what makes it unusable.** Its target is the extreme of the 12 H4 bars before
+the breakout, which after a breakout is usually far away — so `InpMinRewardRisk` rejects
+the *close* targets and keeps the distant ones. The gate selects for targets least likely
+to be reached, which is why the hit rate is zero rather than merely low.
+
+**Removing it reveals a coin flip, not an edge.** Same entries and stops, target set to a
+flat 2R: 8 / 10 / 18 trades at PF 1.91 / 0.74 / 0.95, +$20 net across all three windows,
+average R of +0.10 / -0.00 / -0.03. The 1.91 is eight trades and means nothing.
+
+Still worth running in the Strategy Tester on **M15** if you want the `.ex5` itself
+confirmed (the chart period sets modelling granularity, so an H4 chart tests something
+else). But the rules have already answered the question the tester would ask.

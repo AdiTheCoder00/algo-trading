@@ -38,7 +38,7 @@ the console offers the axes this project has actually studied.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
@@ -129,7 +129,8 @@ def build_grid(axes: Mapping[str, Sequence[str]], base: Mapping[str, str]) -> li
 def run_cfd_walk_forward(
     bars: list[Bar],
     *,
-    strategy: str,
+    strategy: str = "",
+    factory: Callable[[ParameterSet], Any] | None = None,
     instrument: CfdId,
     timeframe: Timeframe,
     axes: Mapping[str, Sequence[str]],
@@ -139,9 +140,18 @@ def run_cfd_walk_forward(
     out_of_sample_days: int,
     starting_equity: Decimal = Decimal("100000"),
 ) -> WalkForwardReport:
-    """Optimise on each in-sample window, validate on the one that follows."""
+    """Optimise on each in-sample window, validate on the one that follows.
+
+    `factory` builds a strategy from one `ParameterSet` directly, for a strategy
+    that is not in `strategy_for`. That is not a convenience: `strategy_for` is
+    the LIVE registry, and a candidate under investigation should be testable
+    without first being made reachable by the live loop and the dashboard
+    (D-152). Pass exactly one of `strategy` or `factory`.
+    """
     if not bars:
         raise DataError("walk-forward needs bars")
+    if bool(strategy) == (factory is not None):
+        raise DataError("pass exactly one of `strategy` or `factory`")
 
     windows = rolling_windows(
         start=bars[0].ts.date(),
@@ -178,13 +188,17 @@ def run_cfd_walk_forward(
             window_bars,
             instrument=instrument,
             timeframe=timeframe,
-            strategy_factory=lambda: strategy_for(
-                strategy,
-                instrument=instrument,
-                stop_loss_pct=stop,
-                trail_activation_pct=trail_activation,
-                trail_pct=trail,
-                lookback=lookback,
+            strategy_factory=(
+                (lambda: factory(params))
+                if factory is not None
+                else lambda: strategy_for(
+                    strategy,
+                    instrument=instrument,
+                    stop_loss_pct=stop,
+                    trail_activation_pct=trail_activation,
+                    trail_pct=trail,
+                    lookback=lookback,
+                )
             ),
             stop_loss_pct=stop,
             trail_activation_pct=trail_activation,

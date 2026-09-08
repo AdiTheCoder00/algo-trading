@@ -15,6 +15,7 @@ clock is exercised in both regimes.
 
 from __future__ import annotations
 
+import os
 from datetime import date
 from decimal import Decimal
 
@@ -24,6 +25,33 @@ from algo.core.enums import Exchange, Right
 from algo.core.instrument import FutureId, InstrumentSpec, OptionId
 from algo.exchange.calendar import MarketCalendar, synthetic_calendar
 from algo.exchange.specs import ContractSpecStore
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_ambient_algo_env() -> None:
+    """Strip inherited `ALGO_*` vars so the suite cannot read the developer's `.env`.
+
+    `algo/cli/main.py` calls `load_dotenv()` at IMPORT time, and `load_dotenv()`
+    with no argument searches upward from the working directory. So the moment
+    any test imports the CLI, whatever `.env` happens to sit above the checkout
+    is merged into `os.environ` for the rest of the process - and in a git
+    worktree that is the *main* checkout's `.env`, which the person running the
+    tests may not even remember writing.
+
+    That is how a real key for `ALGO_NVIDIA_API_KEY` came to break seventeen
+    config-loading tests that all passed in isolation. `load_config` maps every
+    unexcluded `ALGO_*` var onto `AppConfig`, which forbids extras, so one
+    undocumented var in one developer's `.env` fails a suite that is green on
+    the next machine. The loader bug is fixed separately (that var is now in
+    `NON_CONFIG_ENV_VARS`); this fixture is the reason the NEXT one will not
+    reproduce it.
+
+    Session-scoped and stripping only what was INHERITED: tests that need an
+    `ALGO_*` var set it themselves with `monkeypatch`, which restores per test
+    and runs after this.
+    """
+    for name in [key for key in os.environ if key.startswith("ALGO_")]:
+        del os.environ[name]
 
 #: Inside US DST — MCX closes 23:30 IST.
 SUMMER_DAY = date(2026, 8, 19)

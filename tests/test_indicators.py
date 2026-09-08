@@ -17,7 +17,7 @@ import random
 import pytest
 
 from algo.core.errors import DomainError
-from algo.pricing.indicators import Macd, ema, macd, warmup_bars
+from algo.pricing.indicators import Macd, bollinger, ema, macd, warmup_bars
 
 pd = pytest.importorskip("pandas")
 
@@ -206,3 +206,57 @@ class TestWarmup:
 
     def test_it_follows_custom_periods(self) -> None:
         assert warmup_bars(slow=50, signal=20) == 50 + 20 + 2
+
+
+class TestBollinger:
+    """The bands, and specifically WHICH standard deviation they use.
+
+    Population (divide by N), not sample (N - 1) - what MT5's `iBands` and
+    TradingView's `ta.stdev` both compute. The two differ by
+    `sqrt(N / (N - 1))`, about 2.6% of the half-width at the default 20, which
+    is small everywhere except on the touches this indicator exists to flag.
+    """
+
+    def test_it_is_none_until_the_window_is_full(self) -> None:
+        bands = bollinger([1.0, 2.0, 3.0, 4.0], period=3)
+        assert bands.middle[:2] == [None, None]
+        assert bands.upper[:2] == [None, None]
+        assert bands.lower[:2] == [None, None]
+        assert bands.middle[2] == pytest.approx(2.0)
+
+    def test_it_uses_the_population_standard_deviation(self) -> None:
+        # closes 3, 4, 5: mean 4, population sd sqrt(2/3) = 0.816497.
+        # The sample sd would be 1.0 exactly, so the two are easy to tell apart.
+        bands = bollinger([1.0, 2.0, 3.0, 4.0, 5.0], period=3, num_stdev=2.0)
+        assert bands.middle[-1] == pytest.approx(4.0)
+        assert bands.upper[-1] == pytest.approx(4.0 + 2 * (2 / 3) ** 0.5)
+        assert bands.lower[-1] == pytest.approx(4.0 - 2 * (2 / 3) ** 0.5)
+        assert bands.upper[-1] != pytest.approx(6.0), "that is the SAMPLE stdev"
+
+    def test_a_flat_series_collapses_the_bands_onto_the_mean(self) -> None:
+        bands = bollinger([100.0] * 30, period=20)
+        assert bands.upper[-1] == pytest.approx(100.0)
+        assert bands.lower[-1] == pytest.approx(100.0)
+        assert bands.width_at() == pytest.approx(0.0)
+
+    def test_width_is_none_before_the_bands_exist(self) -> None:
+        assert bollinger([1.0, 2.0], period=20).width_at() is None
+
+    def test_it_matches_a_direct_numpy_computation(self) -> None:
+        import numpy as np
+
+        random.seed(7)
+        values = [4400 + random.gauss(0, 12) for _ in range(200)]
+        bands = bollinger(values, period=20, num_stdev=2.0)
+        window = np.array(values[-20:])
+        assert bands.middle[-1] == pytest.approx(float(window.mean()))
+        # ddof=0 is numpy's default and is the population form.
+        assert bands.upper[-1] == pytest.approx(float(window.mean() + 2 * window.std()))
+
+    def test_it_rejects_a_degenerate_period(self) -> None:
+        with pytest.raises(DomainError, match="at least 2"):
+            bollinger([1.0, 2.0, 3.0], period=1)
+
+    def test_it_rejects_a_non_positive_width(self) -> None:
+        with pytest.raises(DomainError, match="must be positive"):
+            bollinger([1.0, 2.0, 3.0], period=2, num_stdev=0.0)

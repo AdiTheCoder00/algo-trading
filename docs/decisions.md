@@ -3762,3 +3762,212 @@ combination, and it would be curve-fitting: with 32 months and a handful of free
 parameters, some setting always fits. Any such result would need walk-forward
 across separate periods before it meant anything. Cross-reference D-145 on
 single-window evidence.
+
+---
+
+### D-151 - The YouTube FVG strategy has no edge; its target rule is what makes it unusable, and removing that only reveals a coin flip
+
+You asked for the best XAUUSD strategy on YouTube, built as an EA, then
+backtested. `mt5/Experts/AlgoGold/GoldFairValueGap.mq5` is the build; this is
+the backtest.
+
+**Provenance first, because it bounds what any of this is worth.** The rules
+came from the description of *"Best Prop Firm GOLD Strategy 2026"*, RBI FOREX
+(479 subscribers, 502 views), monetised through broker affiliate links. H4
+breakout, fair value gap created during the break, retrace into the gap, M15
+displacement to confirm, target the previous H4 liquidity, stop to break even at
+1:1. The video defines neither the stop loss, nor "displacement", nor
+"liquidity" as a formula. Those three are mine and are marked as such in the
+expert and in `mt5/README.md`.
+
+**Measured with `scripts/measure_fvg_xauusd.py`** - the rules reimplemented on
+real MT5 bars with D-121's costs, not the compiled `.ex5` through the Strategy
+Tester. The tester needs the terminal closed and the terminal is forward-testing
+`GoldCamarillaBreakout` on demo. The divergences that buys are listed in the
+script's docstring; the material one is that a bar containing both stop and
+target is charged as a stop.
+
+**As shipped, it barely trades, and never wins.** 0.05 lots, $10,000, D-140's
+three windows:
+
+| Window | Setups armed | Confirmed | Entered | Trades | PF | Net | Targets hit |
+|---|---|---|---|---|---|---|---|
+| 2026.06-08 | 47 | 15 | 2 | 1 | 0.00 | -$65 | 0 |
+| 2026.01-05 | 56 | 23 | 2 | 1 | 0.00 | -$121 | 0 |
+| 2025.06-12 | 89 | 32 | 6 | 5 | 0.00 | -$184 | 0 |
+
+192 setups over eighteen months became 10 entries and 7 closed trades, all
+losers. **Not one trade in eighteen months reached its target.**
+
+**The binding constraint is rule 6 interacting with the reward:risk floor.** The
+target is the extreme of the 12 H4 bars before the breakout; after a breakout
+that level is usually far away, so the computed reward:risk is large - 8.3, 5.9,
+5.1, 2.8 on the trades actually taken. The `InpMinRewardRisk` floor of 1.5 then
+rejected 33 of 70 confirmed setups for being *too close*. So the gate selects
+**for** distant targets, which are exactly the ones least likely to be reached.
+That is adverse selection built into the rules, and it is why the hit rate is
+zero rather than low.
+
+**Removing it does not find an edge, it finds a coin flip.** Same entries, same
+stops, target replaced by a flat 2R:
+
+| Window | Trades | Win rate | PF | Net | Avg R |
+|---|---|---|---|---|---|
+| 2026.06-08 | 8 | 50.0% | 1.91 | +$518 | +0.10 |
+| 2026.01-05 | 10 | 40.0% | 0.74 | -$444 | -0.00 |
+| 2025.06-12 | 18 | 33.3% | 0.95 | -$54 | -0.03 |
+
+36 trades, **+$20 net across all three**, average R of +0.10 / -0.00 / -0.03.
+The 1.91 is eight trades and should not be read as anything. The entries do not
+predict direction at a 2R horizon; the liquidity target was hiding that behind a
+0% hit rate rather than causing it.
+
+**Conclusion: do not trade `GoldFairValueGap`, and do not tune it.** This is
+D-140's conclusion reached by a different route, and D-131 already established
+that sweeping thresholds on this data fits noise. Two independent reasons not to
+continue: the sample is too small for a threshold sweep to mean anything (36
+trades at the loosest setting), and the loosest setting is already flat.
+
+**What is worth keeping.** The expert itself is sound plumbing - it reuses
+`Trader`, `ScalpFilters` and `Dashboard` unchanged, compiles clean, and its gate
+telemetry is what produced the funnel above. The funnel is the reusable part: an
+entry rule that fires 192 times and trades 10 is diagnosable in one run, which is
+cheaper than the three-window tester sweep D-140 needed.
+
+**Two bugs found by writing the simulator, not by reading the code.**
+`ZoneInvalidated(g_setup,1)` looped `for(i=0; i>=1; i--)` - zero iterations, so
+setups could only ever expire by time and never be invalidated by price closing
+through the zone. And `TryEnter` called `RescanSetups()` after a fill, which
+could re-arm the setup just traded and let the next retrace enter the same
+imbalance twice. Both fixed before the numbers above were taken. Mirroring code
+into a second implementation is a better review than reading it.
+
+---
+
+### D-152 - 50 EMA + Bollinger: the pullback reading is dead, the breakout reading is real but does not beat holding gold
+
+You asked for the 50 EMA / Bollinger band strategy after D-151. This time the
+measurement came before the expert, which is the whole point of D-151.
+
+**"The 50 EMA and Bollinger band strategy" is two strategies, and they trade
+opposite directions on the same bar.** `pullback` fades a band touch inside the
+trend (price above the 50 EMA, close back up through the lower band, exit at the
+middle band). `breakout` follows one (price above the 50 EMA, close outside the
+upper band, exit when it closes back inside). Both are widely taught. Picking one
+silently would have been choosing the answer before measuring it, so
+`algo/strategy/ema_bb.py` implements both behind a `mode` and
+`scripts/measure_ema_bb_xauusd.py` runs both. It goes through
+`algo/backtest/cfd_runner.py` rather than a bespoke simulator - unlike the FVG
+expert, this one is a real `Strategy`, so D-130's shared core applies.
+
+Two modes x three timeframes x D-140's three windows. 1.00 MT5 lot, $100k,
+0.5% stop, trail off, D-121 costs.
+
+**Pullback fails, and not narrowly.** Profit factor below 1.0 in five of nine
+cells, and the cells it "wins" are the ones with no sample - 7, 12 and 16 trades
+at H1, where one trade moves the number. M30 is 0.60 / 0.44 / 0.92: below
+break-even in all three windows. There is nothing here.
+
+**Breakout clears 1.0 in seven of nine cells** and is positive in all three
+windows on M30 (PF 1.25 / 1.05 / 1.16, net +$25,308 / +$14,404 / +$29,746 on
+100 / 193 / 244 trades). That is the first thing measured in this project since
+the two ports that is positive out-of-sample rather than only in it.
+
+**Then the falsification, and it takes most of that back.** D-124 point 4 says a
+trend follower doing well while the underlying trended is not distinguishable
+from edge. Buy-and-hold on the same windows, same size:
+
+| Window | Buy & hold | M30 breakout | of which long | of which short |
+|---|---|---|---|---|
+| 2026.06-08 | **-$8,637** | +$25,308 | +$30,075 | -$4,768 |
+| 2026.01-05 | +$20,023 | +$14,404 | +$53,602 | -$39,198 |
+| 2025.06-12 | +$105,073 | +$29,746 | +$44,754 | -$15,007 |
+
+**Holding gold made $116,459. The strategy made $69,458.** In the biggest
+trending window it captured under a third of the move. So as a way to own the
+2025 gold rally it is strictly worse than owning it.
+
+**The one result that is not the trend.** In 2026.06-08 gold *fell* - buy-and-hold
+lost $8,637 - and breakout made +$25,308 on M30 and +$37,725 on H1. That is the
+only window where the signal did something a holder was not already getting, and
+it is the most recent one.
+
+**The shorts are a consistent drag**: negative in eight of nine cells, -$58,973
+across the three M30 windows against +$128,431 from the longs. Long-only would
+have returned $128,431 and beaten buy-and-hold - **and that is a post-hoc slice
+of the same data D-131 already said fits noise when sliced.** It is written down
+as a hypothesis to test on data this study has not seen, not as a result.
+
+**Where this leaves it.** Better than D-151, which had nothing. Not established:
+it loses to holding the instrument, its shorts lose consistently, and one window
+reached 50.1% drawdown. **No expert built, and `EmaBollinger` is deliberately
+NOT registered in `strategy_for`** - registering makes it reachable by the live
+loop and the dashboard, and that should follow evidence rather than precede it.
+The next step is a walk-forward (`algo significance`, per D-131), with long-only
+pre-registered as the hypothesis, not another pass over these three windows.
+
+**Two incidental things.** `algo/pricing/indicators.py` gained `bollinger()`,
+pinned to the POPULATION standard deviation because that is what MT5's `iBands`
+and TradingView's `ta.stdev` compute - the sample form differs by about 2.6% of
+the half-width at period 20, which is exactly the margin between a touch and a
+near-miss. And `EmaBollinger` steps its EMA *before* the protective-exit check,
+deliberately not reproducing the `MacdCrossover` divergence `mt5/README.md`
+records, because there is no measured backtest here that depends on the wart.
+
+---
+
+### D-153 - Long-only EMA/BB was noise. The pre-registered walk-forward rejected it, and the rejection is the useful part
+
+D-152 ended with one attractive number: long-only breakout on M30 would have
+returned $128,431 against buy-and-hold's $116,459. It was recorded there as a
+hypothesis rather than a result, because it was a post-hoc slice of the same
+three windows the study used. This is the test, and it was **pre-registered**:
+`scripts/walkforward_ema_bb_xauusd.py` was written and committed with its
+hypothesis, data, parameters and pass/fail thresholds fixed, one commit before
+being run. `verdict()` computes the call so it cannot be argued afterwards.
+
+**The rule, fixed in advance.** PF >= 1.10 pooled out-of-sample, net > 0, at
+least 60% of folds positive on the fixed-parameter baseline, a win over
+buy-and-hold on net or net-per-drawdown, and at least 100 trades. H1 named
+PRIMARY for having the longest unseen span - deliberately not M30, which is
+what D-152 liked.
+
+**Both fail, on data D-152 never saw** (everything before 2025-06-01):
+
+| | pooled net | PF | trades | max DD | folds positive |
+|---|---|---|---|---|---|
+| **H1** 2018-03..2025-05 | +$14,642 | **1.04** | 846 | **54.6%** | 12/25 (48%) |
+| **M30** 2022-06..2025-05 | **-$3,333** | **0.99** | 695 | 44.4% | 3/7 (43%) |
+
+Against buy-and-hold on the same bars: **+$195,893 at 21.9% drawdown on H1**,
++$145,791 at 12.9% on M30. The strategy made a fourteenth of the money on two
+and a half times the drawdown. On H1 it earned $268 per 1% of drawdown against
+holding's $8,941.
+
+This is not a thin-data verdict. `Feasibility` reports `ADEQUATE` for both -
+717 out-of-sample trades across 25 windows on H1, 396 across 7 on M30.
+
+**D-152's headline reversed on contact with unseen data.** Long-only looked
+like the best thing in that study and is, out of sample, break-even at best
+(H1) and negative (M30). The three windows that produced it were the trend, not
+the rule. **Stop work on long-only EMA/BB.**
+
+**D-131 confirmed again, independently.** `optimisation_beat_doing_nothing` is
+`False` on both timeframes - choosing a stop per window lost to leaving it
+alone (H1: $18,069 optimised vs $18,447 baseline; M30: -$16,452 vs -$14,275).
+Two more data points for the same finding, from a study that was not looking
+for it.
+
+**What this cost, and what it bought.** One commit of discipline. The
+alternative - registering long-only in `strategy_for` on D-152's numbers and
+forward-testing it on demo - would have spent weeks discovering the same thing
+with a worse instrument. `EmaBollinger` remains unregistered and `long_only`
+stays in the code with this entry attached to it, because a flag documented as
+tested-and-rejected is more useful than one quietly deleted: it stops the next
+person rediscovering the same slice.
+
+**Three strategies measured across D-151 to D-153, none tradable.** That is the
+system working. The measurement harness is now the durable asset here - the FVG
+funnel, this pre-registration pattern, and `run_cfd_walk_forward`'s new
+`factory` hook, which lets a candidate be walk-forwarded without first being
+made reachable by the live loop.
