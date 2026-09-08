@@ -106,6 +106,14 @@ EXITS: tuple[Exit, ...] = (
     Exit("1.0% stop + 2%/0.5% trail", Decimal("1.0"), Decimal("2"), Decimal("0.5"), None),
 )
 
+#: Strategies this script can drive. `PUBLISHED` below carries figures only for
+#: the two that D-124 through D-127 measured, so every `hilega` cell prints as
+#: new; its own numbers are published in D-152 and are not quoted back here,
+#: because a delta against a figure this script itself produced would be
+#: checking the harness against itself. The default stays the original two so an
+#: unargued run still reproduces exactly what it always did.
+AVAILABLE: tuple[str, ...] = ("macd", "breakout", "hilega")
+
 #: Net P&L as published, quoted from docs/decisions.md. Keyed by
 #: (strategy, D-entry, timeframe). Only for the delta column - nothing here
 #: feeds a calculation.
@@ -223,13 +231,18 @@ def report(strategy: str, cells: dict[tuple[str, str], CfdResult], window: str) 
 def main() -> None:
     parser = argparse.ArgumentParser(description="flat stop and trail, together")
     parser.add_argument(
-        "strategies", nargs="*", default=None, help="macd and/or breakout (default both)"
+        "strategies",
+        nargs="*",
+        default=None,
+        help=f"any of {', '.join(AVAILABLE)} (default: macd, breakout)",
     )
     args = parser.parse_args()
     chosen = args.strategies or ["macd", "breakout"]
-    unknown = [s for s in chosen if s not in ("macd", "breakout")]
+    unknown = [s for s in chosen if s not in AVAILABLE]
     if unknown:
-        raise SystemExit(f"unknown strategy {unknown}; available: macd, breakout")
+        raise SystemExit(
+            f"unknown strategy {unknown}; available: {', '.join(AVAILABLE)}"
+        )
 
     bars_by_tf, window = fetch_all()
     for label, bars in bars_by_tf.items():

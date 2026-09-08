@@ -189,8 +189,8 @@ class TestNoOrderCanReachTheRealBroker:
 
 
 class TestStrategyLookup:
-    def test_it_resolves_both_cfd_strategies(self) -> None:
-        for name in ("breakout", "macd"):
+    def test_it_resolves_every_cfd_strategy(self) -> None:
+        for name in ("breakout", "macd", "hilega"):
             built = strategy_for(
                 name,
                 instrument=XAUUSD,

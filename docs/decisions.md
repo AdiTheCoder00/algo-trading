@@ -3762,3 +3762,198 @@ combination, and it would be curve-fitting: with 32 months and a handful of free
 parameters, some setting always fits. Any such result would need walk-forward
 across separate periods before it meant anything. Cross-reference D-145 on
 single-window evidence.
+
+### D-151 - Hilega-Milega, implemented from a stated definition, with one of its claims corrected and none of them measured
+
+The source is a public interview in which a trainer walks through an indicator
+he calls Hilega-Milega: RSI shortened from 14 to 9, both of its bands moved to
+50, and two averages plotted **on the RSI line** rather than on price - a
+3-period EMA and a 21-period WMA. Three lines, one panel. The pitch is that
+price, strength, momentum and volume all move a market, that four separate
+indicators for them produce a chart where one says buy while another says sell,
+and that folding all four into one panel removes the contradiction.
+
+This is implementable without inventing anything, which is the bar
+`TrendlineBreakout` had to clear for "trend line breakout" (a hand-drawn trend
+line is not a definition; a Donchian channel is). Every component here is
+already stated numerically, so `algo/pricing/indicators.py` gained `rsi` and
+`wma`, and `algo/strategy/hilega_milega.py` is the rules over them.
+
+**The volume claim is false, and the module says so.** The 21-period WMA is
+presented as bringing volume into the panel - "the weight is of volume". It is
+not: a weighted moving average weights by *recency*, and nothing about a WMA of
+an RSI reads the volume column. The claim is recorded in the module docstring
+rather than quietly dropped, because it is the stated reason that line is in the
+panel at all, and a future reader finding the same video should not have to
+rediscover the correction. What survives it is still well-defined - a slow,
+recency-weighted average of RSI - and the rules are written against that, which
+is what the indicator computes either way.
+
+**Pine, not this module's own EMA.** `rsi` uses Wilder smoothing (`alpha = 1/n`,
+SMA seed) and `wma` weights the newest bar heaviest, both matching Pine, for the
+reason `indicators.py` already gives about `adjust=False`: the setup is
+described entirely in terms of what TradingView draws, so a rule here and a
+chart there must not disagree about what the lines are. Note that this is a
+*different* seeding convention from the EMA two functions above it, deliberately
+so; `test_indicators.py` guards both directions.
+
+**Undefined reads as `nan`, never 50.** Wilder's average does not exist for the
+first `n` bars and a 21-bar WMA does not exist for the first 20. Padding those
+with 50 would have been the tempting choice - one value per bar, no offsets, no
+`nan` handling - and it would have been a lie a caller could act on, because 50
+is the *exact* value these rules test against. A padded head would read as
+"perfectly neutral strength" on bars where nothing was measured. `nan` fails in
+the only safe direction: `nan > x` and `nan < x` are both False, so a rule
+declines to fire rather than firing on a fabricated reading.
+
+**The exit is looser than the entry, on purpose.** Entry needs all three of RSI
+above 50, above its EMA and above its WMA. The exit needs only the RSI back at
+or below its WMA - no wait for full bearish alignment. That asymmetry is the
+source's own: it calls the WMA crossing back through the RSI a trailing stop
+rather than a reversal signal. Implementing the mirror of the entry as the exit
+would hold a position through the whole of the move the method treats as the
+exit, which would be a different strategy wearing this one's name.
+
+**`min_separation` makes the momentum claim checkable.** "As long as there is
+distance between the three lines, momentum continues" is the other main claim,
+and the only part of the method that is otherwise pure eyeballing. It is exposed
+as a number of RSI points the RSI must clear the *nearer* average by. Default 0,
+meaning off, so turning it on is an explicit choice by whoever is measuring
+rather than a default nobody selected. It is not a walk-forward or sweep axis:
+adding an optimisable axis is a separate decision, and D-131/D-132 are on record
+about what parameter searches against one window are worth.
+
+**Protective exits, which the published method does not have.** `stop_loss_pct`
+defaults to 0.5 and is checked before the warmup gate, the same way and for the
+same reason as in `MacdCrossover` (D-123/D-125). This matters more here than it
+did there: the method as taught has no stop of any kind, only the WMA cross, and
+an RSI can sit on the wrong side of its own average for a long time.
+
+**Two implementations of one indicator, and the test that keeps them honest.**
+The strategy carries running state and updates on one close per bar, because
+Wilder's average and the EMA over the RSI are both recursive - `MacdCrossover`'s
+argument (D-123), and the state is persisted for D-110's reason. That means a
+vectorised `hilega_milega` and an incremental `HilegaMilega._update` both exist,
+which is exactly the drift `indicators.py` was written to prevent.
+`tests/test_hilega_milega.py` asserts they agree to the last float over 400
+bars, rather than trusting them to stay in step.
+
+**What is not claimed.** The interview puts the accuracy of this - and of any
+indicator - at "70-75%". Nothing here measures that, and this project's own
+history is the reason not to repeat it: D-124 through D-150 are a sequence of
+setups that looked convincing on a chart and lost money once real spread, swap
+and a full window were applied, including one at a 94% win rate losing $4,057
+(D-150). The strategy is registered in `strategy_for`, the research catalogue
+and `measure_macd_xauusd.py` so that it *can* be measured on the same terms as
+the other two. Until that run exists, this entry records an implementation, not
+a result. **That run is now D-152, and it found no edge.** The measurement is also subject to D-149: an incremental indicator
+over a chosen window is window-sensitive, so any figure needs the same
+walk-forward treatment before it means anything.
+
+**Scope limit worth stating.** The source demonstrates this on Indian equity
+indices and single stocks, daily and hourly, and describes monthly use for
+investing. It is wired here against the XAUUSD CFD path, because that is the
+path this repository can actually backtest against real costs. Whether the
+readings transfer between those markets is untested and is not assumed - D-141
+is the standing example of what happens when a gold setup is presumed to carry.
+
+### D-152 - Hilega-Milega measured: no edge, and the exit rule is a hair-trigger that pays spread 3-8x over
+
+D-151 implemented the setup and said explicitly that it recorded an
+implementation and not a result. This is the result. Two runs, both on real MT5
+XAUUSD bars with D-121's measured Vantage cost stack and fixed 100 engine lots,
+both on exactly the terms the other two strategies were measured on.
+
+**Run 1, `measure_macd_xauusd.py`, all three strategies, same calendar window
+(2025-12-19 .. 2026-09-04, 0.71 yr), no flat stop plus the 2%/1% trail:**
+
+| tf | macd net | breakout net | hilega net | hilega trades |
+|---|---|---|---|---|
+| M5 | -$136,511 | -$40,804 | **-$417,301** | 6,821 |
+| M15 | -$195,659 | -$110,741 | **-$240,807** | 2,308 |
+| M30 | -$103,051 | -$43,843 | **-$195,932** | 1,134 |
+| H1 | -$85,126 | +$38,959 | **-$140,266** | 562 |
+
+Worse than both at every timeframe.
+
+**Run 2, `measure_stop_trail_matrix_xauusd.py`, six exit configurations on the
+window D-124 through D-127 used (2024-07-24 .. 2026-08-28, 2.09 yr):**
+
+| exit configuration | M15 net | trades | M30 net | trades | H1 net | trades |
+|---|---|---|---|---|---|---|
+| no stop, no trail | -$322,608 | 6,583 | -$96,114 | 3,258 | **+$20,065** | 1,583 |
+| 0.5% stop only | -$310,639 | 6,628 | -$69,383 | 3,314 | -$20,893 | 1,658 |
+| 1.0% stop only | -$308,783 | 6,589 | -$84,107 | 3,264 | **+$24,216** | 1,591 |
+| 2%/0.5% trail only | -$501,671 | 6,621 | -$316,899 | 3,301 | -$220,107 | 1,640 |
+| 0.5% stop + trail | -$468,236 | 6,669 | -$239,114 | 3,358 | -$248,976 | 1,723 |
+| 1.0% stop + trail | -$492,338 | 6,631 | -$280,930 | 3,308 | -$221,408 | 1,651 |
+
+**The reproduction check, stated before anything is read off the new cells.**
+Every `TrendlineBreakout` row and every *stopped* `MacdCrossover` row landed
+within a few thousand of its published figure, consistent with the window
+starting a week after D-124's. The unstopped MACD H1 cell came in at $18,713
+against a published $190,186 - a delta of -$171,472, which is **exactly** the
+figure D-149 recorded when it chased this same gap. The unstopped MACD M15 cell
+went the other way: it reproduced D-124 closely (+$5,750) rather than landing
+near D-149's own rerun of -$60,720. Both of those are the 2x2 D-149 already
+established - unstopped MACD is chaotically window-sensitive, $163,588 of spread
+on that exact cell across 28 days of start-date shift, while every stopped row
+and every breakout row is stable. So the harness is behaving, and nothing in
+this run reopens D-149.
+
+**The finding: it is dominated, not merely unprofitable.** Best cell against
+best cell on the identical window:
+
+```
+  TrendlineBreakout  H1, no stop      +$160,923      201 trades
+  MacdCrossover      H1, 0.5% stop    +$131,272      565 trades
+  HilegaMilega       H1, 1.0% stop     +$24,216    1,591 trades
+```
+
+One seventh of the money for eight times the trades. A strategy that needs
+eight times the round trips to find a seventh of the P&L is not a marginal
+version of the other two, and it is the trade count that does the damage: over
+the full 50,000-bar H1 history the setup takes 6,480 round trips and pays
+**$186,340 in spread** to do it.
+
+**The mechanism is the asymmetry D-151 built in deliberately.** Entry requires
+the RSI to lead its 21-WMA; the exit fires the instant it touches that WMA
+again. An RSI(9) against a weighted average *of itself* crosses constantly, so
+the "trailing stop" the source describes is a hair-trigger at bar resolution.
+This is not an implementation error - it is what the rule says, implemented
+literally - but it does mean the method as taught depends on a human reading the
+lines at chart resolution and not acting on every touch. That discretion is the
+part that cannot be written down, and it is where the published win rate lives.
+
+**The two positive cells are noise, not an edge.** H1 goes +$20,065 with no
+stop, -$20,893 at a 0.5% stop, then +$24,216 at 1.0%. The sign flips twice
+across a monotone widening of one parameter, which is the non-monotonicity
+D-126 named on this same axis for MACD. Two positive cells out of eighteen, both
+on the timeframe with the fewest trades, with a sign that flips under a
+parameter that should only move the magnitude, is what fitting looks like.
+Reading either as a result would be D-132 again - a sweep arguing with its own
+best cell.
+
+**The trail is catastrophic here too, which is the one consistent result.**
+2%/0.5% trail-only is the worst configuration for all three strategies at all
+three timeframes, without exception. D-127 found this, D-148 confirmed it, and a
+third independent strategy reproducing it is now enough to treat it as a
+property of this instrument's cost structure rather than of any one entry rule.
+
+**What this does and does not settle.** It settles that the setup, implemented
+to its own stated definition and measured on the terms this project measures
+everything, has no edge on XAUUSD CFD over these windows. It does not settle
+anything about the markets the source actually demonstrates it on - Indian
+equity indices and single stocks, where the cost structure and the tick size are
+different and where this repository has no comparable cost model. D-141 is the
+standing example of assuming a gold result transfers; the same caution runs the
+other way. The strategy stays in the tree, registered and tested, because a
+measured negative is worth more than an unmeasured one and because the RSI/WMA
+primitives it added are now available to anything else.
+
+**Not attempted, deliberately.** Loosening the exit - requiring the WMA cross to
+hold for N bars, or waiting for full opposite alignment - would very likely cut
+the trade count and move these numbers. It would also be a parameter search
+against one window on a strategy that has just failed on it, which is exactly
+what D-131 and D-132 are on record about. If it is worth doing, it is worth
+doing walk-forward, and it should be a separate entry that says so up front.

@@ -47,6 +47,7 @@ from algo.exchange.forex_calendar import ForexCalendar
 from algo.exchange.specs import ContractSpecStore
 from algo.strategy.base import Strategy
 from algo.strategy.context import BarContext, PositionView, SessionInfo
+from algo.strategy.hilega_milega import HilegaMilega
 from algo.strategy.macd_crossover import MacdCrossover
 from algo.strategy.price_stop import stop_fill_price
 from algo.strategy.trailing_profit_stop import (
@@ -351,8 +352,8 @@ class Row:
 
 
 #: Strategies this script can measure, each a zero-argument factory so `run`
-#: gets a fresh instance per call. `MacdCrossover` carries incremental state
-#: and must never be reused across two different bar series.
+#: gets a fresh instance per call. `MacdCrossover` and `HilegaMilega` carry
+#: incremental state and must never be reused across two different bar series.
 STRATEGIES: dict[str, Callable[[], Strategy]] = {
     "macd": lambda: MacdCrossover(
         instrument=XAUUSD,
@@ -363,6 +364,12 @@ STRATEGIES: dict[str, Callable[[], Strategy]] = {
     "breakout": lambda: TrendlineBreakout(
         instrument=XAUUSD,
         lookback=20,
+        stop_loss_pct=STOP_LOSS_PCT,
+        trail_activation_pct=TRAIL_ACTIVATION_PCT,
+        trail_pct=TRAIL_PCT,
+    ),
+    "hilega": lambda: HilegaMilega(
+        instrument=XAUUSD,
         stop_loss_pct=STOP_LOSS_PCT,
         trail_activation_pct=TRAIL_ACTIVATION_PCT,
         trail_pct=TRAIL_PCT,

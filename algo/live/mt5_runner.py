@@ -79,6 +79,7 @@ from algo.portfolio.book import Portfolio
 from algo.risk.engine import FixedLotSizer, RiskEngine
 from algo.risk.killswitch import KillSwitch
 from algo.strategy.base import Strategy
+from algo.strategy.hilega_milega import HilegaMilega
 from algo.strategy.macd_crossover import MacdCrossover
 from algo.strategy.trendline_breakout import TrendlineBreakout
 
@@ -113,6 +114,7 @@ def strategy_for(
     trail_activation_pct: Decimal,
     trail_pct: Decimal,
     lookback: int = 20,
+    min_separation: Decimal = Decimal("0"),
 ) -> Strategy:
     """Build one of the CFD strategies by name.
 
@@ -136,7 +138,15 @@ def strategy_for(
             trail_activation_pct=trail_activation_pct,
             trail_pct=trail_pct,
         )
-    raise DataError(f"unknown strategy {name!r}; available: breakout, macd")
+    if name == "hilega":
+        return HilegaMilega(
+            instrument=instrument,
+            min_separation=min_separation,
+            stop_loss_pct=stop_loss_pct,
+            trail_activation_pct=trail_activation_pct,
+            trail_pct=trail_pct,
+        )
+    raise DataError(f"unknown strategy {name!r}; available: breakout, hilega, macd")
 
 
 def build_mt5_paper_loop(

@@ -1,4 +1,4 @@
-"""Indicators. Currently EMA and MACD, computed to match what already exists.
+"""Indicators. EMA, WMA, RSI, MACD and the Hilega-Milega composite.
 
 `tools/macd_telegram_alert` has been watching MACD crossovers for a while and
 states its own definition precisely: EMA(12) - EMA(26), signal EMA(9) of that,
@@ -17,10 +17,44 @@ Floats, deliberately. These feed a comparison - is the histogram above or below
 zero - not a money calculation. `Decimal` would buy no accuracy in an
 exponential average and `chain_greeks` already sets the precedent for the same
 reason: the number selects, the price stays a `Decimal`.
+
+## RSI and WMA follow Pine, for the same reason the EMA follows the alert tool
+
+`rsi` and `wma` arrived for the Hilega-Milega composite (D-151), which is
+described entirely in terms of what TradingView draws. So they reproduce Pine's
+`ta.rsi` and `ta.wma` exactly rather than picking a convention:
+
+- **`rsi` uses Wilder's smoothing seeded with an SMA**, which is what `ta.rma`
+  does - `alpha = 1 / period`, seeded with the mean of the first `period`
+  changes. This is *not* the `2 / (period + 1)` weight `ema` uses, and it is not
+  seeded with the first value either. Both differences are deliberate: an RSI
+  seeded the way this module's EMA is seeded reads several points away from
+  TradingView's for a long time, which is precisely the disagreement the EMA
+  docstring above exists to prevent.
+- **`wma` weights the newest bar heaviest**, `period` down to `1`, denominator
+  `period * (period + 1) / 2`. Pine again.
+
+## Undefined is `nan`, never a neutral-looking number
+
+Wilder's average does not exist until `period` changes have been seen, and a
+`period`-bar WMA does not exist until `period` bars have. Those leading slots
+come back as `math.nan` rather than `50.0`, `0.0`, or a truncated list.
+
+`50.0` would be a lie a caller could act on - it is the exact value the
+Hilega-Milega rules test against, so a padded head would read as "perfectly
+neutral strength" on bars where nothing has been measured at all. Truncating
+instead would be worse in a different way: every caller would then have to
+carry an offset to line a value back up with the bar that produced it, and one
+caller getting that arithmetic wrong is an off-by-one in a trading signal.
+
+`nan` fails in the only safe direction. Both `nan > x` and `nan < x` are
+`False`, so a rule written against these lines declines to fire on a bar it
+cannot evaluate, instead of firing on a fabricated one.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -115,3 +149,154 @@ def warmup_bars(*, slow: int = 26, signal: int = 9) -> int:
     is smaller than a tick, not a point of exactness.
     """
     return slow + signal + 2
+
+
+def wma(values: Sequence[float], period: int) -> list[float]:
+    """Weighted moving average, Pine's `ta.wma`: newest bar weighted heaviest.
+
+    Weights run `period` down to `1` over the window ending at each bar, divided
+    by `period * (period + 1) / 2`. The first `period - 1` slots are `nan` -
+    there is no window there yet - and a `nan` anywhere in a window makes that
+    window's output `nan` too, so an undefined input can never be laundered into
+    a defined-looking average.
+    """
+    if period < 1:
+        raise DomainError(f"WMA period must be at least 1, got {period}")
+    count = len(values)
+    out = [math.nan] * count
+    denominator = period * (period + 1) / 2.0
+    for end in range(period - 1, count):
+        window = [float(v) for v in values[end - period + 1 : end + 1]]
+        if any(math.isnan(v) for v in window):
+            continue
+        out[end] = sum(v * (i + 1) for i, v in enumerate(window)) / denominator
+    return out
+
+
+def rsi_from_averages(average_gain: float, average_loss: float) -> float:
+    """One RSI reading from a pair of Wilder averages. Pine's three-way form.
+
+    Public because `HilegaMilega` computes the same averages incrementally, one
+    bar at a time, and must turn them into a reading the identical way - a
+    second copy of `100 - 100 / (1 + rs)` with its own edge cases is exactly the
+    drift this module exists to prevent.
+
+    Not `100 - 100 / (1 + rs)` alone: a window with no losing bar divides by
+    zero, and a window with no winning bar is `0`, not `nan`. Pine states both
+    cases explicitly and so does this.
+    """
+    if average_loss == 0.0:
+        return 100.0
+    if average_gain == 0.0:
+        return 0.0
+    return 100.0 - 100.0 / (1.0 + average_gain / average_loss)
+
+
+def rsi(values: Sequence[float], period: int = 9) -> list[float]:
+    """Wilder's RSI, Pine's `ta.rsi`. Default 9, not 14 - see `hilega_milega`.
+
+    `nan` until `period` changes have been seen, then Wilder-smoothed
+    (`alpha = 1 / period`) from an SMA seed. One value per input bar, so
+    `rsi(closes)[i]` is the reading for `closes[i]` with no offset to carry.
+    """
+    if period < 1:
+        raise DomainError(f"RSI period must be at least 1, got {period}")
+    count = len(values)
+    out = [math.nan] * count
+    if count <= period:
+        return out
+
+    gains: list[float] = []
+    losses: list[float] = []
+    for i in range(1, count):
+        delta = float(values[i]) - float(values[i - 1])
+        gains.append(max(delta, 0.0))
+        losses.append(max(-delta, 0.0))
+
+    # `gains[j]` is the change *into* bar `j + 1`, so the mean of the first
+    # `period` of them is the average at bar `period` - the first bar Wilder's
+    # own definition produces a number for.
+    average_gain = sum(gains[:period]) / period
+    average_loss = sum(losses[:period]) / period
+    out[period] = rsi_from_averages(average_gain, average_loss)
+
+    alpha = 1.0 / period
+    for i in range(period, count - 1):
+        average_gain = alpha * gains[i] + (1.0 - alpha) * average_gain
+        average_loss = alpha * losses[i] + (1.0 - alpha) * average_loss
+        out[i + 1] = rsi_from_averages(average_gain, average_loss)
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class HilegaMilegaLines:
+    """The three lines the Hilega-Milega panel draws, one value per input bar.
+
+    Named for what each one measures rather than for the colour it is drawn in,
+    because the colours are a charting choice and the meanings are not:
+
+    - `strength` - RSI(9) itself. The black line. Above 50 is the long half of
+      the panel, below 50 the short half.
+    - `trend` - EMA(3) *of the RSI*. The green line, drawn hugging the RSI. It
+      is the RSI's own short-term direction, which is why it is the first thing
+      to cross when a move is running out.
+    - `weighted` - WMA(21) *of the RSI*. The red line, and the slow one. Its
+      position relative to the RSI is the setup's main read.
+    """
+
+    strength: list[float]
+    trend: list[float]
+    weighted: list[float]
+
+
+def hilega_milega(
+    values: Sequence[float],
+    *,
+    rsi_period: int = 9,
+    trend_period: int = 3,
+    weighted_period: int = 21,
+) -> HilegaMilegaLines:
+    """RSI(9), plus an EMA(3) and a WMA(21) computed over that RSI.
+
+    The defaults are the published ones: RSI shortened from 14 to 9, its
+    overbought/oversold bands both moved to 50 (which is a drawing decision, so
+    it lives in the strategy's rules rather than here), a 3-period EMA and a
+    21-period WMA plotted on the RSI rather than on price.
+
+    Both averages are taken over the RSI's **defined** tail and then padded back
+    out with `nan`, never over a series with `nan` in it. Feeding the raw list
+    to `ema` would poison every subsequent value - one `nan` in a recursive
+    average is permanent - and it would also seed the EMA from a slot that has
+    no reading. Padding after the fact means `trend[i]` and `weighted[i]` still
+    describe `values[i]`, which is the whole point of the one-value-per-bar
+    convention.
+    """
+    strength = rsi(values, rsi_period)
+    first_defined = next((i for i, value in enumerate(strength) if not math.isnan(value)), None)
+    if first_defined is None:
+        blank = [math.nan] * len(values)
+        return HilegaMilegaLines(strength=strength, trend=blank, weighted=list(blank))
+
+    tail = strength[first_defined:]
+    head = [math.nan] * first_defined
+    return HilegaMilegaLines(
+        strength=strength,
+        trend=head + ema(tail, trend_period),
+        weighted=head + wma(tail, weighted_period),
+    )
+
+
+def hilega_milega_warmup_bars(
+    *, rsi_period: int = 9, trend_period: int = 3, weighted_period: int = 21
+) -> int:
+    """Bars needed before all three lines mean anything.
+
+    Same shape of argument as `warmup_bars` above, added up over this stack:
+    `rsi_period` bars before Wilder's average exists at all, `weighted_period`
+    more before the slowest average over it does, `trend_period` for the
+    fastest one to settle, and two closed bars so a rule can compare one against
+    its predecessor. The EMA term is a settling allowance rather than a hard
+    requirement - a recursive average is never exactly settled - which is the
+    same admission `warmup_bars` makes about its own `signal` term.
+    """
+    return rsi_period + weighted_period + trend_period + 2

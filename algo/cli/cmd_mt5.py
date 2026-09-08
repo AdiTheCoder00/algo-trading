@@ -23,7 +23,7 @@ NEWLINE = "\n"
 
 @app.command("live-mt5")
 def live_mt5(
-    strategy_name: str = typer.Option("breakout", "--strategy", help="breakout | macd"),
+    strategy_name: str = typer.Option("breakout", "--strategy", help="breakout | macd | hilega"),
     timeframe_minutes: int = typer.Option(30, "--timeframe", help="Bar interval, minutes"),
     symbol: str = typer.Option("XAUUSD", help="MT5 symbol"),
     lookback: int = typer.Option(20, help="Donchian channel length (breakout only)"),
@@ -486,7 +486,7 @@ def _alert_on(alerter: Alerter, result: PassResult) -> None:
 
 @app.command("mt5-replay")
 def mt5_replay(
-    strategy_name: str = typer.Option("breakout", "--strategy", help="breakout | macd"),
+    strategy_name: str = typer.Option("breakout", "--strategy", help="breakout | macd | hilega"),
     timeframe_minutes: int = typer.Option(30, "--timeframe", help="Bar interval, minutes"),
     symbol: str = typer.Option("XAUUSD", help="MT5 symbol"),
     lookback: int = typer.Option(20, help="Donchian channel length (breakout only)"),

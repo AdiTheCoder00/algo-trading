@@ -96,6 +96,19 @@ PARAMETERS: tuple[ParamSpec, ...] = (
         applies_to=("breakout",),
     ),
     ParamSpec(
+        name="min_separation",
+        label="Line separation",
+        kind="decimal",
+        default="0",
+        minimum="0",
+        maximum="50",
+        help="RSI points the RSI must clear the nearer of its two averages by "
+        "before Hilega-Milega takes an entry. 0 keeps the plain alignment rule; "
+        "raising it makes the setup's own distance-means-momentum claim "
+        "checkable.",
+        applies_to=("hilega",),
+    ),
+    ParamSpec(
         name="stop_loss_pct",
         label="Stop loss %",
         kind="decimal",
@@ -160,6 +173,13 @@ STRATEGIES: tuple[dict[str, str], ...] = (
         "label": "MACD crossover (12, 26, 9)",
         "blurb": "Long on a bullish histogram cross, short on a bearish one. "
         "Matches tools/macd_telegram_alert exactly.",
+    },
+    {
+        "id": "hilega",
+        "label": "Hilega-Milega (RSI 9 / EMA 3 / WMA 21)",
+        "blurb": "Long when RSI(9) leads both of its own averages above 50, "
+        "short when it trails both below. Exits when the WMA crosses back "
+        "through the RSI.",
     },
 )
 
@@ -259,6 +279,10 @@ def run_study(
         )
 
     lookback = _int("lookback", supplied.get("lookback", _spec("lookback").default))
+    min_separation = _decimal(
+        "min_separation",
+        supplied.get("min_separation", _spec("min_separation").default),
+    )
     lots = _int("lots", supplied.get("lots", _spec("lots").default))
     count = _int("bars", supplied.get("bars", _spec("bars").default))
     stop_loss_pct = _decimal(
@@ -295,6 +319,7 @@ def run_study(
             trail_activation_pct=trail_activation_pct,
             trail_pct=trail_pct,
             lookback=lookback,
+            min_separation=min_separation,
         ),
         stop_loss_pct=stop_loss_pct,
         trail_activation_pct=trail_activation_pct,
@@ -311,6 +336,7 @@ def run_study(
         "timeframe_label": timeframe.label,
         "params": {
             "lookback": lookback,
+            "min_separation": str(min_separation),
             "lots": lots,
             "bars": count,
             "stop_loss_pct": str(stop_loss_pct),
@@ -399,13 +425,13 @@ def run_walk_forward_study(
                 f"{name!r} is not an optimisable axis; available: "
                 f"{', '.join(GRID_AXES)}"
             )
-    # `lookback` is a Donchian channel length - MACD has no such knob, and
+    # `lookback` is a Donchian channel length - no other strategy has one, and
     # optimising a parameter the strategy ignores would produce a grid whose
     # cells are all identical and a "stability" verdict that means nothing.
     if strategy != "breakout" and "lookback" in chosen:
         raise DataError(
-            "channel length is a breakout parameter; MACD has no such knob, so "
-            "optimising over it would search a grid of identical runs"
+            f"channel length is a breakout parameter; {strategy} has no such knob, "
+            "so optimising over it would search a grid of identical runs"
         )
     if len(set(chosen)) != len(chosen):
         raise DataError("the two axes must differ")
@@ -499,8 +525,8 @@ def run_sweep_study(
         raise DataError("the two axes must differ")
     if strategy != "breakout" and "lookback" in (row_axis, column_axis):
         raise DataError(
-            "channel length is a breakout parameter; MACD has no such knob, so "
-            "sweeping it would produce a grid of identical columns"
+            f"channel length is a breakout parameter; {strategy} has no such knob, "
+            "so sweeping it would produce a grid of identical columns"
         )
 
     lots = _int("lots", supplied.get("lots", _spec("lots").default))
@@ -674,6 +700,10 @@ def run_significance_study(
         raise DataError(f"permutations must be positive, got {permutations}")
 
     lookback = _int("lookback", supplied.get("lookback", _spec("lookback").default))
+    min_separation = _decimal(
+        "min_separation",
+        supplied.get("min_separation", _spec("min_separation").default),
+    )
     lots = _int("lots", supplied.get("lots", _spec("lots").default))
     count = _int("bars", supplied.get("bars", _spec("bars").default))
     stop_loss_pct = _decimal(
@@ -711,6 +741,7 @@ def run_significance_study(
                 trail_activation_pct=trail_activation_pct,
                 trail_pct=trail_pct,
                 lookback=lookback,
+                min_separation=min_separation,
             ),
             stop_loss_pct=stop_loss_pct,
             trail_activation_pct=trail_activation_pct,
@@ -755,6 +786,7 @@ def run_significance_study(
         "window_end": bars[-1].ts.isoformat(),
         "params": {
             "lookback": lookback,
+            "min_separation": str(min_separation),
             "lots": lots,
             "stop_loss_pct": str(stop_loss_pct),
             "trail_activation_pct": str(trail_activation_pct),
