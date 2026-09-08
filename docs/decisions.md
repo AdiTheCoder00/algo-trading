@@ -3762,3 +3762,82 @@ combination, and it would be curve-fitting: with 32 months and a handful of free
 parameters, some setting always fits. Any such result would need walk-forward
 across separate periods before it meant anything. Cross-reference D-145 on
 single-window evidence.
+
+---
+
+### D-151 - The YouTube FVG strategy has no edge; its target rule is what makes it unusable, and removing that only reveals a coin flip
+
+You asked for the best XAUUSD strategy on YouTube, built as an EA, then
+backtested. `mt5/Experts/AlgoGold/GoldFairValueGap.mq5` is the build; this is
+the backtest.
+
+**Provenance first, because it bounds what any of this is worth.** The rules
+came from the description of *"Best Prop Firm GOLD Strategy 2026"*, RBI FOREX
+(479 subscribers, 502 views), monetised through broker affiliate links. H4
+breakout, fair value gap created during the break, retrace into the gap, M15
+displacement to confirm, target the previous H4 liquidity, stop to break even at
+1:1. The video defines neither the stop loss, nor "displacement", nor
+"liquidity" as a formula. Those three are mine and are marked as such in the
+expert and in `mt5/README.md`.
+
+**Measured with `scripts/measure_fvg_xauusd.py`** - the rules reimplemented on
+real MT5 bars with D-121's costs, not the compiled `.ex5` through the Strategy
+Tester. The tester needs the terminal closed and the terminal is forward-testing
+`GoldCamarillaBreakout` on demo. The divergences that buys are listed in the
+script's docstring; the material one is that a bar containing both stop and
+target is charged as a stop.
+
+**As shipped, it barely trades, and never wins.** 0.05 lots, $10,000, D-140's
+three windows:
+
+| Window | Setups armed | Confirmed | Entered | Trades | PF | Net | Targets hit |
+|---|---|---|---|---|---|---|---|
+| 2026.06-08 | 47 | 15 | 2 | 1 | 0.00 | -$65 | 0 |
+| 2026.01-05 | 56 | 23 | 2 | 1 | 0.00 | -$121 | 0 |
+| 2025.06-12 | 89 | 32 | 6 | 5 | 0.00 | -$184 | 0 |
+
+192 setups over eighteen months became 10 entries and 7 closed trades, all
+losers. **Not one trade in eighteen months reached its target.**
+
+**The binding constraint is rule 6 interacting with the reward:risk floor.** The
+target is the extreme of the 12 H4 bars before the breakout; after a breakout
+that level is usually far away, so the computed reward:risk is large - 8.3, 5.9,
+5.1, 2.8 on the trades actually taken. The `InpMinRewardRisk` floor of 1.5 then
+rejected 33 of 70 confirmed setups for being *too close*. So the gate selects
+**for** distant targets, which are exactly the ones least likely to be reached.
+That is adverse selection built into the rules, and it is why the hit rate is
+zero rather than low.
+
+**Removing it does not find an edge, it finds a coin flip.** Same entries, same
+stops, target replaced by a flat 2R:
+
+| Window | Trades | Win rate | PF | Net | Avg R |
+|---|---|---|---|---|---|
+| 2026.06-08 | 8 | 50.0% | 1.91 | +$518 | +0.10 |
+| 2026.01-05 | 10 | 40.0% | 0.74 | -$444 | -0.00 |
+| 2025.06-12 | 18 | 33.3% | 0.95 | -$54 | -0.03 |
+
+36 trades, **+$20 net across all three**, average R of +0.10 / -0.00 / -0.03.
+The 1.91 is eight trades and should not be read as anything. The entries do not
+predict direction at a 2R horizon; the liquidity target was hiding that behind a
+0% hit rate rather than causing it.
+
+**Conclusion: do not trade `GoldFairValueGap`, and do not tune it.** This is
+D-140's conclusion reached by a different route, and D-131 already established
+that sweeping thresholds on this data fits noise. Two independent reasons not to
+continue: the sample is too small for a threshold sweep to mean anything (36
+trades at the loosest setting), and the loosest setting is already flat.
+
+**What is worth keeping.** The expert itself is sound plumbing - it reuses
+`Trader`, `ScalpFilters` and `Dashboard` unchanged, compiles clean, and its gate
+telemetry is what produced the funnel above. The funnel is the reusable part: an
+entry rule that fires 192 times and trades 10 is diagnosable in one run, which is
+cheaper than the three-window tester sweep D-140 needed.
+
+**Two bugs found by writing the simulator, not by reading the code.**
+`ZoneInvalidated(g_setup,1)` looped `for(i=0; i>=1; i--)` - zero iterations, so
+setups could only ever expire by time and never be invalidated by price closing
+through the zone. And `TryEnter` called `RescanSetups()` after a fill, which
+could re-arm the setup just traded and let the next retrace enter the same
+imbalance twice. Both fixed before the numbers above were taken. Mirroring code
+into a second implementation is a better review than reading it.
