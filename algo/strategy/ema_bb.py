@@ -77,6 +77,13 @@ from algo.strategy.base import Strategy
 from algo.strategy.context import BarContext
 from algo.strategy.protective_exits import ExitKind, ProtectiveExits
 
+#: `long_only` exists because D-152 measured this strategy's shorts as negative
+#: in eight of nine cells while its longs were positive in all nine. That
+#: observation is a POST-HOC SLICE of the same three windows the rest of that
+#: study used, which is exactly the shape D-131 says fits noise - so the flag is
+#: here to be falsified on unseen data by
+#: `scripts/walkforward_ema_bb_xauusd.py`, not because long-only is believed.
+
 #: The two readings. Strings rather than an enum because they are also a CLI
 #: and config value, and every other knob in this package is a string.
 PULLBACK = "pullback"
@@ -99,6 +106,7 @@ class EmaBollinger(Strategy):
         *,
         instrument: InstrumentId,
         mode: str = PULLBACK,
+        long_only: bool = False,
         ema_period: int = 50,
         bb_period: int = 20,
         bb_stdev: float = 2.0,
@@ -119,6 +127,7 @@ class EmaBollinger(Strategy):
 
         self._instrument = instrument
         self._mode = mode
+        self._long_only = long_only
         self._ema_period = ema_period
         self._bb_period = bb_period
         self._bb_stdev = bb_stdev
@@ -139,6 +148,7 @@ class EmaBollinger(Strategy):
         return {
             "instrument": self._instrument.key,
             "mode": self._mode,
+            "long_only": str(self._long_only),
             "ema_period": str(self._ema_period),
             "bb_period": str(self._bb_period),
             "bb_stdev": str(self._bb_stdev),
@@ -237,7 +247,12 @@ class EmaBollinger(Strategy):
                         f"{self._ema_period} EMA {ema:.2f}",
                     )
                 ]
-            if prev_upper is not None and below_trend and prev_close > prev_upper >= close:
+            if (
+                not self._long_only
+                and prev_upper is not None
+                and below_trend
+                and prev_close > prev_upper >= close
+            ):
                 return [
                     self._signal(
                         ctx, SignalAction.OPEN, Side.SELL,
@@ -257,7 +272,7 @@ class EmaBollinger(Strategy):
                     f"with price above the {self._ema_period} EMA {ema:.2f}",
                 )
             ]
-        if below_trend and close < lower:
+        if not self._long_only and below_trend and close < lower:
             return [
                 self._signal(
                     ctx, SignalAction.OPEN, Side.SELL,

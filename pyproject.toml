@@ -183,6 +183,8 @@ ignore = [
 # And the 50 EMA / Bollinger comparison (D-152): a matrix and a falsification
 # table written to stdout for a human, imported by nothing.
 "scripts/measure_ema_bb_xauusd.py" = ["T201"]
+# And the pre-registered walk-forward (D-153): a verdict written to stdout.
+"scripts/walkforward_ema_bb_xauusd.py" = ["T201"]
 # And `ask_nemotron.py`, which is a REPL: the printed stream IS the interface,
 # there is no engine here to keep clean, and routing a chat reply through a
 # structlog line would make it unreadable.
