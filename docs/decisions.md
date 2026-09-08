@@ -3913,3 +3913,61 @@ the half-width at period 20, which is exactly the margin between a touch and a
 near-miss. And `EmaBollinger` steps its EMA *before* the protective-exit check,
 deliberately not reproducing the `MacdCrossover` divergence `mt5/README.md`
 records, because there is no measured backtest here that depends on the wart.
+
+---
+
+### D-153 - Long-only EMA/BB was noise. The pre-registered walk-forward rejected it, and the rejection is the useful part
+
+D-152 ended with one attractive number: long-only breakout on M30 would have
+returned $128,431 against buy-and-hold's $116,459. It was recorded there as a
+hypothesis rather than a result, because it was a post-hoc slice of the same
+three windows the study used. This is the test, and it was **pre-registered**:
+`scripts/walkforward_ema_bb_xauusd.py` was written and committed with its
+hypothesis, data, parameters and pass/fail thresholds fixed, one commit before
+being run. `verdict()` computes the call so it cannot be argued afterwards.
+
+**The rule, fixed in advance.** PF >= 1.10 pooled out-of-sample, net > 0, at
+least 60% of folds positive on the fixed-parameter baseline, a win over
+buy-and-hold on net or net-per-drawdown, and at least 100 trades. H1 named
+PRIMARY for having the longest unseen span - deliberately not M30, which is
+what D-152 liked.
+
+**Both fail, on data D-152 never saw** (everything before 2025-06-01):
+
+| | pooled net | PF | trades | max DD | folds positive |
+|---|---|---|---|---|---|
+| **H1** 2018-03..2025-05 | +$14,642 | **1.04** | 846 | **54.6%** | 12/25 (48%) |
+| **M30** 2022-06..2025-05 | **-$3,333** | **0.99** | 695 | 44.4% | 3/7 (43%) |
+
+Against buy-and-hold on the same bars: **+$195,893 at 21.9% drawdown on H1**,
++$145,791 at 12.9% on M30. The strategy made a fourteenth of the money on two
+and a half times the drawdown. On H1 it earned $268 per 1% of drawdown against
+holding's $8,941.
+
+This is not a thin-data verdict. `Feasibility` reports `ADEQUATE` for both -
+717 out-of-sample trades across 25 windows on H1, 396 across 7 on M30.
+
+**D-152's headline reversed on contact with unseen data.** Long-only looked
+like the best thing in that study and is, out of sample, break-even at best
+(H1) and negative (M30). The three windows that produced it were the trend, not
+the rule. **Stop work on long-only EMA/BB.**
+
+**D-131 confirmed again, independently.** `optimisation_beat_doing_nothing` is
+`False` on both timeframes - choosing a stop per window lost to leaving it
+alone (H1: $18,069 optimised vs $18,447 baseline; M30: -$16,452 vs -$14,275).
+Two more data points for the same finding, from a study that was not looking
+for it.
+
+**What this cost, and what it bought.** One commit of discipline. The
+alternative - registering long-only in `strategy_for` on D-152's numbers and
+forward-testing it on demo - would have spent weeks discovering the same thing
+with a worse instrument. `EmaBollinger` remains unregistered and `long_only`
+stays in the code with this entry attached to it, because a flag documented as
+tested-and-rejected is more useful than one quietly deleted: it stops the next
+person rediscovering the same slice.
+
+**Three strategies measured across D-151 to D-153, none tradable.** That is the
+system working. The measurement harness is now the durable asset here - the FVG
+funnel, this pre-registration pattern, and `run_cfd_walk_forward`'s new
+`factory` hook, which lets a candidate be walk-forwarded without first being
+made reachable by the live loop.

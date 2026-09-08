@@ -52,13 +52,22 @@ The EMA is stepped at the very top of `on_bar`, before the exit check and
 before the warmup gate, so a bar on which a stop fires still advances it. An
 indicator that skips bars is not the indicator it claims to be.
 
-## Not registered in `strategy_for`
+## Not registered in `strategy_for`, and now for a measured reason
 
 Deliberately. D-151 is the entry recording an expert built from published rules
 and measured afterwards, at which point it had no edge. Registering a strategy
 makes it reachable by the live loop and the dashboard; that should follow a
-measurement, not precede one. `scripts/measure_ema_bb_xauusd.py` is the
-measurement.
+measurement, not precede one.
+
+The measurements exist now, and they say do not register it.
+`scripts/measure_ema_bb_xauusd.py` (D-152) found `pullback` below break-even in
+every window and `breakout` positive but losing to simply holding gold.
+`scripts/walkforward_ema_bb_xauusd.py` (D-153) pre-registered the one promising
+slice - long-only - and rejected it on seven years of unseen data.
+
+Nothing here is tradable. It is kept because the code is the record of what was
+tested, and because `run_cfd_walk_forward`'s `factory` hook, added for D-153,
+lets the next candidate be tested the same way without being made live first.
 """
 
 from __future__ import annotations
@@ -78,11 +87,15 @@ from algo.strategy.context import BarContext
 from algo.strategy.protective_exits import ExitKind, ProtectiveExits
 
 #: `long_only` exists because D-152 measured this strategy's shorts as negative
-#: in eight of nine cells while its longs were positive in all nine. That
-#: observation is a POST-HOC SLICE of the same three windows the rest of that
-#: study used, which is exactly the shape D-131 says fits noise - so the flag is
-#: here to be falsified on unseen data by
-#: `scripts/walkforward_ema_bb_xauusd.py`, not because long-only is believed.
+#: in eight of nine cells while its longs were positive in all nine, and
+#: long-only would have beaten buy-and-hold on those windows.
+#:
+#: **It was tested and it failed.** D-153 pre-registered that hypothesis and ran
+#: it on seven years of data D-152 never saw: profit factor 1.04 on H1 and 0.99
+#: on M30, 48% and 43% of folds positive, against buy-and-hold's +$195,893 at a
+#: third of the drawdown. The flag is kept, rather than deleted, so that the
+#: next person to notice that the shorts lose finds the falsification attached
+#: to it instead of rediscovering the same slice.
 
 #: The two readings. Strings rather than an enum because they are also a CLI
 #: and config value, and every other knob in this package is a string.
