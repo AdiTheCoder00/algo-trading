@@ -1,8 +1,8 @@
 # MT5 expert advisors
 
-Four MetaTrader 5 experts. Two are ports of the XAUUSD strategies in `algo/strategy/`;
-the other two are not ports. Both of those have now been measured, and **both lost
-money** — see the scalper callout below and D-151 for the fair value gap expert.
+Five MetaTrader 5 experts. Three are ports of the XAUUSD strategies in `algo/strategy/`;
+the other two are not ports. **Every one that has been measured lost money** — see the
+scalper callout below, D-151 for the fair value gap expert, and D-152/D-153 for EMA/BB.
 
 | Expert | Ports | `strategy_for` name | Default magic |
 | --- | --- | --- | --- |
@@ -10,6 +10,19 @@ money** — see the scalper callout below and D-151 for the fair value gap exper
 | [GoldTrendlineBreakout.mq5](Experts/AlgoGold/GoldTrendlineBreakout.mq5) | [trendline_breakout.py](../algo/strategy/trendline_breakout.py) | `breakout` | 20260902 |
 | [GoldIntradayScalper.mq5](Experts/AlgoGold/GoldIntradayScalper.mq5) | **nothing — terminal-side only** | — | 20260903 |
 | [GoldFairValueGap.mq5](Experts/AlgoGold/GoldFairValueGap.mq5) | **nothing — terminal-side only** | — | 20260904 |
+| [GoldEmaBollinger.mq5](Experts/AlgoGold/GoldEmaBollinger.mq5) | [ema_bb.py](../algo/strategy/ema_bb.py) | **not registered — D-153** | 20260906 |
+
+> **`GoldEmaBollinger` has no measured edge either, and it is a port of a strategy that
+> is deliberately absent from `strategy_for`.** D-152: `pullback` was below break-even in
+> every window on M30 (PF 0.60 / 0.44 / 0.92); `breakout` cleared PF 1.0 in seven of nine
+> cells but lost to doing nothing — buy-and-hold made $116,459 against its $69,458.
+> D-153 pre-registered the one promising slice, long-only, and **rejected it** on seven
+> years of unseen data: PF 1.04 on H1, 0.99 on M30, against buy-and-hold's +$195,893 at a
+> third of the drawdown. It was built because it was asked for. Demo only.
+>
+> **20260905 is NOT free.** `GoldCamarillaBreakout` claims it and is not in this repo —
+> its source lives on `claude/gold-trendline-breakout-es-21c6bc`. That is why this expert
+> is 20260906 rather than the next number in sequence.
 
 > **`GoldFairValueGap` has no edge — measured, not suspected.** Over D-140's three
 > windows it armed 192 setups, entered 10, and closed 7 trades, **all losers, with not
@@ -24,7 +37,7 @@ of `price_stop.py` + `trailing_profit_stop.py` + the sequencing in `protective_e
 One shared exit module, for the same reason the Python has one: "the shared, tested piece
 that adds it identically to both rather than two copies that could quietly drift apart."
 
-All four share [Trader.mqh](Include/AlgoGold/Trader.mqh), the execution plumbing. The
+All five share [Trader.mqh](Include/AlgoGold/Trader.mqh), the execution plumbing. The
 scalper and the FVG expert additionally use
 [ScalpFilters.mqh](Include/AlgoGold/ScalpFilters.mqh) — session window, daily governors,
 the gate telemetry, and (scalper only) the ATR bracket with its cost gate.
@@ -35,7 +48,7 @@ compile on its own. Getting the order wrong reports 35 errors *inside `Trader.mq
 none in the expert being compiled, which is a confusing place to start looking. This
 applies even to an expert that never touches the trail.
 
-All four compile clean (0 errors, 0 warnings) against the standard library shipped with
+All five compile clean (0 errors, 0 warnings) against the standard library shipped with
 the Vantage Markets MT5 terminal, build `X64 Regular`.
 
 > **The scalper does not work — measured, not suspected.** Across three windows and
@@ -88,9 +101,11 @@ position and managed accordingly. Each expert therefore ships a distinct magic, 
 `algo mt5`, they will correctly ignore each other's positions.
 
 The registry, in full — `20260828` Python adapter, `20260901` MACD, `20260902` breakout,
-`20260903` scalper, `20260904` fair value gap. Two experts sharing a magic is the same
-failure as sharing the Python's: each would net the other's tickets into its own
-position and manage them.
+`20260903` scalper, `20260904` fair value gap, `20260906` EMA/BB. **`20260905` is taken
+by `GoldCamarillaBreakout`**, which is installed in the terminal but not committed here —
+a magic can be claimed by an expert this README cannot see, so check the terminal as well
+as this list. Two experts sharing a magic is the same failure as sharing the Python's:
+each would net the other's tickets into its own position and manage them.
 
 ---
 
