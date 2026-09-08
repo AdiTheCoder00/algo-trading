@@ -183,3 +183,7 @@ ignore = [
 "scripts/ask_nemotron.py" = ["T201"]
 "scripts/measure_stop_trail_matrix_xauusd.py" = ["T201"]
 "scripts/measure_window_sensitivity_xauusd.py" = ["T201"]
+# And again for the liquidity-sweep study and the decode step that feeds it: a
+# run report and a progress trace, both stdout-for-a-human, imported by nothing.
+"scripts/build_xauusd_dataset.py" = ["T201"]
+"scripts/backtest_xauusd_liquidity_sweep.py" = ["T201"]

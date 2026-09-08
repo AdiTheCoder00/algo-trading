@@ -115,3 +115,108 @@ def warmup_bars(*, slow: int = 26, signal: int = 9) -> int:
     is smaller than a tick, not a point of exactness.
     """
     return slow + signal + 2
+
+
+def true_range(
+    highs: Sequence[float], lows: Sequence[float], closes: Sequence[float]
+) -> list[float]:
+    """Wilder's true range: the bar's own span, or its gap from the last close.
+
+    The first bar has no previous close and so has no gap to measure; its true
+    range is simply its high minus its low. That is the standard convention and
+    it matters here only for one bar out of a quarter of a million.
+    """
+    if not (len(highs) == len(lows) == len(closes)):
+        raise DomainError("true range needs highs, lows and closes of the same length")
+    out: list[float] = []
+    for i in range(len(highs)):
+        span = float(highs[i]) - float(lows[i])
+        if i == 0:
+            out.append(span)
+            continue
+        previous = float(closes[i - 1])
+        out.append(
+            max(span, abs(float(highs[i]) - previous), abs(float(lows[i]) - previous))
+        )
+    return out
+
+
+def atr(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    period: int = 14,
+) -> list[float]:
+    """Average true range, Wilder-smoothed and seeded with a simple average.
+
+    Same seeding as `ta.atr` on every chart: a stop or a sweep threshold written
+    as "a tenth of an ATR" should mean the same distance here as it does on the
+    screen the rule was written against.
+
+    NaN until there are `period` bars to average, so a caller cannot place a
+    stop at a volatility estimate that does not exist yet.
+    """
+    if period < 1:
+        raise DomainError(f"ATR period must be at least 1, got {period}")
+    ranges = true_range(highs, lows, closes)
+    n = len(ranges)
+    out = [float("nan")] * n
+    if n < period:
+        return out
+    average = sum(ranges[:period]) / period
+    out[period - 1] = average
+    for i in range(period, n):
+        average = (average * (period - 1) + ranges[i]) / period
+        out[i] = average
+    return out
+
+
+class WilderAtr:
+    """The same ATR as `atr()`, advanced one bar at a time.
+
+    `atr()` needs the whole series in hand, which suits a study that precomputes
+    it. A strategy that must run identically in a backtest and in a live loop
+    cannot hold the series - it sees one bar and then the next - and a Wilder
+    average is path-dependent, so recomputing it over a rolling window would
+    give a *different number* rather than the same one more cheaply.
+
+    So this carries the running average, and `test_liquidity_sweep.py` asserts
+    bar for bar that it reproduces `atr()` over the same input. Two
+    implementations are justified only while that test exists.
+
+    `value` is `None` until `period` bars have been seen - the same statement
+    `atr()`'s NaN makes, in the form a caller has to handle.
+    """
+
+    __slots__ = ("_average", "_period", "_previous_close", "_seed")
+
+    def __init__(self, period: int = 14) -> None:
+        if period < 1:
+            raise DomainError(f"ATR period must be at least 1, got {period}")
+        self._period = period
+        self._seed: list[float] = []
+        self._average: float | None = None
+        self._previous_close: float | None = None
+
+    def update(self, high: float, low: float, close: float) -> float | None:
+        """Fold one closed bar in and return the ATR as of that bar."""
+        span = high - low
+        if self._previous_close is None:
+            span_true = span
+        else:
+            span_true = max(
+                span, abs(high - self._previous_close), abs(low - self._previous_close)
+            )
+        self._previous_close = close
+
+        if self._average is None:
+            self._seed.append(span_true)
+            if len(self._seed) == self._period:
+                self._average = sum(self._seed) / self._period
+            return self._average
+        self._average = (self._average * (self._period - 1) + span_true) / self._period
+        return self._average
+
+    @property
+    def value(self) -> float | None:
+        return self._average
