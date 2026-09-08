@@ -115,3 +115,70 @@ def warmup_bars(*, slow: int = 26, signal: int = 9) -> int:
     is smaller than a tick, not a point of exactness.
     """
     return slow + signal + 2
+
+
+@dataclass(frozen=True, slots=True)
+class Bollinger:
+    """Bollinger bands, one value per input bar.
+
+    The first `period - 1` entries are `None` rather than an average of
+    whatever bars exist so far. An SMA of three closes is not a warming-up
+    20-period SMA, it is a different statistic, and letting it stand in would
+    put a band on the chart during exactly the stretch where nothing should be
+    traded.
+    """
+
+    middle: list[float | None]
+    upper: list[float | None]
+    lower: list[float | None]
+
+    def width_at(self, index: int = -1) -> float | None:
+        """Upper minus lower, or `None` before the bands exist.
+
+        Bandwidth is the squeeze measure - the thing that separates "price is
+        stretched" from "price has been quiet and is about to not be".
+        """
+        upper, lower = self.upper[index], self.lower[index]
+        if upper is None or lower is None:
+            return None
+        return upper - lower
+
+
+def bollinger(
+    values: Sequence[float],
+    *,
+    period: int = 20,
+    num_stdev: float = 2.0,
+) -> Bollinger:
+    """Bollinger bands over a simple moving average.
+
+    POPULATION standard deviation (divide by N), not the sample form (N - 1).
+    That is what MT5's `iBands` computes and what TradingView's `ta.stdev`
+    defaults to, and the two differ by `sqrt(N / (N - 1))` - about 2.6% of the
+    band's half-width at the default 20. Small, but it is the difference
+    between a touch and a near-miss on exactly the bars this indicator exists
+    to flag, so it is pinned here rather than left to whichever formula came to
+    hand. Same reasoning as `ema()` seeding with the first value.
+    """
+    if period < 2:
+        raise DomainError(f"Bollinger period must be at least 2, got {period}")
+    if num_stdev <= 0:
+        raise DomainError(f"num_stdev must be positive, got {num_stdev}")
+
+    middle: list[float | None] = []
+    upper: list[float | None] = []
+    lower: list[float | None] = []
+    for i in range(len(values)):
+        if i + 1 < period:
+            middle.append(None)
+            upper.append(None)
+            lower.append(None)
+            continue
+        window = [float(v) for v in values[i + 1 - period : i + 1]]
+        mean = sum(window) / period
+        variance = sum((v - mean) ** 2 for v in window) / period
+        sd = variance**0.5
+        middle.append(mean)
+        upper.append(mean + num_stdev * sd)
+        lower.append(mean - num_stdev * sd)
+    return Bollinger(middle=middle, upper=upper, lower=lower)

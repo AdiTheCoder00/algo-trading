@@ -3841,3 +3841,75 @@ through the zone. And `TryEnter` called `RescanSetups()` after a fill, which
 could re-arm the setup just traded and let the next retrace enter the same
 imbalance twice. Both fixed before the numbers above were taken. Mirroring code
 into a second implementation is a better review than reading it.
+
+---
+
+### D-152 - 50 EMA + Bollinger: the pullback reading is dead, the breakout reading is real but does not beat holding gold
+
+You asked for the 50 EMA / Bollinger band strategy after D-151. This time the
+measurement came before the expert, which is the whole point of D-151.
+
+**"The 50 EMA and Bollinger band strategy" is two strategies, and they trade
+opposite directions on the same bar.** `pullback` fades a band touch inside the
+trend (price above the 50 EMA, close back up through the lower band, exit at the
+middle band). `breakout` follows one (price above the 50 EMA, close outside the
+upper band, exit when it closes back inside). Both are widely taught. Picking one
+silently would have been choosing the answer before measuring it, so
+`algo/strategy/ema_bb.py` implements both behind a `mode` and
+`scripts/measure_ema_bb_xauusd.py` runs both. It goes through
+`algo/backtest/cfd_runner.py` rather than a bespoke simulator - unlike the FVG
+expert, this one is a real `Strategy`, so D-130's shared core applies.
+
+Two modes x three timeframes x D-140's three windows. 1.00 MT5 lot, $100k,
+0.5% stop, trail off, D-121 costs.
+
+**Pullback fails, and not narrowly.** Profit factor below 1.0 in five of nine
+cells, and the cells it "wins" are the ones with no sample - 7, 12 and 16 trades
+at H1, where one trade moves the number. M30 is 0.60 / 0.44 / 0.92: below
+break-even in all three windows. There is nothing here.
+
+**Breakout clears 1.0 in seven of nine cells** and is positive in all three
+windows on M30 (PF 1.25 / 1.05 / 1.16, net +$25,308 / +$14,404 / +$29,746 on
+100 / 193 / 244 trades). That is the first thing measured in this project since
+the two ports that is positive out-of-sample rather than only in it.
+
+**Then the falsification, and it takes most of that back.** D-124 point 4 says a
+trend follower doing well while the underlying trended is not distinguishable
+from edge. Buy-and-hold on the same windows, same size:
+
+| Window | Buy & hold | M30 breakout | of which long | of which short |
+|---|---|---|---|---|
+| 2026.06-08 | **-$8,637** | +$25,308 | +$30,075 | -$4,768 |
+| 2026.01-05 | +$20,023 | +$14,404 | +$53,602 | -$39,198 |
+| 2025.06-12 | +$105,073 | +$29,746 | +$44,754 | -$15,007 |
+
+**Holding gold made $116,459. The strategy made $69,458.** In the biggest
+trending window it captured under a third of the move. So as a way to own the
+2025 gold rally it is strictly worse than owning it.
+
+**The one result that is not the trend.** In 2026.06-08 gold *fell* - buy-and-hold
+lost $8,637 - and breakout made +$25,308 on M30 and +$37,725 on H1. That is the
+only window where the signal did something a holder was not already getting, and
+it is the most recent one.
+
+**The shorts are a consistent drag**: negative in eight of nine cells, -$58,973
+across the three M30 windows against +$128,431 from the longs. Long-only would
+have returned $128,431 and beaten buy-and-hold - **and that is a post-hoc slice
+of the same data D-131 already said fits noise when sliced.** It is written down
+as a hypothesis to test on data this study has not seen, not as a result.
+
+**Where this leaves it.** Better than D-151, which had nothing. Not established:
+it loses to holding the instrument, its shorts lose consistently, and one window
+reached 50.1% drawdown. **No expert built, and `EmaBollinger` is deliberately
+NOT registered in `strategy_for`** - registering makes it reachable by the live
+loop and the dashboard, and that should follow evidence rather than precede it.
+The next step is a walk-forward (`algo significance`, per D-131), with long-only
+pre-registered as the hypothesis, not another pass over these three windows.
+
+**Two incidental things.** `algo/pricing/indicators.py` gained `bollinger()`,
+pinned to the POPULATION standard deviation because that is what MT5's `iBands`
+and TradingView's `ta.stdev` compute - the sample form differs by about 2.6% of
+the half-width at period 20, which is exactly the margin between a touch and a
+near-miss. And `EmaBollinger` steps its EMA *before* the protective-exit check,
+deliberately not reproducing the `MacdCrossover` divergence `mt5/README.md`
+records, because there is no measured backtest here that depends on the wart.
