@@ -53,7 +53,23 @@ NON_CONFIG_ENV_PREFIXES = ("ALGO_SMARTAPI_", "ALGO_KOTAK_", "ALGO_TELEGRAM_")
 #: every CLI command that calls `load_config` fail with "api_token — Extra
 #: inputs are not permitted", since it is read directly and is not part of
 #: `AppConfig`.
-NON_CONFIG_ENV_VARS = ("ALGO_API_TOKEN",)
+#:
+#: `ALGO_NVIDIA_API_KEY` is the same case and was missed when it was added:
+#: `.env.example` documents it, `scripts/ask_nemotron.py` and
+#: `litellm-config.yaml` read it straight from the environment, and it has
+#: never been part of `AppConfig`. Anyone who set it as instructed got
+#: "nvidia_api_key — Extra inputs are not permitted" from **every** command
+#: that loads a config. It also broke the test suite in a way that looked like
+#: flakiness rather than a bug: `algo/cli/main.py` calls `load_dotenv()` at
+#: import time, so importing `tests/test_cli.py` put the developer's real key
+#: into `os.environ` for the rest of the pytest process, and the seventeen
+#: config-loading tests that ran after it failed while passing in isolation.
+#:
+#: The general lesson, for the next var added here: any `ALGO_*` name that is
+#: read directly rather than through `AppConfig` MUST be listed, and the cost
+#: of forgetting is paid by every command rather than by the feature that
+#: introduced it.
+NON_CONFIG_ENV_VARS = ("ALGO_API_TOKEN", "ALGO_NVIDIA_API_KEY")
 
 
 def load_config(

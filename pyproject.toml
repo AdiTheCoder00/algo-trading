@@ -87,7 +87,23 @@ algo = ["exchange/data/*.yaml"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # NOT ours, and not silenceable at the call site: starlette 0.38.6 imports
+    # the multipart package under its old top-level name, and python-multipart
+    # 0.0.32 warns whenever it is imported that way. The warning fires at
+    # IMPORT time inside fastapi.security, so it aborts collection of
+    # tests/test_api.py entirely rather than failing one test - the whole
+    # module was silently unrunnable, which is worse than a red test.
+    #
+    # Scoped to this one message so `error` still governs everything else.
+    # Remove it when starlette reaches 0.39+, which imports `python_multipart`
+    # directly; that upgrade is deliberately not bundled here, because this
+    # project already pins anyio below 4.15 for starlette's TestClient and
+    # moving one of that pair without measuring the other is how a green suite
+    # turns red for an unrelated reason.
+    "ignore:Please use `import python_multipart` instead.:PendingDeprecationWarning",
+]
 
 # ---------------------------------------------------------------- mypy
 # Brief §3: mypy --strict on core modules.
