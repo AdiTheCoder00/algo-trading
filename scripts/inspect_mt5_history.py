@@ -45,7 +45,10 @@ print(f"net {tot:+,.2f} | {len(wins)} wins / {len(losses)} losses "
 gp = sum(r["net"] for r in wins)
 gl = -sum(r["net"] for r in losses)
 print(f"gross profit {gp:,.2f} | gross loss {gl:,.2f} | PF {(gp/gl if gl else 0):.2f}")
-print(f"swap paid {sum(r['swap'] for r in rows):+,.2f} | commission {sum(r['comm'] for r in rows):+,.2f}\n")
+print(
+    f"swap paid {sum(r['swap'] for r in rows):+,.2f} | "
+    f"commission {sum(r['comm'] for r in rows):+,.2f}\n"
+)
 
 print("=== by magic (which expert) ===")
 by = collections.defaultdict(list)
