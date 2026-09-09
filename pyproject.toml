@@ -202,6 +202,8 @@ ignore = [
 # And the give-back trail study: a paired comparison table written to stdout,
 # imported by nothing. Same artifact, same reason.
 "scripts/measure_ema_bb_giveback_xauusd.py" = ["T201"]
+# And the fast-timeframe comparison behind GoldEmaBollinger-XAUUSD-Fast.set.
+"scripts/measure_ema_bb_fast_tf_xauusd.py" = ["T201"]
 # And `ask_nemotron.py`, which is a REPL: the printed stream IS the interface,
 # there is no engine here to keep clean, and routing a chat reply through a
 # structlog line would make it unreadable.
