@@ -1,4 +1,4 @@
-"""Is there a defensible GoldEmaBollinger setting for M1..M15 on XAUUSD?
+"""Is there a defensible GoldEmaBollinger timeframe and setting on XAUUSD?
 
 D-124 measured this instrument as heavily net-negative below M15 because the
 round-trip spread is charged per trade and trade count roughly doubles per step
@@ -35,7 +35,18 @@ ACTIVATION = Decimal("2")
 GIVEBACK = Decimal("0.5")
 STDEVS = [2.0, 2.5, 3.0]
 
-TFS = [("M1", 1, "TIMEFRAME_M1"), ("M5", 5, "TIMEFRAME_M5"), ("M15", 15, "TIMEFRAME_M15")]
+#: The whole range the expert can be attached to, so "which timeframe" is
+#: answered on one methodology rather than by comparing two studies. Note the
+#: windows are NOT equal spans across rows - 50,000 M1 bars is fifty days and
+#: 50,000 H1 bars is eight years - so read the columns down, not across.
+TFS = [
+    ("M1", 1, "TIMEFRAME_M1"),
+    ("M5", 5, "TIMEFRAME_M5"),
+    ("M15", 15, "TIMEFRAME_M15"),
+    ("M30", 30, "TIMEFRAME_M30"),
+    ("H1", 60, "TIMEFRAME_H1"),
+    ("H4", 240, "TIMEFRAME_H4"),
+]
 
 
 def fetch(const: str, tf: Timeframe) -> list[Bar]:
