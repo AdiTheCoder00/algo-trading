@@ -20,7 +20,7 @@ from algo.core.enums import Side
 from algo.core.errors import DomainError
 from algo.core.instrument import CfdId
 from algo.core.position import Position
-from algo.strategy.protective_exits import ProtectiveExits
+from algo.strategy.protective_exits import ExitDecision, ProtectiveExits
 
 XAUUSD = CfdId(symbol="XAUUSD")
 TF = Timeframe(minutes=30)
@@ -47,18 +47,26 @@ def _short(cost: str = "4400.00") -> Position:
     )
 
 
-def _exits(**kwargs: Decimal) -> ProtectiveExits:
-    base = {
-        "stop_loss_pct": Decimal("0"),
-        "trail_activation_pct": Decimal("2"),
-        "trail_pct": Decimal("0"),
-        "giveback_frac": Decimal("0"),
-    }
-    base.update(kwargs)
-    return ProtectiveExits(**base)  # type: ignore[arg-type]
+def _exits(
+    *,
+    stop_loss_pct: Decimal = Decimal("0"),
+    trail_activation_pct: Decimal = Decimal("2"),
+    trail_pct: Decimal = Decimal("0"),
+    giveback_frac: Decimal = Decimal("0"),
+) -> ProtectiveExits:
+    """Every exit off unless a test asks for it, so each one states its own
+    configuration rather than inheriting a shared fixture's."""
+    return ProtectiveExits(
+        stop_loss_pct=stop_loss_pct,
+        trail_activation_pct=trail_activation_pct,
+        trail_pct=trail_pct,
+        giveback_frac=giveback_frac,
+    )
 
 
-def _run(exits: ProtectiveExits, held: Position, bars: list[Bar]):
+def _run(
+    exits: ProtectiveExits, held: Position, bars: list[Bar]
+) -> ExitDecision | None:
     """Feed bars in order, returning the first decision that fired."""
     for bar in bars:
         decision = exits.check(bar, held)
