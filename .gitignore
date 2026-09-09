@@ -58,3 +58,7 @@ tools/*/*.pid
 # literal, creating this folder here instead of installing to the MT5 terminal.
 # See mt5/README.md. Ignored so an accidental run cannot be committed again.
 %APPDATA%/
+
+# Dukascopy tick archive: a few GB of raw .bi5 bodies, re-downloadable from the
+# public archive by scripts/fetch_dukascopy_xauusd.py. Cached, not authored.
+data/dukascopy/

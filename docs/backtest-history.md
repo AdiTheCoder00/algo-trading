@@ -1,7 +1,7 @@
 # Backtest history
 
 Every strategy this project has measured, what it returned, and what the record
-says when read as a whole. Compiled 2026-09-04, covering D-105 through D-147.
+says when read as a whole. Compiled 2026-09-04, covering D-105 through D-151.
 
 `decisions.md` is the primary source and the place to go for the reasoning
 behind any single result; each row here names the D-entry it came from. This
@@ -42,6 +42,7 @@ real deals), financing charged nightly. One MT5 lot fixed, no risk scaling.
 | D-132 | parameter sweep tooling | — | built with a robustness verdict above the grid, because a heatmap invites reading off the greenest square, which is the D-131 mistake |
 | D-148 | flat stop **and** trail together — the cell D-127 named and never ran | 2024-07-24 → 2026-08-28 | **all twelve trail-bearing cells negative.** The stop bounds losers as predicted (10 of 12 beat trail-only) and every cell the stop alone left positive turns negative |
 | D-149 | start-date sensitivity, 2×2 | same bars, start shifted 0–28 days | unstopped `MacdCrossover` spreads **$163,588** on M15 and **$147,831 with a sign flip** on H1. The other three combinations spread $3.4k–$9.3k and never change sign |
+| D-151 | **the walk-forward gate**, 32 windows, H1 2018→2026 | out-of-sample only | `TrendlineBreakout` **FAIL**: optimised OOS **-$79,834**, fixed baseline +$39,731. `MacdCrossover` **FAIL**: OOS +$111,551. Buy-and-hold over the same OOS days **$298,526** |
 
 > **D-149 caveat on the rows above.** The two unstopped `MacdCrossover` figures in
 > D-124 (M15 -$230,052 and H1 +$190,186) are artefacts of that window's start
@@ -128,6 +129,14 @@ was earned during gold's own bull trend, against a buy-and-hold return of
 ≈$199,700 on the same bars, and then failed walk-forward in D-131. Every other
 positive cell is smaller, in-sample, or both.
 
+D-151 put a number on it across 32 out-of-sample windows: breakout returned 13%
+of buy-and-hold and MACD 37%, and both **failed the gate on that criterion
+alone** — they cleared feasibility, positive out-of-sample P&L and parameter
+stability. The one caveat the gate states about itself: buy-and-hold is exposed
+100% of the time and neither strategy is, so raw P&L in a doubling market
+flatters the benchmark. The exposure-adjusted comparison is not implemented; a
+63–87% gap is unlikely to close, but that is a judgement, not a measurement.
+
 Stated plainly: **across roughly twenty-five measurements, no strategy here has
 shown an edge that survived costs, a window shift, and walk-forward together.**
 
@@ -164,17 +173,19 @@ easy to lose.
 
 Ranked by information gained per unit of work, on the evidence above.
 
-1. **Get more history** (open question 4). It is the binding constraint on
-   everything intraday, it is infrastructure rather than strategy, and it turns
-   the 74-session studies into something that can answer its own question.
+1. **Get more history** (open question 4). **Under way** —
+   `algo/data/dukascopy.py` and `scripts/fetch_dukascopy_xauusd.py` pull the
+   public Dukascopy tick archive; the 2024→now download is running. Validated
+   against MT5 over a full day: 1,378 shared M1 bars, constant offset
+   −$0.121, max minute-close difference $0.73.
 2. ~~Run the untested exit combination.~~ **Done — D-148.** It also produced
    D-149 for free, via the reproduction check, which is an argument for quoting
    published figures beside every re-run cell as a matter of course.
-3. **Make walk-forward a gate rather than an exhibit.** `cfd_walkforward.py` has
-   been run essentially once and immediately falsified the best strategy here.
-   D-138 built an expert in a regime the measurements already said loses.
-   Requiring a walk-forward pass before any `.mq5` is written has the best track
-   record in this repo of preventing wasted work.
+3. ~~Make walk-forward a gate rather than an exhibit.~~ **Done — D-151.**
+   `scripts/gate_walkforward_xauusd.py` returns PASS / FAIL / INCONCLUSIVE /
+   REFUSED with an exit code, and refuses outright to score a strategy that
+   carries incremental state with no stop (the D-149 combination). Run it before
+   any `.mq5`. Both existing strategies currently FAIL it.
 4. **Attack the cost term** (open question 3). Pattern 1 says this moves more
    than signal work does, and it is a parameter study rather than new code.
 5. **Choose stops inside walk-forward** (open question 2).

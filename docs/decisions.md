@@ -3762,3 +3762,78 @@ combination, and it would be curve-fitting: with 32 months and a handful of free
 parameters, some setting always fits. Any such result would need walk-forward
 across separate periods before it meant anything. Cross-reference D-145 on
 single-window evidence.
+
+### D-151 - the walk-forward gate, and both strategies fail it on the same criterion
+
+`cfd_walkforward.py` has held the machinery since D-131 and had been driven with
+real bars essentially once. Meanwhile D-138 built an expert in a regime the
+measurements already said loses and D-142 shipped a positive in-sample cell that
+turned negative on the next two windows tried.
+`scripts/gate_walkforward_xauusd.py` turns the panel into a **verdict with an
+exit code**, meant to run before an `.mq5` does.
+
+**Four criteria, all read off `WalkForwardReport`, none chosen after seeing a
+result.**
+
+1. `Feasibility.confidence` must be ADEQUATE, else INCONCLUSIVE - which means
+   run it on more history, not try different parameters.
+2. Out-of-sample P&L positive, taking the better of the optimised path and the
+   fixed baseline: if leaving the parameters alone wins, then leaving them alone
+   is the strategy.
+3. Beats buy-and-hold **over the out-of-sample days only** - the days the
+   strategy was actually scored on. Including the in-sample stretches would
+   benchmark against a period nobody validated it over.
+4. If the optimised path is the one relied on, no parameter may be UNSTABLE.
+
+**Both strategies fail, and both fail on criterion 3.** XAUUSD H1, 50,000 bars
+(2018-03-20 to 2026-09-04), 180-day in-sample / 90-day out-of-sample, 32
+windows:
+
+| | `TrendlineBreakout` | `MacdCrossover` |
+|---|---|---|
+| grid | lookback 10/20/40/80 | stop 0.25/0.5/1.0% |
+| OOS trades | 993 | 2,171 |
+| in sample (fitted) | $304,099 | $325,995 |
+| **out of sample** | **-$79,834** | **$111,551** |
+| fixed params, OOS | $39,731 | $3,522 |
+| optimising beat doing nothing | **False** | **True** |
+| buy & hold, OOS days | $298,526 | $298,526 |
+| verdict | **FAIL** | **FAIL** |
+
+**Two things here reverse what this project believed.**
+
+D-131 found breakout's optimisation losing to doing nothing on 13 windows and 89
+out-of-sample trades. **On 32 windows and 993 trades it is worse than that**: the
+optimised path is *negative* out of sample (-$79,834) while never touching the
+lookback returns +$39,731. Optimising a Donchian channel length on this
+instrument does not merely fail to help, it destroys money, and `lookback` is
+UNSTABLE across all 32 windows.
+
+And `MacdCrossover` - the strategy D-124 made look like the weaker of the two -
+is the better one here by every measure the gate reads. With a flat stop and a
+stop-width grid it returns +$111,551 out of sample against breakout's best of
++$39,731, its optimisation *does* beat doing nothing, and nothing is UNSTABLE.
+That is not a contradiction of D-124 so much as a consequence of D-149: D-124's
+MACD figures were unstopped, and unstopped MACD is a coin flip on the start date.
+
+**The criterion they both fail, and its honest weakness.** Buy-and-hold over the
+same out-of-sample days returned $298,526. Breakout's best is 13% of that;
+MACD's is 37%. But **buy-and-hold is exposed 100% of the time and neither
+strategy is**, so comparing raw P&L in a window where gold roughly doubled
+flatters the benchmark by construction. The exposure-adjusted comparison is the
+honest refinement - `CfdResult.equity_curve` carries positions-open per bar for
+exactly this reason (D-131) - and it is not implemented here. Stated rather than
+quietly ignored: criterion 3 as written is a strict bar, and in this particular
+window an unusually strict one. A gap of 63-87% is wide enough that the
+adjustment is unlikely to close it, which is why the verdict stands, but "unlikely
+to close it" is a judgement and not a measurement.
+
+**The D-149 precondition is wired in as a refusal.** Asking the gate for `macd`
+with no flat stop exits 3 and refuses to score anything, naming
+`measure_window_sensitivity_xauusd.py`, because that is exactly the combination
+whose result a seven-day shift can invert. `TrendlineBreakout` is not on that
+list - a Donchian channel has forgotten the window start after `lookback` bars.
+
+Exit codes: 0 PASS, 1 FAIL, 2 INCONCLUSIVE, 3 REFUSED. **A pass is not evidence
+of profit.** It is the absence of the four specific ways this project has already
+watched a result evaporate.
