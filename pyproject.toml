@@ -206,6 +206,8 @@ ignore = [
 "scripts/measure_ema_bb_fast_tf_xauusd.py" = ["T201"]
 # And the BTCUSD study, which carries its own cost model.
 "scripts/measure_ema_bb_btcusd.py" = ["T201"]
+# And the stop-distance sweep behind the TightStop set.
+"scripts/measure_ema_bb_stop_xauusd.py" = ["T201"]
 # And `ask_nemotron.py`, which is a REPL: the printed stream IS the interface,
 # there is no engine here to keep clean, and routing a chat reply through a
 # structlog line would make it unreadable.
