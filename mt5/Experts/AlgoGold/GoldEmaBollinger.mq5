@@ -195,6 +195,9 @@ input ulong  InpSlippagePoints   = 30;      // Max deviation, points
 input int    InpMaxSpreadPoints  = 0;       // Block NEW entries above this spread. 0 = off
 input bool   InpAllowNewEntries  = true;    // false = manage open positions only
 input bool   InpShowDashboard    = true;    // Draw the on-chart panel
+input int    InpPanelX           = 12;      // Panel X, pixels from the left
+input int    InpPanelY           = 112;     // Panel Y. 112 clears MT5's one-click trading widget
+input int    InpPanelWidth       = 260;     // Panel width, pixels
 input string InpComment          = "AlgoGold EMA/BB"; // Cosmetic only - MT5 overwrites it
 
 //+------------------------------------------------------------------+
@@ -205,6 +208,7 @@ CGoldDashboard  g_dash;
 TrailState      g_trail;
 ENUM_TIMEFRAMES g_tf          = PERIOD_CURRENT;
 datetime        g_lastBarTime = 0;
+datetime        g_lastPaint   = 0;
 
 double          g_ema         = 0.0;
 bool            g_hasEma      = false;
@@ -294,6 +298,58 @@ bool SeedIndicators()
   }
 
 //+------------------------------------------------------------------+
+//| Realised P&L for OUR magic since `from`.                         |
+//|                                                                   |
+//| Deal history, not position history: a closed position leaves no    |
+//| PositionGet* to read, and the deals are where profit, swap and     |
+//| commission are actually recorded. All three are summed - a "profit" |
+//| that ignores the commission it cost to earn is not the number      |
+//| anyone means by today's P&L.                                       |
+//|                                                                   |
+//| Filtered by symbol AND magic, so a panel on one chart never counts  |
+//| another expert's trades, or this expert's on a different symbol.    |
+//+------------------------------------------------------------------+
+double RealisedSince(const datetime from)
+  {
+   if(!HistorySelect(from,TimeCurrent()+86400))
+      return 0.0;
+   double sum = 0.0;
+   const int total = HistoryDealsTotal();
+   for(int i=0; i<total; i++)
+     {
+      const ulong ticket = HistoryDealGetTicket(i);
+      if(ticket==0)
+         continue;
+      if(HistoryDealGetString(ticket,DEAL_SYMBOL)!=_Symbol)
+         continue;
+      if(HistoryDealGetInteger(ticket,DEAL_MAGIC)!=InpMagic)
+         continue;
+      sum += HistoryDealGetDouble(ticket,DEAL_PROFIT)
+             + HistoryDealGetDouble(ticket,DEAL_SWAP)
+             + HistoryDealGetDouble(ticket,DEAL_COMMISSION);
+     }
+   return sum;
+  }
+
+//+------------------------------------------------------------------+
+//| Floating P&L across every ticket under our magic on this symbol. |
+//| Swap included: an open position's carry is money already spent.   |
+//+------------------------------------------------------------------+
+double FloatingPnl(void)
+  {
+   double floating = 0.0;
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      if(PositionGetSymbol(i)!=_Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=InpMagic)
+         continue;
+      floating += PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
+     }
+   return floating;
+  }
+
+//+------------------------------------------------------------------+
 //| Init                                                             |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -349,7 +405,9 @@ int OnInit()
 
    g_lastBarTime = iTime(_Symbol,g_tf,0);
    if(InpShowDashboard)
-      g_dash.Create("AlgoGoldEmaBb_","EMA/BB "+_Symbol);
+      g_dash.Create("AlgoGoldEmaBb_",
+                    StringFormat("ALGOGOLD EMA/BB  (%d)",(int)InpMagic),
+                    InpPanelX,InpPanelY,InpPanelWidth);
 
    PrintFormat("EMA(%d) + BB(%d, %.1f) %s%s on %s %s | stop %.2f%% | magic %d",
                InpEmaPeriod,InpBbPeriod,InpBbStdev,
@@ -387,6 +445,18 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
+//--- The panel repaints on the TICK, not on the bar. P&L, spread and floating
+//--- are live numbers, and on H1 a bar-close-only panel would show figures up to
+//--- an hour stale while looking current - which is worse than showing nothing.
+//--- Throttled to once a second: chart objects are not free, and nothing here
+//--- changes faster than a person can read it.
+   const datetime now = TimeCurrent();
+   if(now!=g_lastPaint)
+     {
+      g_lastPaint = now;
+      Repaint(g_trader.Snapshot());
+     }
+
    const datetime current = iTime(_Symbol,g_tf,0);
    if(current==g_lastBarTime || current==0)
       return;
@@ -563,59 +633,131 @@ void OpenWith(const ENUM_POSITION_TYPE side,const string reason)
 
 //+------------------------------------------------------------------+
 //| Dashboard                                                        |
+//|                                                                  |
+//| Laid out in the same four blocks GoldCamarillaBreakout uses, and  |
+//| in the same order, so a person running both reads them the same   |
+//| way rather than relearning a layout per chart.                    |
+//|                                                                   |
+//| P&L IS LAST, AND THAT IS THE POINT. It is the block the eye goes  |
+//| to first, so it sits where its position cannot move: every block  |
+//| above it writes a FIXED number of rows - the position block fills  |
+//| placeholders when flat rather than omitting rows - so nothing      |
+//| above can grow and shove the P&L figures to a different height. A  |
+//| number that moves around is a number that gets misread.            |
+//|                                                                    |
+//| ClearFrom() at the end deletes anything below the rows actually    |
+//| written, so a layout that ever shrinks cannot leave the tail of a  |
+//| taller one on screen showing values from when it was last that     |
+//| tall - stale rows that look live.                                  |
 //+------------------------------------------------------------------+
 void Repaint(const GoldPosition &pos)
   {
    if(!g_dash.Active())
       return;
-   g_dash.Refresh("EMA/BB "+_Symbol);
+   g_dash.Refresh(StringFormat("ALGOGOLD EMA/BB  (%d)",(int)InpMagic));
 
-   g_dash.Set(0,"mode",
+   const int    digits = g_trader.Digits();
+   const color  cOk    = C'120,220,140', cBad = C'240,110,110';
+   const color  cDim   = C'150,160,180', cHot = C'255,200,90';
+   const color  cWhite = C'225,232,242';
+
+   int r = 0;
+
+//--- SIGNAL: the only block MT5 cannot show you anywhere else.
+   g_dash.SetSection(r++,"-- SIGNAL --");
+   g_dash.Set(r++,"MODE",
               StringFormat("%s%s",(InpMode==MODE_PULLBACK?"pullback":"breakout"),
-                           (InpLongOnly?" (long only)":"")),clrAqua);
-   if(pos.exists)
-      g_dash.Set(1,"position",StringFormat("%s %.2f @ %.2f",
-                 (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),pos.volume,pos.entry),
-                 (pos.side==POSITION_TYPE_BUY?clrLime:clrTomato));
-   else
-      g_dash.Set(1,"position","flat",clrSilver);
-
-   g_dash.Set(2,StringFormat("EMA(%d)",InpEmaPeriod),
-              DoubleToString(g_ema,g_trader.Digits()),clrWhite);
+                           (InpLongOnly?"  (long only)":"")),clrAqua);
+   g_dash.Set(r++,StringFormat("EMA(%d)",InpEmaPeriod),
+              DoubleToString(g_ema,digits),cWhite);
 
    double m,u,l;
    if(BandsAt(1,m,u,l))
      {
-      g_dash.Set(3,"upper",DoubleToString(u,g_trader.Digits()),clrSilver);
-      g_dash.Set(4,"middle",DoubleToString(m,g_trader.Digits()),clrSilver);
-      g_dash.Set(5,"lower",DoubleToString(l,g_trader.Digits()),clrSilver);
+      g_dash.Set(r++,"UPPER",DoubleToString(u,digits),cDim);
+      g_dash.Set(r++,"MIDDLE",DoubleToString(m,digits),cDim);
+      g_dash.Set(r++,"LOWER",DoubleToString(l,digits),cDim);
      }
-   g_dash.Set(6,"warmup",
-              StringFormat("%d / %d bars",g_barsSeen,WarmupBars()),
-              (g_barsSeen>=WarmupBars()?clrLime:clrGold));
-
-//--- The give-back level, and honestly about whether it is live. "armed at
-//--- x.xx%" is the useful line when it is not: it says the rule is configured
-//--- and the peak simply has not travelled far enough, which is the state this
-//--- panel will show almost all of the time at the shipped 2% activation.
-   if(InpGivebackFrac<=0.0)
-      g_dash.Set(7,"give-back","off",clrSilver);
    else
-      if(!pos.exists)
-         g_dash.Set(7,"give-back",StringFormat("%.2f of peak, flat",InpGivebackFrac),clrSilver);
-      else
-         if(TrailIsArmed(g_trail,InpTrailActivationPct))
-            g_dash.Set(7,"give-back",
-                       StringFormat("ARMED @ %s (peak %s)",
-                                    DoubleToString(GivebackLevel(g_trail,InpGivebackFrac),
-                                                   g_trader.Digits()),
-                                    DoubleToString(g_trail.peak,g_trader.Digits())),clrLime);
-         else
-            g_dash.Set(7,"give-back",
-                       StringFormat("%.2f of peak, arms at %.2f%% (now %.2f%%)",
-                                    InpGivebackFrac,InpTrailActivationPct,
-                                    TrailFavourableMovePct(g_trail)),clrGold);
+     {
+      g_dash.Set(r++,"UPPER","-",cDim);
+      g_dash.Set(r++,"MIDDLE","-",cDim);
+      g_dash.Set(r++,"LOWER","-",cDim);
+     }
 
-   g_dash.Set(8,"NOTE","no measured edge - D-152/153",clrTomato);
+   const bool warm = (g_barsSeen>=WarmupBars());
+   g_dash.Set(r++,"WARMUP",StringFormat("%d / %d bars",g_barsSeen,WarmupBars()),
+              (warm?cOk:cHot));
+   g_dash.Set(r++,"NOTE","no measured edge - D-152/153",cBad);
+
+//--- POSITION: a FIXED five rows whether flat or holding, so nothing below
+//--- this block ever changes height. See the header.
+   g_dash.SetSection(r++,"-- POSITION --");
+   const double floating = FloatingPnl();
+   if(pos.exists)
+     {
+      g_dash.Set(r++,"SIDE",
+                 StringFormat("%s %.2f @ %s",(pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),
+                              pos.volume,DoubleToString(pos.entry,digits)),
+                 (pos.side==POSITION_TYPE_BUY?cOk:cBad));
+      g_dash.Set(r++,"FLOATING",StringFormat("%+.2f",floating),
+                 (floating>=0.0?cOk:cBad));
+      const bool armed = TrailIsArmed(g_trail,InpTrailActivationPct);
+      g_dash.Set(r++,"PEAK",DoubleToString(g_trail.peak,digits),cDim);
+      g_dash.Set(r++,"TRAIL",(armed?"ARMED":StringFormat("arms at %.2f%%",InpTrailActivationPct)),
+                 (armed?cOk:cDim));
+      if(InpGivebackFrac>0.0)
+         g_dash.Set(r++,"GIVE-BACK",
+                    (armed?DoubleToString(GivebackLevel(g_trail,InpGivebackFrac),digits)
+                          :StringFormat("%.2f of peak",InpGivebackFrac)),
+                    (armed?cOk:cDim));
+      else
+         g_dash.Set(r++,"GIVE-BACK","off  (D-154)",cDim);
+     }
+   else
+     {
+      g_dash.Set(r++,"SIDE","flat",cDim);
+      g_dash.Set(r++,"FLOATING","0.00",cDim);
+      g_dash.Set(r++,"PEAK","-",cDim);
+      g_dash.Set(r++,"TRAIL","-",cDim);
+      g_dash.Set(r++,"GIVE-BACK",(InpGivebackFrac>0.0?"armed when held":"off  (D-154)"),cDim);
+     }
+
+//--- MARKET. After the strategy blocks, because it is the part MT5 already
+//--- shows elsewhere - it is here for confirmation, not discovery.
+   g_dash.SetSection(r++,"-- MARKET --");
+   const bool canTrade = (bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)
+                         && (bool)MQLInfoInteger(MQL_TRADE_ALLOWED);
+   g_dash.Set(r++,"STATUS",
+              (canTrade ? (InpAllowNewEntries ? "TRADING" : "MANAGE ONLY") : "ALGO OFF"),
+              (canTrade && InpAllowNewEntries) ? cOk : cHot);
+   g_dash.Set(r++,"SYMBOL / TF",
+              StringFormat("%s  %s",_Symbol,StringSubstr(EnumToString(g_tf),7)),cWhite);
+   g_dash.Set(r++,"SPREAD",
+              StringFormat("%d pts",(int)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD)),cDim);
+
+//--- P&L, last and largest.
+   g_dash.SetSection(r++,"-- P&L --");
+   MqlDateTime t;
+   TimeToStruct(TimeCurrent(),t);
+   t.hour = 0; t.min = 0; t.sec = 0;
+   const datetime dayStart = StructToTime(t);
+   const double today = RealisedSince(dayStart);
+   const double week  = RealisedSince(dayStart-6*86400);
+   const double net   = today + floating;
+
+//--- Realised PLUS floating: the number a person means by "am I up today". Split
+//--- underneath, because a flat +0.00 built from a won trade and a losing open
+//--- position is not the same day as one where nothing happened.
+   g_dash.SetBig(r++,"NET TODAY",StringFormat("%+.2f",net),(net>=0.0?cOk:cBad));
+   g_dash.Set(r++,"  floating",StringFormat("%+.2f",floating),(floating>=0.0?cOk:cBad));
+   g_dash.Set(r++,"  realised",StringFormat("%+.2f",today),(today>=0.0?cOk:cBad));
+   g_dash.Set(r++,"7 DAYS",StringFormat("%+.2f",week),(week>=0.0?cOk:cBad));
+   g_dash.Set(r++,"EQUITY",
+              StringFormat("%.2f",AccountInfoDouble(ACCOUNT_EQUITY)),cWhite);
+
+   g_dash.ClearFrom(r);
+   ChartRedraw(0);
   }
+
 //+------------------------------------------------------------------+

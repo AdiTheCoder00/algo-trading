@@ -123,6 +123,35 @@ The scalper's inputs have no Python counterpart and are documented
 | — | `InpLookback` 20 | `lookback` |
 | `InpSeedBars` 1000 | — | no counterpart — see below |
 
+### The on-chart panel
+
+`GoldEmaBollinger` draws the same four blocks as `GoldCamarillaBreakout`, in the same
+order, so running both does not mean relearning a layout per chart: **SIGNAL** (mode, the
+EMA, the three bands, warmup), **POSITION** (side, floating, peak, trail, give-back),
+**MARKET** (status, symbol/TF, spread) and **P&L** last — `NET TODAY` set large, split into
+floating and realised beneath it, then 7 days and account equity.
+
+Three things about it are deliberate:
+
+- **It repaints on the tick, throttled to once a second**, not on the bar close. P&L,
+  spread and floating are live numbers; on H1 a bar-close-only panel shows figures up to an
+  hour stale while looking current, which is worse than showing nothing.
+- **Every block above P&L writes a fixed number of rows** — the position block fills
+  placeholders when flat rather than omitting rows — so the P&L figures never shift up or
+  down. A number that moves around is a number that gets misread. `ClearFrom()` deletes
+  anything below the rows actually written, so a shrinking layout cannot leave stale rows
+  on screen looking live.
+- **`InpPanelY` defaults to 112**, which clears MT5's one-click trading widget. At the old
+  default the widget covered the first two rows.
+
+`NET TODAY` is realised **plus** floating, from deal history filtered by symbol *and*
+magic — profit, swap and commission all summed, since a "profit" that ignores the
+commission it cost to earn is not what anyone means by the day's P&L.
+
+> The panel needs `DASH_MAX_ROWS` of at least 24. It was 16, at which the whole P&L block
+> was silently dropped off the bottom — the worst way for a panel to fail, because it still
+> looked complete.
+
 ### Protective exits — percentages of price, **not points**
 
 `InpStopLossPct` 0.5 · `InpTrailActivationPct` 2.0 · `InpTrailPct` 0.0 (off)

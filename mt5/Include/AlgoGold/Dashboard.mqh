@@ -36,7 +36,12 @@
 #ifndef ALGOGOLD_DASHBOARD_MQH
 #define ALGOGOLD_DASHBOARD_MQH
 
-#define DASH_MAX_ROWS 16
+//--- Set() silently ignores any row at or past this. GoldCamarillaBreakout grew
+//--- past sixteen and lost its P&L rows off the bottom without a word, which is
+//--- the worst way for a panel to fail: it looked complete. Raised with room to
+//--- spare, and the backdrop now sizes to the rows actually used rather than to
+//--- this ceiling, so a short panel does not paint a tall empty box.
+#define DASH_MAX_ROWS 28
 
 class CGoldDashboard
   {
@@ -48,22 +53,43 @@ private:
    int               m_rowH;
    int               m_width;
    int               m_rows;
+   int               m_valueDx;   // label-to-value column gap
    string            m_font;
+   //--- OBJ_LABEL has no bold flag; weight comes from the font NAME.
+   string            m_fontBold;
 
    string            Name(const string part) const { return m_prefix+part; }
    void              MakeLabel(const string part,const int x,const int y,
                                const int size,const color clr,const string text);
+   void              MakeLabelFont(const string part,const int x,const int y,
+                                   const int size,const color clr,const string text,
+                                   const string font);
    void              EnsureBackdrop(void);
 
 public:
                      CGoldDashboard(void): m_prefix(""),m_active(false),m_x(12),m_y(18),
-                                           m_rowH(16),m_width(250),m_rows(0),m_font("Consolas") {}
+                                           m_rowH(16),m_width(250),m_rows(0),m_valueDx(118),
+                                           m_font("Consolas"),
+                                           m_fontBold("Consolas Bold") {}
 
-   bool              Create(const string prefix,const string title,const int x=12,const int y=18);
+   bool              Create(const string prefix,const string title,const int x=12,const int y=18,
+                            const int width=250);
    void              Destroy(void);
    bool              Active(void) const { return m_active; }
    //--- row 0..DASH_MAX_ROWS-1; label is fixed-width, value is coloured
    void              Set(const int row,const string label,const string value,const color clr=clrWhite);
+   //--- A group caption. Same row budget as any other row; no value column.
+   void              SetSection(const int row,const string caption);
+   //--- Delete every row from `row` onward. A panel that shrinks - the
+   //--- position block is shorter when flat - otherwise leaves the tail of
+   //--- its longer layout on screen, showing values from the last time it
+   //--- was that tall.
+   void              ClearFrom(const int row);
+   //--- Same row, but the VALUE is two sizes larger and bold. For the one
+   //--- number a person looks for first; everything else stays uniform so
+   //--- that emphasis keeps meaning something.
+   void              SetBig(const int row,const string label,const string value,
+                            const color clr=clrWhite);
    void              SetTitle(const string title);
    //--- Recreate anything the user deleted by hand. Call once per repaint.
    void              Refresh(const string title);
@@ -72,7 +98,8 @@ public:
 //+------------------------------------------------------------------+
 //| Build the panel. Silently does nothing where nobody can see it.  |
 //+------------------------------------------------------------------+
-bool CGoldDashboard::Create(const string prefix,const string title,const int x,const int y)
+bool CGoldDashboard::Create(const string prefix,const string title,const int x,const int y,
+                            const int width)
   {
    const bool tester = (bool)MQLInfoInteger(MQL_TESTER);
    const bool visual = (bool)MQLInfoInteger(MQL_VISUAL_MODE);
@@ -82,6 +109,10 @@ bool CGoldDashboard::Create(const string prefix,const string title,const int x,c
    m_prefix = prefix;
    m_x = x;
    m_y = y;
+   m_width = (width>160 ? width : 160);
+   //--- 118 of 250 is the gap the panel shipped with; keep that proportion so a
+   //--- wider panel puts its values further right instead of leaving a gutter.
+   m_valueDx = m_width-132;
    m_active = true;
 
    EnsureBackdrop();
@@ -109,7 +140,10 @@ void CGoldDashboard::EnsureBackdrop(void)
    ObjectSetInteger(0,bg,OBJPROP_XDISTANCE,m_x-8);
    ObjectSetInteger(0,bg,OBJPROP_YDISTANCE,m_y-8);
    ObjectSetInteger(0,bg,OBJPROP_XSIZE,m_width);
-   ObjectSetInteger(0,bg,OBJPROP_YSIZE,m_rowH*(DASH_MAX_ROWS+1)+16);
+   //--- Sized to the rows in use, not to the ceiling. m_rows settles on the
+   //--- first paint; 8 keeps the box sane before any row has been written.
+   const int shown = (m_rows>8 ? m_rows : 8);
+   ObjectSetInteger(0,bg,OBJPROP_YSIZE,m_rowH*(shown+2)+16);
    ObjectSetInteger(0,bg,OBJPROP_BGCOLOR,C'18,20,26');
    ObjectSetInteger(0,bg,OBJPROP_BORDER_TYPE,BORDER_FLAT);
    ObjectSetInteger(0,bg,OBJPROP_COLOR,C'60,66,80');
@@ -135,6 +169,16 @@ void CGoldDashboard::Refresh(const string title)
 void CGoldDashboard::MakeLabel(const string part,const int x,const int y,
                                const int size,const color clr,const string text)
   {
+   MakeLabelFont(part,x,y,size,clr,text,m_font);
+  }
+
+//+------------------------------------------------------------------+
+//| The same, with the font named explicitly.                        |
+//+------------------------------------------------------------------+
+void CGoldDashboard::MakeLabelFont(const string part,const int x,const int y,
+                                   const int size,const color clr,const string text,
+                                   const string font)
+  {
    const string n = Name(part);
    if(ObjectFind(0,n)<0)
       ObjectCreate(0,n,OBJ_LABEL,0,0,0);
@@ -145,8 +189,10 @@ void CGoldDashboard::MakeLabel(const string part,const int x,const int y,
    ObjectSetInteger(0,n,OBJPROP_COLOR,clr);
    ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
    ObjectSetInteger(0,n,OBJPROP_HIDDEN,true);
-   ObjectSetString(0,n,OBJPROP_FONT,m_font);
-   ObjectSetString(0,n,OBJPROP_TEXT,text);
+   ObjectSetString(0,n,OBJPROP_FONT,font);
+   //--- An empty OBJPROP_TEXT does not blank the label, it lets MT5 fall back
+   //--- to its own default - the literal word "Label". A space is blank.
+   ObjectSetString(0,n,OBJPROP_TEXT,(text=="" ? " " : text));
   }
 
 //+------------------------------------------------------------------+
@@ -165,8 +211,8 @@ void CGoldDashboard::Set(const int row,const string label,const string value,con
    if(!m_active || row<0 || row>=DASH_MAX_ROWS)
       return;
    const int y = m_y + m_rowH*(row+2);
-   MakeLabel("L"+IntegerToString(row),m_x,     y,8,C'130,140,160',label);
-   MakeLabel("V"+IntegerToString(row),m_x+118, y,8,clr,           value);
+   MakeLabel("L"+IntegerToString(row),m_x,           y,8,C'130,140,160',label);
+   MakeLabel("V"+IntegerToString(row),m_x+m_valueDx, y,8,clr,           value);
    if(row+1>m_rows)
       m_rows = row+1;
   }
@@ -181,6 +227,59 @@ void CGoldDashboard::Destroy(void)
    ObjectsDeleteAll(0,m_prefix);
    m_active = false;
    ChartRedraw(0);
+  }
+
+//+------------------------------------------------------------------+
+//| A group caption: dimmer, and with the value column blanked so a   |
+//| leftover value from a previous layout cannot hang beside it.      |
+//+------------------------------------------------------------------+
+void CGoldDashboard::SetSection(const int row,const string caption)
+  {
+   if(!m_active || row<0 || row>=DASH_MAX_ROWS)
+      return;
+   const int y = m_y + m_rowH*(row+2);
+   MakeLabel("L"+IntegerToString(row),m_x,           y,8,C'90,150,200',caption);
+   MakeLabel("V"+IntegerToString(row),m_x+m_valueDx, y,8,C'90,150,200',"");
+   if(row+1>m_rows)
+      m_rows = row+1;
+  }
+
+//+------------------------------------------------------------------+
+//| A row whose value is emphasised: two sizes up, and bold.         |
+//|                                                                  |
+//| The value sits two pixels higher than a normal row so the larger  |
+//| glyphs stay centred on the same baseline rather than drifting     |
+//| down into the row beneath.                                        |
+//+------------------------------------------------------------------+
+void CGoldDashboard::SetBig(const int row,const string label,const string value,
+                            const color clr)
+  {
+   if(!m_active || row<0 || row>=DASH_MAX_ROWS)
+      return;
+   const int y = m_y + m_rowH*(row+2);
+   MakeLabel("L"+IntegerToString(row),m_x,y,8,C'130,140,160',label);
+   MakeLabelFont("V"+IntegerToString(row),m_x+m_valueDx,y-2,10,clr,value,m_fontBold);
+   if(row+1>m_rows)
+      m_rows = row+1;
+  }
+
+//+------------------------------------------------------------------+
+//| Drop rows `row`..DASH_MAX_ROWS-1, and shrink the backdrop to fit. |
+//+------------------------------------------------------------------+
+void CGoldDashboard::ClearFrom(const int row)
+  {
+   if(!m_active || row<0)
+      return;
+   for(int i=row; i<DASH_MAX_ROWS; i++)
+     {
+      ObjectDelete(0,Name("L"+IntegerToString(i)));
+      ObjectDelete(0,Name("V"+IntegerToString(i)));
+     }
+   if(row<m_rows)
+     {
+      m_rows = row;
+      EnsureBackdrop();
+     }
   }
 
 #endif // ALGOGOLD_DASHBOARD_MQH
