@@ -152,6 +152,40 @@ commission it cost to earn is not what anyone means by the day's P&L.
 > was silently dropped off the bottom — the worst way for a panel to fail, because it still
 > looked complete.
 
+### Targets, alternative stop units, and the daily governors
+
+`GoldEmaBollinger` also carries the optional exits the other experts have, resolved
+**money > points > percent** — so setting `InpStopLossMoney` makes `InpStopLossPoints` and
+`InpStopLossPct` inert. Money comes first because it is the only unit that still means the
+same thing after `InpLots` changes; percent is last because it is what the Python
+counterpart uses, and so what every measured study ran on.
+
+- `InpTakeProfitPct` / `Points` / `Money` — a fixed target. **No Python counterpart, so no
+  measured study in this repo covers it.** Off by default for that reason, not because it
+  is known to be bad. Turning it on makes the expert a configuration nobody has measured.
+- `InpStopLossPoints` / `InpStopLossMoney` — the same stop distance in other units.
+- `InpBreakEvenPct` / `InpBreakEvenLockPts` — move the stop to entry plus a lock once a
+  profit threshold is reached. It never pulls an armed trail backwards: the expert takes
+  whichever stop is better, so break-even can only tighten, never give profit back. The
+  lock exists so a "break even" does not settle as a scratch *minus* costs.
+- `InpSessionStartHour` / `EndHour` / `InpCloseAtSessionEnd` — **server** hours, printed on
+  init because guessing that is how a session filter ends up three hours out with nobody
+  noticing. Equal values mean all day; a window may wrap midnight.
+- `InpDailyLossLimit` / `InpDailyProfitTarget` / `InpMaxTradesPerDay` — these block
+  **entries only**. An open position is never closed by them: a daily loss limit that also
+  flattened would be a stop nobody chose, firing at a level set by the calendar rather than
+  by the trade.
+
+Every `.set` in this folder now writes all of these out explicitly, including the ones that
+are off. **A `.set` that omits an input is not neutral** — MT5 falls back to the compiled
+default, so a file predating a feature quietly enables whatever that feature ships with.
+
+> The panel gained a GOVERNORS block, so "why has it stopped trading" is answered on the
+> chart instead of in the log: session open/shut, entries allowed or HALTED, and trades
+> today against the cap. That took it to **29 rows**, one past the 28-row ceiling — which
+> would have dropped the `EQUITY` row and nothing else, the same silent failure as before.
+> `DASH_MAX_ROWS` is now 34.
+
 ### Protective exits — percentages of price, **not points**
 
 `InpStopLossPct` 0.5 · `InpTrailActivationPct` 2.0 · `InpTrailPct` 0.0 (off)

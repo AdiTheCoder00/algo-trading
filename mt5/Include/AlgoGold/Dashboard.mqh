@@ -41,7 +41,12 @@
 //--- the worst way for a panel to fail: it looked complete. Raised with room to
 //--- spare, and the backdrop now sizes to the rows actually used rather than to
 //--- this ceiling, so a short panel does not paint a tall empty box.
-#define DASH_MAX_ROWS 28
+//--- Raised again for GoldEmaBollinger, whose panel reached TWENTY-NINE rows
+//--- once targets and the daily governors were added - one past the previous
+//--- ceiling, which would have dropped its EQUITY row and nothing else. That is
+//--- the same silent failure the note above describes, one input group later.
+//--- The backdrop sizes to the rows actually used, so headroom costs nothing.
+#define DASH_MAX_ROWS 34
 
 class CGoldDashboard
   {

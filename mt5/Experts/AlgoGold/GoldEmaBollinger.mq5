@@ -202,6 +202,31 @@ input double InpTrailActivationPct = 2.0;   // Profit % at which BOTH trails arm
 input double InpTrailPct         = 0.0;     // Trail distance, % behind peak. 0 disables
 input double InpGivebackFrac     = 0.5;     // Give-back trail: FRACTION of peak profit surrendered. ON by request, against D-154 - see the header. 0 disables
 
+input group "--- Targets and alternative stop units (money > points > percent) ---"
+//--- Three ways to say the same distance, resolved in that order, exactly as
+//--- GoldTrendlineBreakout resolves them. Money is first because it is the only
+//--- one that still means the same thing after InpLots changes; percent is last
+//--- because it is what the Python counterpart uses, and so what every measured
+//--- study was run on. 0 at every level means that exit is off.
+input double InpTakeProfitPct    = 0.0;     // Target, % of entry. 0 disables. NO Python counterpart - unmeasured
+input int    InpStopLossPoints   = 0;       // Stop in POINTS. >0 overrides InpStopLossPct
+input int    InpTakeProfitPoints = 0;       // Target in POINTS. >0 overrides InpTakeProfitPct
+input double InpStopLossMoney    = 0.0;     // Stop as LOSS in account currency. Overrides points and percent
+input double InpTakeProfitMoney  = 0.0;     // Target as PROFIT in account currency. Overrides points and percent
+input double InpBreakEvenPct     = 0.0;     // Move the stop to entry once this profit % is reached. 0 = off
+input int    InpBreakEvenLockPts = 0;       // Points of profit locked when it moves. 0 = flat entry
+
+input group "--- Session and daily governors (SERVER hours) ---"
+//--- The expert prints the current server hour on init, because "server hour"
+//--- is not the wall clock and guessing it is how a session filter ends up
+//--- three hours out with nobody noticing.
+input int    InpSessionStartHour = 0;       // Entries allowed from this server hour. start==end means all day
+input int    InpSessionEndHour   = 0;       // ...until this one. A window may wrap midnight
+input bool   InpCloseAtSessionEnd = false;  // Flatten when the window shuts, so nothing carries swap overnight
+input double InpDailyLossLimit   = 0.0;     // Halt NEW entries for the day at this realised loss. 0 = off
+input double InpDailyProfitTarget = 0.0;    // Halt NEW entries for the day at this realised profit. 0 = off
+input int    InpMaxTradesPerDay  = 0;       // Entry cap per day. 0 = off
+
 input group "--- Execution ---"
 input double InpLots             = 0.05;    // Volume in MT5 LOTS (1.00 = 100 oz)
 input long   InpMagic            = 20260906;// Distinct from 20260828/01/02/03/04, and 05 (Camarilla)
@@ -364,6 +389,184 @@ double FloatingPnl(void)
   }
 
 //+------------------------------------------------------------------+
+//| Account currency gained per 1.0 of PRICE movement, at InpLots.    |
+//|                                                                   |
+//| Tick value over tick size is money per price unit per broker lot;  |
+//| times the lot size gives it for the position this expert opens.    |
+//| Returns 0 when the symbol reports nothing usable, and every caller  |
+//| treats that as "fall through to the next unit" rather than         |
+//| inventing a distance out of a zero.                                |
+//+------------------------------------------------------------------+
+double MoneyPerPrice()
+  {
+   const double tickValue = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+   const double tickSize  = SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
+   const double lots      = g_trader.Lots();
+   if(tickValue<=0.0 || tickSize<=0.0 || lots<=0.0)
+      return 0.0;
+   return (tickValue/tickSize)*lots;
+  }
+
+//+------------------------------------------------------------------+
+//| The stop distance as a PERCENT of refPrice, whichever unit the    |
+//| inputs expressed it in. Money, then points, then percent.          |
+//|                                                                   |
+//| Everything downstream - ProtectiveExits, the give-back trail, the  |
+//| panel - is written in percent, so the conversion happens once here  |
+//| instead of at each of those call sites.                            |
+//+------------------------------------------------------------------+
+double EffectiveStopPct(const double refPrice)
+  {
+   if(InpStopLossMoney>0.0 && refPrice>0.0)
+     {
+      const double perPrice = MoneyPerPrice();
+      if(perPrice>0.0)
+         return (InpStopLossMoney/perPrice)/refPrice*100.0;
+      Print("WARNING: InpStopLossMoney is set but the symbol reports no usable tick "
+            "value - falling back to points, then percent");
+     }
+   if(InpStopLossPoints>0 && refPrice>0.0)
+      return (InpStopLossPoints*_Point)/refPrice*100.0;
+   return InpStopLossPct;
+  }
+
+//+------------------------------------------------------------------+
+//| The target distance as a PERCENT of refPrice. Same order.         |
+//| 0 when no target is configured at any level, which every caller    |
+//| reads as "no take profit".                                         |
+//+------------------------------------------------------------------+
+double EffectiveTakeProfitPct(const double refPrice)
+  {
+   if(InpTakeProfitMoney>0.0 && refPrice>0.0)
+     {
+      const double perPrice = MoneyPerPrice();
+      if(perPrice>0.0)
+         return (InpTakeProfitMoney/perPrice)/refPrice*100.0;
+      Print("WARNING: InpTakeProfitMoney is set but the symbol reports no usable tick "
+            "value - falling back to points, then percent");
+     }
+   if(InpTakeProfitPoints>0 && refPrice>0.0)
+      return (InpTakeProfitPoints*_Point)/refPrice*100.0;
+   return InpTakeProfitPct;
+  }
+
+//+------------------------------------------------------------------+
+//| The absolute take-profit price, or 0 for "no target".             |
+//+------------------------------------------------------------------+
+double TargetPrice(const ENUM_POSITION_TYPE side,const double entry)
+  {
+   const double pct = EffectiveTakeProfitPct(entry);
+   if(pct<=0.0 || entry<=0.0)
+      return 0.0;
+   const double move = entry*pct/100.0;
+   return (side==POSITION_TYPE_BUY) ? entry+move : entry-move;
+  }
+
+//+------------------------------------------------------------------+
+//| The break-even stop, once the position has earned it. 0 = not yet.|
+//|                                                                   |
+//| Measured against the CLOSE side - the bid for a long - because     |
+//| that is what the position is worth right now. Locking a few points  |
+//| past entry rather than exactly at it is the difference between a   |
+//| scratch and a scratch minus the spread.                            |
+//+------------------------------------------------------------------+
+double BreakEvenStop(const ENUM_POSITION_TYPE side,const double entry)
+  {
+   if(InpBreakEvenPct<=0.0 || entry<=0.0)
+      return 0.0;
+   const double bid = SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   const double ask = SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   const double movePct = (side==POSITION_TYPE_BUY)
+                          ? (bid-entry)/entry*100.0
+                          : (entry-ask)/entry*100.0;
+   if(movePct < InpBreakEvenPct)
+      return 0.0;
+   const double lock = InpBreakEvenLockPts*_Point;
+   return (side==POSITION_TYPE_BUY) ? entry+lock : entry-lock;
+  }
+
+//+------------------------------------------------------------------+
+//| Whether the server clock is inside the entry window.              |
+//| start==end means all day, matching the scalper's convention; a     |
+//| window that wraps midnight (22 to 4) is handled by the OR.         |
+//+------------------------------------------------------------------+
+bool SessionOpen()
+  {
+   if(InpSessionStartHour==InpSessionEndHour)
+      return true;
+   MqlDateTime t;
+   TimeToStruct(TimeCurrent(),t);
+   if(InpSessionStartHour < InpSessionEndHour)
+      return t.hour>=InpSessionStartHour && t.hour<InpSessionEndHour;
+   return t.hour>=InpSessionStartHour || t.hour<InpSessionEndHour;
+  }
+
+datetime DayStart()
+  {
+   MqlDateTime t;
+   TimeToStruct(TimeCurrent(),t);
+   t.hour = 0;
+   t.min  = 0;
+   t.sec  = 0;
+   return StructToTime(t);
+  }
+
+//+------------------------------------------------------------------+
+//| Entries closed today, from deal history under our magic.          |
+//| DEAL_ENTRY_IN only, so a round trip counts once and not twice.     |
+//+------------------------------------------------------------------+
+int TradesToday()
+  {
+   if(!HistorySelect(DayStart(),TimeCurrent()+86400))
+      return 0;
+   int n = 0;
+   const int total = HistoryDealsTotal();
+   for(int i=0; i<total; i++)
+     {
+      const ulong ticket = HistoryDealGetTicket(i);
+      if(ticket==0)
+         continue;
+      if(HistoryDealGetString(ticket,DEAL_SYMBOL)!=_Symbol)
+         continue;
+      if(HistoryDealGetInteger(ticket,DEAL_MAGIC)!=InpMagic)
+         continue;
+      if(HistoryDealGetInteger(ticket,DEAL_ENTRY)==DEAL_ENTRY_IN)
+         n++;
+     }
+   return n;
+  }
+
+//+------------------------------------------------------------------+
+//| Why new entries are blocked today, or an empty string when they   |
+//| are not.                                                           |
+//|                                                                    |
+//| These govern ENTRIES ONLY. A daily loss limit that also closed an   |
+//| open position would be a stop nobody chose, firing at a level set   |
+//| by the calendar rather than by the trade.                           |
+//+------------------------------------------------------------------+
+string DailyHalt()
+  {
+   if(InpDailyLossLimit>0.0 || InpDailyProfitTarget>0.0)
+     {
+      const double today = RealisedSince(DayStart());
+      if(InpDailyLossLimit>0.0 && today <= -InpDailyLossLimit)
+         return StringFormat("daily loss limit: %.2f realised against a %.2f limit",
+                             today,InpDailyLossLimit);
+      if(InpDailyProfitTarget>0.0 && today >= InpDailyProfitTarget)
+         return StringFormat("daily target reached: %.2f realised against a %.2f target",
+                             today,InpDailyProfitTarget);
+     }
+   if(InpMaxTradesPerDay>0)
+     {
+      const int n = TradesToday();
+      if(n >= InpMaxTradesPerDay)
+         return StringFormat("daily trade cap: %d entries against a %d cap",
+                             n,InpMaxTradesPerDay);
+     }
+   return "";
+  }
+
+//+------------------------------------------------------------------+
 //| Init                                                             |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -395,6 +598,34 @@ int OnInit()
    if(!GoldPreflight(InpMagic,InpStopLossPct,InpTrailActivationPct,InpTrailPct,
                      InpGivebackFrac))
       return INIT_PARAMETERS_INCORRECT;
+   if(InpTakeProfitPct<0.0 || InpBreakEvenPct<0.0)
+     {
+      Print("FATAL: InpTakeProfitPct and InpBreakEvenPct cannot be negative");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpStopLossPoints<0 || InpTakeProfitPoints<0 || InpBreakEvenLockPts<0)
+     {
+      Print("FATAL: point distances cannot be negative");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpStopLossMoney<0.0 || InpTakeProfitMoney<0.0
+      || InpDailyLossLimit<0.0 || InpDailyProfitTarget<0.0)
+     {
+      Print("FATAL: money amounts cannot be negative - a limit is a magnitude, "
+            "and the sign is applied where it is compared");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpSessionStartHour<0 || InpSessionStartHour>23
+      || InpSessionEndHour<0 || InpSessionEndHour>23)
+     {
+      Print("FATAL: session hours must be 0-23");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpMaxTradesPerDay<0)
+     {
+      Print("FATAL: InpMaxTradesPerDay cannot be negative. 0 disables the cap");
+      return INIT_PARAMETERS_INCORRECT;
+     }
 
    if(!g_trader.Init(_Symbol,InpMagic,InpLots,InpSlippagePoints,InpComment))
       return INIT_FAILED;
@@ -410,9 +641,10 @@ int OnInit()
      {
       RebuildTrail(g_trail,_Symbol,g_tf,pos);
       const double sl = ProtectiveStopPrice(g_trail,pos.side,pos.entry,
-                                            InpStopLossPct,InpTrailActivationPct,InpTrailPct,
+                                            EffectiveStopPct(pos.entry),
+                                            InpTrailActivationPct,InpTrailPct,
                                             InpGivebackFrac);
-      g_trader.ApplyStop(sl);
+      g_trader.ApplyStop(sl,TargetPrice(pos.side,pos.entry));
       PrintFormat("adopted an existing %s position of %.2f lots at %.2f (magic %d)",
                   (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),pos.volume,pos.entry,(int)InpMagic);
      }
@@ -428,6 +660,22 @@ int OnInit()
                (InpMode==MODE_PULLBACK?"PULLBACK":"BREAKOUT"),
                (InpLongOnly?", LONG ONLY":""),
                _Symbol,EnumToString(g_tf),InpStopLossPct,(int)InpMagic);
+   MqlDateTime nowSrv;
+   TimeToStruct(TimeCurrent(),nowSrv);
+   PrintFormat("server time is %02d:%02d - session inputs are in THIS clock, not yours",
+               nowSrv.hour,nowSrv.min);
+   if(InpSessionStartHour!=InpSessionEndHour)
+      PrintFormat("entries restricted to server hours %d-%d%s",
+                  InpSessionStartHour,InpSessionEndHour,
+                  (InpCloseAtSessionEnd?", flattening when it shuts":""));
+   if(EffectiveTakeProfitPct(SymbolInfoDouble(_Symbol,SYMBOL_BID))>0.0)
+      PrintFormat("take profit ON at %.3f%% of entry - NO Python counterpart, so no "
+                  "measured study covers it",
+                  EffectiveTakeProfitPct(SymbolInfoDouble(_Symbol,SYMBOL_BID)));
+   if(InpDailyLossLimit>0.0 || InpDailyProfitTarget>0.0 || InpMaxTradesPerDay>0)
+      PrintFormat("daily governors: loss limit %.2f | profit target %.2f | max trades %d "
+                  "(0 = off). These block ENTRIES only; an open position is left alone.",
+                  InpDailyLossLimit,InpDailyProfitTarget,InpMaxTradesPerDay);
    if(InpGivebackFrac>0.0)
      {
       PrintFormat("give-back trail ON: closes once %.2f of the peak unrealised profit is "
@@ -500,7 +748,7 @@ void OnClosedBar()
      {
       TrailAdvance(g_trail,high,low);
       const ExitKind fired = ProtectiveExitsCheck(g_trail,pos.exists,pos.side,pos.entry,
-                                                  high,low,InpStopLossPct,
+                                                  high,low,EffectiveStopPct(pos.entry),
                                                   InpTrailActivationPct,InpTrailPct,
                                                   InpGivebackFrac);
       if(fired!=EXIT_NONE)
@@ -515,7 +763,7 @@ void OnClosedBar()
          //--- half the move - a log line that reads plausibly and is wrong.
          string level;
          if(fired==EXIT_STOP)
-            level = StringFormat("%.2f%% against entry",InpStopLossPct);
+            level = StringFormat("%.2f%% against entry",EffectiveStopPct(pos.entry));
          else if(fired==EXIT_TRAIL)
             level = StringFormat("%.2f%% behind the peak of %.2f",InpTrailPct,g_trail.peak);
          else
@@ -529,10 +777,21 @@ void OnClosedBar()
          Repaint(pos);
          return;
         }
-      const double sl = ProtectiveStopPrice(g_trail,pos.side,pos.entry,
-                                            InpStopLossPct,InpTrailActivationPct,InpTrailPct,
-                                            InpGivebackFrac);
-      g_trader.ApplyStop(sl);
+      double sl = ProtectiveStopPrice(g_trail,pos.side,pos.entry,
+                                      EffectiveStopPct(pos.entry),
+                                      InpTrailActivationPct,InpTrailPct,
+                                      InpGivebackFrac);
+
+      //--- Break-even takes the stop only when it is BETTER than whatever the
+      //--- protective levels already produced. Taking it unconditionally would
+      //--- pull an armed trail backwards to entry, giving away banked profit to
+      //--- a rule whose whole purpose is to protect it.
+      const double be = BreakEvenStop(pos.side,pos.entry);
+      if(be>0.0)
+         sl = (sl<=0.0) ? be
+              : ((pos.side==POSITION_TYPE_BUY) ? MathMax(sl,be) : MathMin(sl,be));
+
+      g_trader.ApplyStop(sl,TargetPrice(pos.side,pos.entry));
      }
 
 //--- 3. Warmup gate.
@@ -555,6 +814,17 @@ void OnClosedBar()
 //--- 4. Held: both modes exit on the middle band, from opposite sides.
    if(pos.exists)
      {
+      //--- Session flatten first: a position the window has closed should not
+      //--- get a vote from the band on the way out.
+      if(InpCloseAtSessionEnd && !SessionOpen())
+        {
+         g_trader.CloseAll(StringFormat("session closed (server hours %d-%d): "
+                                        "flattening rather than carrying swap",
+                                        InpSessionStartHour,InpSessionEndHour));
+         TrailClear(g_trail);
+         Repaint(pos);
+         return;
+        }
       const bool isLong = (pos.side==POSITION_TYPE_BUY);
       bool wantsClose = false;
       if(InpMode==MODE_PULLBACK)
@@ -578,6 +848,20 @@ void OnClosedBar()
 //--- 5. Flat: entries.
    if(!InpAllowNewEntries)
      {
+      Repaint(pos);
+      return;
+     }
+   if(!SessionOpen())
+     {
+      Repaint(pos);
+      return;
+     }
+   const string halt = DailyHalt();
+   if(halt!="")
+     {
+      //--- Logged once per bar rather than per tick: a halt that prints on every
+      //--- tick buries the reason it fired under thousands of copies of itself.
+      PrintFormat("entry blocked: %s",halt);
       Repaint(pos);
       return;
      }
@@ -642,7 +926,17 @@ void OpenWith(const ENUM_POSITION_TYPE side,const string reason)
       return;
    const GoldPosition opened = g_trader.Snapshot();
    if(opened.exists)
+     {
       TrailStart(g_trail,opened.entry,opened.side);
+      //--- Apply both levels immediately. Waiting for the next bar close would
+      //--- leave a new position unprotected for a whole bar, which on H1 is an
+      //--- hour, and the target unset for exactly as long.
+      const double sl = ProtectiveStopPrice(g_trail,opened.side,opened.entry,
+                                            EffectiveStopPct(opened.entry),
+                                            InpTrailActivationPct,InpTrailPct,
+                                            InpGivebackFrac);
+      g_trader.ApplyStop(sl,TargetPrice(opened.side,opened.entry));
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -720,6 +1014,14 @@ void Repaint(const GoldPosition &pos)
       g_dash.Set(r++,"PEAK",DoubleToString(g_trail.peak,digits),cDim);
       g_dash.Set(r++,"TRAIL",(armed?"ARMED":StringFormat("arms at %.2f%%",InpTrailActivationPct)),
                  (armed?cOk:cDim));
+      const double tp = TargetPrice(pos.side,pos.entry);
+      g_dash.Set(r++,"TARGET",(tp>0.0?DoubleToString(tp,digits):"off"),
+                 (tp>0.0?cOk:cDim));
+      const double be = BreakEvenStop(pos.side,pos.entry);
+      g_dash.Set(r++,"BREAK-EVEN",
+                 (InpBreakEvenPct<=0.0 ? "off"
+                  : (be>0.0 ? "LOCKED" : StringFormat("at %.2f%%",InpBreakEvenPct))),
+                 (be>0.0?cOk:cDim));
       if(InpGivebackFrac>0.0)
          g_dash.Set(r++,"GIVE-BACK",
                     (armed?DoubleToString(GivebackLevel(g_trail,InpGivebackFrac),digits)
@@ -734,6 +1036,11 @@ void Repaint(const GoldPosition &pos)
       g_dash.Set(r++,"FLOATING","0.00",cDim);
       g_dash.Set(r++,"PEAK","-",cDim);
       g_dash.Set(r++,"TRAIL","-",cDim);
+      g_dash.Set(r++,"TARGET",
+                 (EffectiveTakeProfitPct(SymbolInfoDouble(_Symbol,SYMBOL_BID))>0.0
+                  ? "set on entry" : "off"),cDim);
+      g_dash.Set(r++,"BREAK-EVEN",(InpBreakEvenPct>0.0
+                                   ? StringFormat("at %.2f%%",InpBreakEvenPct) : "off"),cDim);
       g_dash.Set(r++,"GIVE-BACK",(InpGivebackFrac>0.0?"armed when held":"off  (D-154)"),cDim);
      }
 
@@ -749,6 +1056,25 @@ void Repaint(const GoldPosition &pos)
               StringFormat("%s  %s",_Symbol,StringSubstr(EnumToString(g_tf),7)),cWhite);
    g_dash.Set(r++,"SPREAD",
               StringFormat("%d pts",(int)SymbolInfoInteger(_Symbol,SYMBOL_SPREAD)),cDim);
+
+//--- GOVERNORS. The panel has to answer "why is it not trading" without anyone
+//--- reading the log, so a block that is off says so rather than being absent.
+   const bool sessionOn = SessionOpen();
+   g_dash.Set(r++,"SESSION",
+              (InpSessionStartHour==InpSessionEndHour
+               ? "all day"
+               : StringFormat("%02d-%02d  %s",InpSessionStartHour,InpSessionEndHour,
+                              (sessionOn?"OPEN":"SHUT"))),
+              (sessionOn?cOk:cHot));
+   const string halt = DailyHalt();
+   g_dash.Set(r++,"ENTRIES",
+              (!InpAllowNewEntries ? "manage only"
+               : (halt!="" ? "HALTED" : (sessionOn ? "allowed" : "out of session"))),
+              ((InpAllowNewEntries && halt=="" && sessionOn) ? cOk : cHot));
+   g_dash.Set(r++,"TRADES TODAY",
+              (InpMaxTradesPerDay>0
+               ? StringFormat("%d / %d",TradesToday(),InpMaxTradesPerDay)
+               : StringFormat("%d",TradesToday())),cDim);
 
 //--- P&L, last and largest.
    g_dash.SetSection(r++,"-- P&L --");

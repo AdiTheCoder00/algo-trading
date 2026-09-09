@@ -87,7 +87,11 @@ public:
                                  const double stopDistance,const double takeDistance,
                                  const string reason);
    bool              CloseAll(const string reason);
-   bool              ApplyStop(const double level);
+   //--- `target` < 0 keeps whatever take-profit the position already has, which
+   //--- is what every caller written before targets existed passes. 0 removes
+   //--- it; a positive value sets it. Clamped to the broker's stops band on the
+   //--- profit side, the same way the stop is on the loss side.
+   bool              ApplyStop(const double level,const double target=-1.0);
    double            NormaliseVolume(const double lots) const;
    double            LotsForRisk(const double riskMoney,const double stopDistance) const;
    int               Digits(void) const { return m_digits; }
@@ -432,7 +436,7 @@ bool CGoldTrader::CloseAll(const string reason)
 //| be modified at all. Reported, not fought; the bar-close backstop   |
 //| in the expert covers the position until the band is left.          |
 //+------------------------------------------------------------------+
-bool CGoldTrader::ApplyStop(const double level)
+bool CGoldTrader::ApplyStop(const double level,const double target)
   {
    const double stopsDistance  = (double)SymbolInfoInteger(m_symbol,SYMBOL_TRADE_STOPS_LEVEL) * m_point;
    const double freezeDistance = (double)SymbolInfoInteger(m_symbol,SYMBOL_TRADE_FREEZE_LEVEL) * m_point;
@@ -452,6 +456,39 @@ bool CGoldTrader::ApplyStop(const double level)
       const ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       const double currentSl = PositionGetDouble(POSITION_SL);
       const double takeProfit = PositionGetDouble(POSITION_TP);
+
+      //--- Resolve the target first: a rejected modify rejects BOTH levels, so
+      //--- an out-of-band TP would silently cost the position its stop update
+      //--- too. Clamping it here keeps the two independent.
+      double wantedTp = (target<0.0) ? takeProfit : target;
+      if(wantedTp>0.0)
+        {
+         if(type==POSITION_TYPE_BUY)
+           {
+            const double tpFloor = bid + stopsDistance;
+            if(wantedTp < tpFloor)
+              {
+               PrintFormat("target %s is inside the %s stops band; clamped to %s",
+                           DoubleToString(wantedTp,m_digits),
+                           DoubleToString(stopsDistance,m_digits),
+                           DoubleToString(tpFloor,m_digits));
+               wantedTp = tpFloor;
+              }
+           }
+         else
+           {
+            const double tpCeiling = ask - stopsDistance;
+            if(wantedTp > tpCeiling)
+              {
+               PrintFormat("target %s is inside the %s stops band; clamped to %s",
+                           DoubleToString(wantedTp,m_digits),
+                           DoubleToString(stopsDistance,m_digits),
+                           DoubleToString(tpCeiling,m_digits));
+               wantedTp = tpCeiling;
+              }
+           }
+         wantedTp = NormalizeDouble(wantedTp,m_digits);
+        }
 
       double wanted = level;
       if(wanted>0.0)
@@ -500,19 +537,27 @@ bool CGoldTrader::ApplyStop(const double level)
         }
 
       //--- Nothing to do. Saves a modify request per bar per ticket, which
-      //--- some brokers count against a request-rate limit.
-      if(MathAbs(currentSl-wanted) < m_point/2.0)
+      //--- some brokers count against a request-rate limit. BOTH levels have to
+      //--- be unchanged to skip - checking only the stop would strand a target
+      //--- that was never sent.
+      if(MathAbs(currentSl-wanted) < m_point/2.0
+         && MathAbs(takeProfit-wantedTp) < m_point/2.0)
          continue;
 
-      if(!m_trade.PositionModify(ticket,wanted,takeProfit))
+      if(!m_trade.PositionModify(ticket,wanted,wantedTp))
         {
-         PrintFormat("SL modify #%I64u to %s REJECTED: retcode %d (%s)",
-                     ticket,DoubleToString(wanted,m_digits),m_trade.ResultRetcode(),
+         PrintFormat("SL/TP modify #%I64u to %s / %s REJECTED: retcode %d (%s)",
+                     ticket,DoubleToString(wanted,m_digits),
+                     DoubleToString(wantedTp,m_digits),m_trade.ResultRetcode(),
                      m_trade.ResultRetcodeDescription());
          allApplied = false;
          continue;
         }
-      PrintFormat("SL #%I64u -> %s",ticket,DoubleToString(wanted,m_digits));
+      if(MathAbs(takeProfit-wantedTp) < m_point/2.0)
+         PrintFormat("SL #%I64u -> %s",ticket,DoubleToString(wanted,m_digits));
+      else
+         PrintFormat("SL/TP #%I64u -> %s / %s",ticket,DoubleToString(wanted,m_digits),
+                     DoubleToString(wantedTp,m_digits));
      }
    return allApplied;
   }
