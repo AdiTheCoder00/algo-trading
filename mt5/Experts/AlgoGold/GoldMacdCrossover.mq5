@@ -78,8 +78,13 @@ input int    InpSeedBars          = 1000;    // Closed bars replayed to seed the
 
 input group "--- Protective exits (percent of price, NOT points) ---"
 input double InpStopLossPct       = 0.5;     // Flat stop, % of entry. 0 disables
-input double InpTrailActivationPct= 2.0;     // Profit % at which the trail arms
+input double InpTrailActivationPct= 2.0;     // Profit % at which BOTH trails arm
 input double InpTrailPct          = 0.0;     // Trail distance, % behind peak. 0 disables
+//--- OFF by default, and it must stay that way unless a measurement says
+//--- otherwise: every backtest behind this expert was run without it. It gives
+//--- back a FRACTION of the banked move (0.5 = half the peak unrealised
+//--- profit), not a percentage of price - see ProtectiveExits.mqh.
+input double InpGivebackFrac      = 0.0;     // Give-back trail: FRACTION of peak profit surrendered. 0.5 = half. 0 disables
 
 input group "--- Execution ---"
 input double InpLots              = 1.00;    // Volume in MT5 LOTS (1.00 = 100 oz = Python default)
@@ -212,7 +217,8 @@ int OnInit()
                   "never be trusted",InpSeedBars,WarmupBars());
       return INIT_PARAMETERS_INCORRECT;
      }
-   if(!GoldPreflight(InpMagic,InpStopLossPct,InpTrailActivationPct,InpTrailPct))
+   if(!GoldPreflight(InpMagic,InpStopLossPct,InpTrailActivationPct,InpTrailPct,
+                     InpGivebackFrac))
       return INIT_PARAMETERS_INCORRECT;
 
    if(!g_trader.Init(_Symbol,InpMagic,InpLots,InpSlippagePoints,InpComment))
@@ -230,7 +236,8 @@ int OnInit()
      {
       RebuildTrail(g_trail,_Symbol,g_tf,pos);
       const double sl = ProtectiveStopPrice(g_trail,pos.side,pos.entry,
-                                            InpStopLossPct,InpTrailActivationPct,InpTrailPct);
+                                            InpStopLossPct,InpTrailActivationPct,InpTrailPct,
+                                            InpGivebackFrac);
       g_trader.ApplyStop(sl);
       PrintFormat("adopted an existing %s position of %.2f lots at %.2f (magic %d)",
                   (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),pos.volume,pos.entry,(int)InpMagic);
@@ -295,7 +302,8 @@ void OnClosedBar()
 //---    would eventually close it opposingly has not converged yet.
    const ExitKind fired = ProtectiveExitsCheck(g_trail,pos.exists,pos.side,pos.entry,
                                                high,low,InpStopLossPct,
-                                               InpTrailActivationPct,InpTrailPct);
+                                               InpTrailActivationPct,InpTrailPct,
+                                               InpGivebackFrac);
    if(fired!=EXIT_NONE)
      {
       //--- Normally the broker-side SL placed last bar has already fired intrabar
@@ -304,7 +312,9 @@ void OnClosedBar()
       //--- adopted at init) - the position is closed at market instead.
       const string reason = StringFormat("%s: %.2f%% level against a %s position, entry %.2f",
                                          ExitKindName(fired),
-                                         (fired==EXIT_STOP?InpStopLossPct:InpTrailPct),
+                                         (fired==EXIT_STOP?InpStopLossPct
+                                                         :(fired==EXIT_TRAIL?InpTrailPct
+                                                                            :InpGivebackFrac)),
                                          (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),pos.entry);
       g_trader.CloseAll(reason);
       TrailClear(g_trail);
@@ -323,7 +333,8 @@ void OnClosedBar()
    if(pos.exists)
      {
       const double sl = ProtectiveStopPrice(g_trail,pos.side,pos.entry,
-                                            InpStopLossPct,InpTrailActivationPct,InpTrailPct);
+                                            InpStopLossPct,InpTrailActivationPct,InpTrailPct,
+                                            InpGivebackFrac);
       g_trader.ApplyStop(sl);
      }
 

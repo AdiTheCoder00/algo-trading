@@ -19,6 +19,9 @@ from algo.core.enums import Side
 from algo.strategy.trailing_profit_stop import (
     TrailState,
     advance_trail,
+    giveback_fill_price,
+    giveback_level,
+    giveback_touched,
     is_armed,
     start_trail,
     trail_fill_price,
@@ -250,3 +253,119 @@ class TestTrailFillPrice:
         bar = _bar(open_="4340.00", high="4345", low="4330", close="4335")
 
         assert trail_fill_price(state, bar, Decimal("0.5")) == Decimal("4340.00")
+
+
+class TestGivebackLevel:
+    """The give-back trail: a fraction of the BANKED MOVE, not of the price."""
+
+    def test_half_of_a_banked_move_sits_midway_between_entry_and_peak(self) -> None:
+        state = TrailState(side=Side.BUY, entry_price=ENTRY, peak=Decimal("4500.00"))
+
+        # Banked 100.00 from 4400; half of it is still on the table at 4450.
+        assert giveback_level(state, Decimal("0.5")) == Decimal("4450.00")
+
+    def test_a_short_gives_back_upward(self) -> None:
+        state = TrailState(side=Side.SELL, entry_price=ENTRY, peak=Decimal("4300.00"))
+
+        assert giveback_level(state, Decimal("0.5")) == Decimal("4350.00")
+
+    def test_the_level_rises_with_the_peak(self) -> None:
+        """The whole point: it is anchored to the best price seen, so a trade
+        that keeps working keeps locking in more."""
+        state = TrailState(side=Side.BUY, entry_price=ENTRY, peak=Decimal("4500.00"))
+        further = TrailState(side=Side.BUY, entry_price=ENTRY, peak=Decimal("4800.00"))
+
+        assert giveback_level(state, Decimal("0.5")) == Decimal("4450.00")
+        assert giveback_level(further, Decimal("0.5")) == Decimal("4600.00")
+
+    def test_the_fraction_is_the_give_back_not_the_keep(self) -> None:
+        """0.25 surrenders a quarter of the banked move and locks in three
+        quarters - the two readings coincide only at 0.5, so this pins which
+        one the argument means."""
+        state = TrailState(side=Side.BUY, entry_price=ENTRY, peak=Decimal("4500.00"))
+
+        assert giveback_level(state, Decimal("0.25")) == Decimal("4475.00")
+
+    def test_it_scales_with_the_trade_not_with_the_instrument(self) -> None:
+        """The distinction from `trail_level`: two trades that ran different
+        distances surrender the same SHARE, not the same amount."""
+        small = TrailState(side=Side.BUY, entry_price=ENTRY, peak=Decimal("4450.00"))
+        large = TrailState(side=Side.BUY, entry_price=ENTRY, peak=Decimal("4900.00"))
+
+        assert giveback_level(small, Decimal("0.5")) == Decimal("4425.00")  # gave back 25
+        assert giveback_level(large, Decimal("0.5")) == Decimal("4650.00")  # gave back 250
+        # `trail_level` would have given back a near-identical amount on both.
+        assert trail_level(small, Decimal("1")) == Decimal("4405.5000")
+        assert trail_level(large, Decimal("1")) == Decimal("4851.0000")
+
+    def test_a_peak_that_never_moved_leaves_the_level_at_entry(self) -> None:
+        state = start_trail(ENTRY, Side.BUY)
+
+        assert giveback_level(state, Decimal("0.5")) == ENTRY
+
+    def test_a_fraction_above_one_is_clamped_to_cost(self) -> None:
+        """`ProtectiveExits` rejects such a fraction outright, but the level
+        itself still honours the cost-to-cost invariant on its own."""
+        state = TrailState(side=Side.BUY, entry_price=ENTRY, peak=Decimal("4500.00"))
+
+        assert giveback_level(state, Decimal("2")) == ENTRY
+
+
+class TestGivebackTouched:
+    def test_an_unarmed_trail_never_fires_however_much_it_gave_back(self) -> None:
+        """The activation gate is the whole reason a position a dollar up that
+        gives back fifty cents is not closed on its first bar of noise."""
+        state = TrailState(side=Side.BUY, entry_price=ENTRY, peak=Decimal("4404.00"))
+        bar = _bar(open_="4404", high="4404", low="4401.00", close="4402")
+
+        # Gave back well over half of the 4.00 banked, but only 0.09% is banked.
+        assert is_armed(state, Decimal("2")) is False
+        assert giveback_touched(state, bar, Decimal("2"), Decimal("0.5")) is False
+
+    def test_an_armed_trail_fires_when_the_bar_reaches_the_level(self) -> None:
+        state = TrailState(side=Side.BUY, entry_price=ENTRY, peak=Decimal("4500.00"))
+        bar = _bar(open_="4480", high="4485", low="4450.00", close="4460")
+
+        assert is_armed(state, Decimal("2")) is True
+        assert giveback_touched(state, bar, Decimal("2"), Decimal("0.5")) is True
+
+    def test_an_armed_trail_holds_while_the_bar_stays_above_the_level(self) -> None:
+        state = TrailState(side=Side.BUY, entry_price=ENTRY, peak=Decimal("4500.00"))
+        bar = _bar(open_="4480", high="4485", low="4450.01", close="4460")
+
+        assert giveback_touched(state, bar, Decimal("2"), Decimal("0.5")) is False
+
+    def test_a_short_fires_on_the_high(self) -> None:
+        state = TrailState(side=Side.SELL, entry_price=ENTRY, peak=Decimal("4300.00"))
+        bar = _bar(open_="4320", high="4350.00", low="4315", close="4340")
+
+        assert giveback_touched(state, bar, Decimal("2"), Decimal("0.5")) is True
+
+    def test_a_zero_fraction_means_no_giveback_trail_is_configured(self) -> None:
+        """Mirrors `trail_touched` and `stop_touched`, so a caller need not
+        branch on whether the feature is switched on."""
+        state = TrailState(side=Side.BUY, entry_price=ENTRY, peak=Decimal("4500.00"))
+        bar = _bar(open_="4480", high="4485", low="4400.00", close="4410")
+
+        assert giveback_touched(state, bar, Decimal("2"), Decimal("0")) is False
+
+
+class TestGivebackFillPrice:
+    def test_a_normal_touch_fills_at_the_level(self) -> None:
+        state = TrailState(side=Side.BUY, entry_price=ENTRY, peak=Decimal("4500.00"))
+        bar = _bar(open_="4480", high="4485", low="4450.00", close="4460")
+
+        assert giveback_fill_price(state, bar, Decimal("0.5")) == Decimal("4450.00")
+
+    def test_a_gap_through_the_level_fills_at_the_open(self) -> None:
+        """Same `GAPPED_STOP` doctrine the other two fills already apply."""
+        state = TrailState(side=Side.BUY, entry_price=ENTRY, peak=Decimal("4500.00"))
+        bar = _bar(open_="4430.00", high="4435", low="4425", close="4428")
+
+        assert giveback_fill_price(state, bar, Decimal("0.5")) == Decimal("4430.00")
+
+    def test_a_short_gap_fills_at_the_open_too(self) -> None:
+        state = TrailState(side=Side.SELL, entry_price=ENTRY, peak=Decimal("4300.00"))
+        bar = _bar(open_="4370.00", high="4375", low="4365", close="4372")
+
+        assert giveback_fill_price(state, bar, Decimal("0.5")) == Decimal("4370.00")

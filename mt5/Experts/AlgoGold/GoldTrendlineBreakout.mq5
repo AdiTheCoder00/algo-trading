@@ -68,8 +68,14 @@ input int    InpLookback          = 20;      // Channel length, bars. Minimum 2
 
 input group "--- Protective exits (percent of price, NOT points) ---"
 input double InpStopLossPct       = 0.5;     // Flat stop, % of entry. 0 disables
-input double InpTrailActivationPct= 2.0;     // Profit % at which the trail arms
+input double InpTrailActivationPct= 2.0;     // Profit % at which BOTH trails arm
 input double InpTrailPct          = 0.0;     // Trail distance, % behind peak. 0 disables
+//--- OFF by default, and it must stay that way unless a measurement says
+//--- otherwise: every backtest behind this expert was run without it. Unlike
+//--- InpTrailPct it has no money-denominated twin, because it is already
+//--- relative to the trade's own banked move - a fixed dollar give-back is what
+//--- InpTrailMoney is for, and the two answer different questions.
+input double InpGivebackFrac      = 0.0;     // Give-back trail: FRACTION of peak profit surrendered. 0.5 = half. 0 disables
 input double InpTakeProfitPct     = 0.0;     // Target, % of entry. 0 disables (no Python counterpart)
 input bool   InpBracketAtEntry    = true;    // Attach SL/TP to the ENTRY order, not the next bar
 //--- Point-based overrides. Non-zero WINS over the percentage above.
@@ -501,7 +507,8 @@ int OnInit()
       Print("FATAL: point stop/target cannot be negative");
       return INIT_PARAMETERS_INCORRECT;
      }
-   if(!GoldPreflight(InpMagic,InpStopLossPct,InpTrailActivationPct,InpTrailPct))
+   if(!GoldPreflight(InpMagic,InpStopLossPct,InpTrailActivationPct,InpTrailPct,
+                     InpGivebackFrac))
       return INIT_PARAMETERS_INCORRECT;
 
    if(!g_trader.Init(_Symbol,InpMagic,InpLots,InpSlippagePoints,InpComment))
@@ -653,7 +660,8 @@ int OnInit()
       const double sl = ProtectiveStopPrice(g_trail,pos.side,pos.entry,
                                             EffectiveStopPct(pos.entry),
                                             EffectiveTrailActivationPct(pos.entry),
-                                            EffectiveTrailPct(TrailReference(pos.entry)));
+                                            EffectiveTrailPct(TrailReference(pos.entry)),
+                                            InpGivebackFrac);
       g_trader.ApplyStop(sl);
       PrintFormat("adopted an existing %s position of %.2f lots at %.2f (magic %d)",
                   (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),pos.volume,pos.entry,(int)InpMagic);
@@ -1037,7 +1045,8 @@ void OnClosedBar()
    const ExitKind fired = ProtectiveExitsCheck(g_trail,pos.exists,pos.side,pos.entry,
                                                high,low,EffectiveStopPct(pos.entry),
                                                EffectiveTrailActivationPct(pos.entry),
-                                               EffectiveTrailPct(TrailReference(pos.entry)));
+                                               EffectiveTrailPct(TrailReference(pos.entry)),
+                                               InpGivebackFrac);
    if(fired!=EXIT_NONE)
      {
       //--- Normally the broker-side SL placed last bar has already fired
@@ -1046,7 +1055,9 @@ void OnClosedBar()
       const string reason = StringFormat("%s: %.2f%% level against a %s position, entry %.2f",
                                          ExitKindName(fired),
                                          (fired==EXIT_STOP?EffectiveStopPct(pos.entry)
-                                                          :EffectiveTrailPct(TrailReference(pos.entry))),
+                                          :(fired==EXIT_TRAIL
+                                            ?EffectiveTrailPct(TrailReference(pos.entry))
+                                            :InpGivebackFrac)),
                                          (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),pos.entry);
       g_trader.CloseAll(reason);
       TrailClear(g_trail);
@@ -1059,7 +1070,8 @@ void OnClosedBar()
       const double sl = ProtectiveStopPrice(g_trail,pos.side,pos.entry,
                                             EffectiveStopPct(pos.entry),
                                             EffectiveTrailActivationPct(pos.entry),
-                                            EffectiveTrailPct(TrailReference(pos.entry)));
+                                            EffectiveTrailPct(TrailReference(pos.entry)),
+                                            InpGivebackFrac);
       g_trader.ApplyStop(sl);
      }
 

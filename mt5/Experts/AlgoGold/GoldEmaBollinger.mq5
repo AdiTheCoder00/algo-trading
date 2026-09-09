@@ -75,6 +75,55 @@
 //|   pullback has reached its target there; the breakout has lost    |
 //|   the expansion that justified it. One comparison, two meanings.  |
 //|                                                                   |
+//| ====================================================================
+//| THE GIVE-BACK TRAIL (InpGivebackFrac) - ADDED, MEASURED, REJECTED |
+//| ====================================================================
+//| Every exit above is a give-up: the flat stop, or the middle band. |
+//| InpTrailPct existed but ships at 0, so a winner ran to the middle |
+//| band and handed back whatever it had made getting there.          |
+//|                                                                   |
+//| InpGivebackFrac closes a position once it has surrendered that     |
+//| fraction of the best unrealised profit it ever showed - at 0.5 the |
+//| level sits halfway between entry and the peak, and rises with it.  |
+//|                                                                   |
+//| It is NOT InpTrailPct with a different number. InpTrailPct gives   |
+//| back a percentage of the PEAK PRICE, so it scales with gold; this  |
+//| gives back a fraction of the BANKED MOVE, so it scales with how    |
+//| well the trade went. Read the header of ProtectiveExits.mqh for    |
+//| how the two resolve when both cross on one bar.                    |
+//|                                                                   |
+//| IT IS A FRACTION, NOT A PERCENT. 0.5 is half. Entering 50 is       |
+//| rejected at init rather than clamped, because it would otherwise   |
+//| behave as a trail that exits at cost with nothing saying why.      |
+//|                                                                   |
+//| ---- IT DEFAULTS TO 0, A MEASURED DECISION - D-154 ----            |
+//| scripts/measure_ema_bb_giveback_xauusd.py ran both modes across    |
+//| three timeframes, three windows and four activation gates, each    |
+//| cell against its own giveback-off baseline. The trail beat that    |
+//| baseline in 3 OF 72 CELLS, and all three are degenerate: two are   |
+//| +$556 and +$806 where it fired three or four times out of 245      |
+//| trades, and the third merely loses less (-$17,309 vs -$21,912) in  |
+//| a cell where both readings are heavy losses. Everywhere else it is |
+//| worse, often catastrophically - H1 breakout over 2026.06-08 goes   |
+//| from +$37,725 at PF 1.54 to -$70,636 at PF 0.10.                   |
+//|                                                                   |
+//| The reason is arithmetic, not fit. At frac 0.5 a trail armed at    |
+//| `a` first fires at a/2 of profit while the flat stop still lets a  |
+//| loser run to InpStopLossPct. At a 0.25% gate against a 0.5% stop   |
+//| that is a 1:4 reward-to-risk floor on every trade it touches, and  |
+//| no entry rule survives it. The results are monotone in the gate    |
+//| for that reason: the wider it is set the closer to baseline it     |
+//| lands, because it fires less. ITS BEST MEASURED BEHAVIOUR IS NOT   |
+//| FIRING AT ALL.                                                     |
+//|                                                                   |
+//| The input is kept rather than deleted, for the reason InpLongOnly  |
+//| is kept: the next person to notice this expert hands its winners   |
+//| back should find the falsification attached to the fix. A give-    |
+//| back trail is only coherent when it arms well ABOVE the stop       |
+//| distance - and this data says even then the middle band was        |
+//| already the better exit. D-152 and D-153 predate it entirely and   |
+//| their scripts pin it to 0.                                         |
+//|                                                                   |
 //| - IT DOES NOT REVERSE IN ONE STEP. Entries are only taken flat.   |
 //|                                                                   |
 //| ====================================================================
@@ -135,8 +184,9 @@ input int    InpSeedBars         = 1000;    // Closed bars replayed on init to s
 
 input group "--- Protective exits (percent of price, NOT points) ---"
 input double InpStopLossPct      = 0.5;     // Flat stop, % of entry. 0 disables
-input double InpTrailActivationPct = 2.0;   // Profit % at which the trail arms
+input double InpTrailActivationPct = 0.25;  // Profit % at which BOTH trails arm. INERT while both trails are 0 - and a very tight gate if you enable one
 input double InpTrailPct         = 0.0;     // Trail distance, % behind peak. 0 disables
+input double InpGivebackFrac     = 0.0;     // Give-back trail: FRACTION of peak profit surrendered. MEASURED AND REJECTED - see the header. 0 disables
 
 input group "--- Execution ---"
 input double InpLots             = 0.05;    // Volume in MT5 LOTS (1.00 = 100 oz)
@@ -272,7 +322,8 @@ int OnInit()
                   "never be trusted",InpSeedBars,WarmupBars());
       return INIT_PARAMETERS_INCORRECT;
      }
-   if(!GoldPreflight(InpMagic,InpStopLossPct,InpTrailActivationPct,InpTrailPct))
+   if(!GoldPreflight(InpMagic,InpStopLossPct,InpTrailActivationPct,InpTrailPct,
+                     InpGivebackFrac))
       return INIT_PARAMETERS_INCORRECT;
 
    if(!g_trader.Init(_Symbol,InpMagic,InpLots,InpSlippagePoints,InpComment))
@@ -289,7 +340,8 @@ int OnInit()
      {
       RebuildTrail(g_trail,_Symbol,g_tf,pos);
       const double sl = ProtectiveStopPrice(g_trail,pos.side,pos.entry,
-                                            InpStopLossPct,InpTrailActivationPct,InpTrailPct);
+                                            InpStopLossPct,InpTrailActivationPct,InpTrailPct,
+                                            InpGivebackFrac);
       g_trader.ApplyStop(sl);
       PrintFormat("adopted an existing %s position of %.2f lots at %.2f (magic %d)",
                   (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),pos.volume,pos.entry,(int)InpMagic);
@@ -304,6 +356,19 @@ int OnInit()
                (InpMode==MODE_PULLBACK?"PULLBACK":"BREAKOUT"),
                (InpLongOnly?", LONG ONLY":""),
                _Symbol,EnumToString(g_tf),InpStopLossPct,(int)InpMagic);
+   if(InpGivebackFrac>0.0)
+     {
+      PrintFormat("give-back trail ON: closes once %.2f of the peak unrealised profit is "
+                  "handed back, armed at %.2f%%",InpGivebackFrac,InpTrailActivationPct);
+      if(InpTrailActivationPct>=1.0)   // a gate this wide outruns the bands
+         PrintFormat("WARNING: it arms only after a %.2f%% favourable move - about $%.0f on "
+                     "gold near %.0f. That is far wider than a Bollinger band, so the middle "
+                     "band will almost certainly exit first and this trail will rarely fire. "
+                     "Lower TrailActivationPct if you mean it to.",
+                     InpTrailActivationPct,
+                     SymbolInfoDouble(_Symbol,SYMBOL_BID)*InpTrailActivationPct/100.0,
+                     SymbolInfoDouble(_Symbol,SYMBOL_BID));
+     }
    Print("NO MEASURED EDGE. D-152: pullback below break-even in every window, breakout "
          "beaten by buy-and-hold. D-153: long-only pre-registered and REJECTED on seven "
          "years of unseen data. Demo only.");
@@ -352,23 +417,37 @@ void OnClosedBar()
       TrailAdvance(g_trail,high,low);
       const ExitKind fired = ProtectiveExitsCheck(g_trail,pos.exists,pos.side,pos.entry,
                                                   high,low,InpStopLossPct,
-                                                  InpTrailActivationPct,InpTrailPct);
+                                                  InpTrailActivationPct,InpTrailPct,
+                                                  InpGivebackFrac);
       if(fired!=EXIT_NONE)
         {
          //--- Normally the broker-side SL placed last bar has already fired
          //--- intrabar and this finds nothing to do. It is the backstop for the
          //--- bar where the stop could not be placed (freeze band, rejected
          //--- modify, a position adopted at init) - closed at market instead.
-         g_trader.CloseAll(StringFormat("%s: %.2f%% level against a %s position, entry %.2f",
-                                        ExitKindName(fired),
-                                        (fired==EXIT_STOP?InpStopLossPct:InpTrailPct),
+         //--- Built per kind rather than with one ternary over the number: the
+         //--- give-back trail's setting is a FRACTION and printing it through a
+         //--- "%%" format would report 0.50%% for a trail that actually gave back
+         //--- half the move - a log line that reads plausibly and is wrong.
+         string level;
+         if(fired==EXIT_STOP)
+            level = StringFormat("%.2f%% against entry",InpStopLossPct);
+         else if(fired==EXIT_TRAIL)
+            level = StringFormat("%.2f%% behind the peak of %.2f",InpTrailPct,g_trail.peak);
+         else
+            level = StringFormat("gave back %.2f of the move banked to a peak of %.2f, "
+                                 "closing at %.2f",InpGivebackFrac,g_trail.peak,
+                                 GivebackLevel(g_trail,InpGivebackFrac));
+         g_trader.CloseAll(StringFormat("%s: %s, on a %s position, entry %.2f",
+                                        ExitKindName(fired),level,
                                         (pos.side==POSITION_TYPE_BUY?"BUY":"SELL"),pos.entry));
          TrailClear(g_trail);
          Repaint(pos);
          return;
         }
       const double sl = ProtectiveStopPrice(g_trail,pos.side,pos.entry,
-                                            InpStopLossPct,InpTrailActivationPct,InpTrailPct);
+                                            InpStopLossPct,InpTrailActivationPct,InpTrailPct,
+                                            InpGivebackFrac);
       g_trader.ApplyStop(sl);
      }
 
@@ -514,6 +593,29 @@ void Repaint(const GoldPosition &pos)
    g_dash.Set(6,"warmup",
               StringFormat("%d / %d bars",g_barsSeen,WarmupBars()),
               (g_barsSeen>=WarmupBars()?clrLime:clrGold));
-   g_dash.Set(7,"NOTE","no measured edge - D-152/153",clrTomato);
+
+//--- The give-back level, and honestly about whether it is live. "armed at
+//--- x.xx%" is the useful line when it is not: it says the rule is configured
+//--- and the peak simply has not travelled far enough, which is the state this
+//--- panel will show almost all of the time at the shipped 2% activation.
+   if(InpGivebackFrac<=0.0)
+      g_dash.Set(7,"give-back","off",clrSilver);
+   else
+      if(!pos.exists)
+         g_dash.Set(7,"give-back",StringFormat("%.2f of peak, flat",InpGivebackFrac),clrSilver);
+      else
+         if(TrailIsArmed(g_trail,InpTrailActivationPct))
+            g_dash.Set(7,"give-back",
+                       StringFormat("ARMED @ %s (peak %s)",
+                                    DoubleToString(GivebackLevel(g_trail,InpGivebackFrac),
+                                                   g_trader.Digits()),
+                                    DoubleToString(g_trail.peak,g_trader.Digits())),clrLime);
+         else
+            g_dash.Set(7,"give-back",
+                       StringFormat("%.2f of peak, arms at %.2f%% (now %.2f%%)",
+                                    InpGivebackFrac,InpTrailActivationPct,
+                                    TrailFavourableMovePct(g_trail)),clrGold);
+
+   g_dash.Set(8,"NOTE","no measured edge - D-152/153",clrTomato);
   }
 //+------------------------------------------------------------------+

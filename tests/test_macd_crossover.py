@@ -151,6 +151,10 @@ class TestConstruction:
             "stop_loss_pct": "0.5",
             "trail_activation_pct": "2",
             "trail_pct": "0",
+            # Added when the give-back trail was: off for this strategy, whose
+            # measured runs predate it. Asserted rather than omitted because
+            # this dict feeds `params_hash()` and every `signal_id` under it.
+            "giveback_frac": "0",
         }
 
     def test_warmup_matches_the_indicator_modules_formula(self) -> None:

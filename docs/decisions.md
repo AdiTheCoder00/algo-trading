@@ -3971,3 +3971,79 @@ system working. The measurement harness is now the durable asset here - the FVG
 funnel, this pre-registration pattern, and `run_cfd_walk_forward`'s new
 `factory` hook, which lets a candidate be walk-forwarded without first being
 made reachable by the live loop.
+
+---
+
+### D-154 - The give-back trail was requested, built, and measured into the ground. Its best behaviour is not firing
+
+`EmaBollinger`'s only exits were give-ups: the flat 0.5% stop, or the middle
+band. `InpTrailPct` existed but shipped at 0, so a winner ran to the middle band
+and handed back whatever it had made on the way. The request was a trail that
+keeps half of the peak unrealised profit, and this entry is what happened when it
+was measured instead of assumed.
+
+**What was built.** `giveback_frac` in `trailing_profit_stop.py` and its MQL5
+twin in `ProtectiveExits.mqh`: an armed trail whose level is `peak - frac *
+(peak - entry)`, so at 0.5 it sits halfway between entry and the best price seen
+and rises with the peak. It is a genuinely different rule from `trail_pct`, which
+gives back a percentage of the *price* - this gives back a fraction of the
+*banked move*, so it scales with how well the trade went rather than with gold.
+Both may run at once; when both cross on one bar the nearer level is reported,
+because that is the one that actually filled and the one `cfd_runner` prices from.
+
+**The rule, and it was not fixed in advance.** Unlike D-153 this was not
+pre-registered - it is a trade-management change, measured against its own
+baseline rather than a hypothesis about edge. The comparison is
+`scripts/measure_ema_bb_giveback_xauusd.py`: both modes x three timeframes x
+D-140's three windows x four activation gates (0.25/0.5/1/2), each cell against
+the same strategy with `giveback_frac = 0`. Paired against itself, so no number
+here depends on another study.
+
+**It beat its own baseline in 3 of 72 cells (4%), and all three are degenerate:**
+
+| cell | baseline | with trail | why it does not count |
+|---|---|---|---|
+| M30 breakout 2025.06-12 @2.0 | +$29,746 | +$30,552 | fired 4 times in 245 trades |
+| H1 breakout 2026.06-08 @2.0 | +$37,725 | +$38,281 | fired 3 times in 53 trades |
+| H1 pullback 2026.01-05 @0.25 | -$21,912 | -$17,309 | loses less; PF 0.00 either way |
+
+Everywhere else it is worse, often catastrophically. The sharpest cell:
+
+| H1 breakout 2026.06-08 | net | PF | trades | exits |
+|---|---|---|---|---|
+| giveback OFF | **+$37,725** | **1.54** | 53 | band 25, stop 28 |
+| gate 0.25% | **-$70,636** | **0.10** | 105 | give 71, stop 34 |
+| gate 0.50% | -$79,822 | 0.21 | 91 | give 43, stop 45 |
+| gate 1.00% | -$33,411 | 0.61 | 71 | give 23, stop 36 |
+| gate 2.00% | +$38,281 | 1.55 | 53 | give 3, stop 28 |
+
+**The cause is arithmetic, not overfitting.** At `frac = 0.5` a trail armed at
+`a` first becomes able to fire at `a/2` of profit, while the flat stop still lets
+a loser run to `stop_loss_pct`. At the 0.25% gate against a 0.5% stop that is a
+**1:4 reward-to-risk floor on every trade the trail touches**, and no entry rule
+survives it. This is why the results are monotone in the gate: the wider it is
+set, the closer to baseline it lands, because it fires less. The last row above
+is the whole finding in one line - **the trail's best measured behaviour is not
+firing at all**, and a rule whose optimum is inaction is not a rule.
+
+**A give-back trail is only coherent when it arms well above the stop distance.**
+That is the shape any future attempt has to start from. This data says that even
+at 2% - four times the stop - it is indistinguishable from doing nothing, because
+the middle band had already taken the exit.
+
+**What is kept, and why.** `giveback_frac` defaults to 0 on every strategy and
+`InpGivebackFrac` to 0.0 on every expert. The parameter is kept rather than
+deleted, for the same reason `long_only` was kept after D-153: the next person to
+notice that this strategy hands its winners back should find the falsification
+attached to the fix instead of rediscovering it. The shared implementation is
+correct, tested (`tests/test_protective_exits.py`, new - the orchestration had no
+direct coverage before this) and available to any strategy that can argue for it.
+
+**D-152 and D-153 are untouched.** Both scripts pin `giveback_frac=Decimal("0")`
+explicitly rather than inheriting a default, so neither entry's numbers describe
+a different strategy than the one it scored.
+
+**Four strategies measured across D-151 to D-154, none tradable, and now one
+trade-management rule rejected too.** The pattern holds: the thing that was
+obviously going to help did not, and the twenty minutes of measurement that
+established it is cheaper than the demo account that would have.
