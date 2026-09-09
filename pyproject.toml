@@ -208,6 +208,8 @@ ignore = [
 "scripts/measure_ema_bb_btcusd.py" = ["T201"]
 # And the stop-distance sweep behind the TightStop set.
 "scripts/measure_ema_bb_stop_xauusd.py" = ["T201"]
+# And the account-history review: a report written to stdout for a human.
+"scripts/inspect_mt5_history.py" = ["T201"]
 # And `ask_nemotron.py`, which is a REPL: the printed stream IS the interface,
 # there is no engine here to keep clean, and routing a chat reply through a
 # structlog line would make it unreadable.
