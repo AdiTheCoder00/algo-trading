@@ -167,8 +167,13 @@ this gives back a slice of the *profit*, so it scales with how well the trade we
 are separate rules and either, both, or neither may be on. Entering `50` meaning "50%" is
 rejected at init rather than clamped.
 
-**It defaults to 0 — off — on every expert, and that is a measured decision (D-154), not
-caution.**
+**It is ON at 0.5 on `GoldEmaBollinger`, by request and against D-154**, with
+`InpTrailActivationPct` raised from 0.25 to 2.0 in the same change — the difference between
+the gate that measured as destructive and the one that measured as inert. At a 2% gate the
+trail fired three times in fifty-three trades in the sharpest cell and finished $556 from
+baseline; on an M1 chart it will essentially never arm, since 2% of gold near 4,400 is about
+$88 and those round trips last minutes. It stays **0 — off — on every other expert.**
+D-154 below is not withdrawn; the default simply no longer follows it.
 `GoldFairValueGap` and `GoldIntradayScalper` have no such input at all: neither calls
 `ProtectiveExitsCheck` (the scalper runs its own R-multiple ATR trail), so one there would
 be dead.

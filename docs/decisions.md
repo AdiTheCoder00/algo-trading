@@ -4047,3 +4047,13 @@ a different strategy than the one it scored.
 trade-management rule rejected too.** The pattern holds: the thing that was
 obviously going to help did not, and the twenty minutes of measurement that
 established it is cheaper than the demo account that would have.
+
+**Addendum, same day.** The default was subsequently changed on request:
+`giveback_frac` / `InpGivebackFrac` is now **0.5 — on — on `EmaBollinger` and
+`GoldEmaBollinger` only**, with the activation gate raised from 0.25% to **2%**
+in the same change. That pairing is the whole of it: 0.25% is the gate this
+entry measured as destructive (PF 0.10 in the sharpest cell), 2% is the gate at
+which the trail is close to inert - three fires in fifty-three trades, $556 from
+baseline. Nothing above is withdrawn or re-run; the finding stands and the
+default no longer follows it. Recorded here rather than left as a silent diff,
+so a later reader does not infer that D-154 concluded the other way.

@@ -96,7 +96,21 @@
 //| rejected at init rather than clamped, because it would otherwise   |
 //| behave as a trail that exits at cost with nothing saying why.      |
 //|                                                                   |
-//| ---- IT DEFAULTS TO 0, A MEASURED DECISION - D-154 ----            |
+//| ---- IT IS ON AT 0.5, BY REQUEST AND AGAINST THE MEASUREMENT ----  |
+//| The default was 0. It was turned on deliberately after D-154 was  |
+//| reported, with the activation gate raised from 0.25% to 2% at the |
+//| same time - which is the difference between the setting that       |
+//| measured as destructive and the one that measured as inert. Read   |
+//| the numbers below as what to expect, not as a recommendation.      |
+//|                                                                   |
+//| AT A 2% GATE THIS TRAIL BARELY ACTS. In the sharpest cell it fired |
+//| three times in fifty-three trades and finished $556 from baseline  |
+//| - noise. On an M1 chart it will essentially never arm: 2% of gold  |
+//| near 4,400 is about $88, and the M1 round trips this expert is     |
+//| currently taking last six to twelve minutes and a few dollars. The |
+//| middle band will keep taking the exits.                           |
+//|                                                                   |
+//| ---- WHAT D-154 MEASURED, WHICH STILL STANDS ----                  |
 //| scripts/measure_ema_bb_giveback_xauusd.py ran both modes across    |
 //| three timeframes, three windows and four activation gates, each    |
 //| cell against its own giveback-off baseline. The trail beat that    |
@@ -184,9 +198,9 @@ input int    InpSeedBars         = 1000;    // Closed bars replayed on init to s
 
 input group "--- Protective exits (percent of price, NOT points) ---"
 input double InpStopLossPct      = 0.5;     // Flat stop, % of entry. 0 disables
-input double InpTrailActivationPct = 0.25;  // Profit % at which BOTH trails arm. INERT while both trails are 0 - and a very tight gate if you enable one
+input double InpTrailActivationPct = 2.0;   // Profit % at which BOTH trails arm. ~$88 on gold near 4,400
 input double InpTrailPct         = 0.0;     // Trail distance, % behind peak. 0 disables
-input double InpGivebackFrac     = 0.0;     // Give-back trail: FRACTION of peak profit surrendered. MEASURED AND REJECTED - see the header. 0 disables
+input double InpGivebackFrac     = 0.5;     // Give-back trail: FRACTION of peak profit surrendered. ON by request, against D-154 - see the header. 0 disables
 
 input group "--- Execution ---"
 input double InpLots             = 0.05;    // Volume in MT5 LOTS (1.00 = 100 oz)

@@ -78,10 +78,18 @@ monotone in the gate for exactly that reason: the wider it is set, the closer to
 baseline it lands, because it fires less. **Its best measured behaviour is not
 firing at all**, which is the clearest possible statement that it should not.
 
-So it defaults to 0 - off - and the parameter is kept rather than deleted, for
-the reason `long_only` above it is kept: the next person to notice that this
-strategy hands its winners back should find the falsification attached to the
-fix, instead of rediscovering it.
+**It is nevertheless on by default, at 0.5, and that was a deliberate call made
+after the above was reported** - with `trail_activation_pct` raised from 0.25 to
+2 in the same change. That pairing matters: 0.25 is the gate that measured as
+destructive, 2 is the gate at which the trail is close to inert, firing three
+times in fifty-three trades in the sharpest cell and finishing $556 from
+baseline. The measurement above is not withdrawn; the default simply no longer
+follows it, and this paragraph exists so the next reader sees both facts
+together rather than inferring that D-154 came out the other way.
+
+The parameter is kept regardless of its default, for the reason `long_only`
+above it is kept: whoever next notices that this strategy hands its winners back
+should find the falsification attached to the fix.
 
 A give-back trail is only coherent when it arms well ABOVE the stop distance.
 That is the shape any future attempt has to start from, and this data says even
@@ -159,9 +167,9 @@ class EmaBollinger(Strategy):
         bb_period: int = 20,
         bb_stdev: float = 2.0,
         stop_loss_pct: Decimal = Decimal("0.5"),
-        trail_activation_pct: Decimal = Decimal("0.25"),
+        trail_activation_pct: Decimal = Decimal("2"),
         trail_pct: Decimal = Decimal("0"),
-        giveback_frac: Decimal = Decimal("0"),
+        giveback_frac: Decimal = Decimal("0.5"),
         config_hash: str = "",
     ) -> None:
         super().__init__()
