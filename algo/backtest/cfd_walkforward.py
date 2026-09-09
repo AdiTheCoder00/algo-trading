@@ -182,6 +182,11 @@ def run_cfd_walk_forward(
         stop = Decimal(params.get("stop_loss_pct", "0"))
         trail_activation = Decimal(params.get("trail_activation_pct", "2"))
         trail = Decimal(params.get("trail_pct", "0"))
+        # Read from the parameter set rather than added to this function's
+        # signature: a `factory` study that wants the give-back trail puts it in
+        # `base` and its factory reads the same key, so the level the strategy
+        # exits on and the level the runner prices that exit at cannot disagree.
+        giveback = Decimal(params.get("giveback_frac", "0"))
         lookback = int(params.get("lookback", "20"))
 
         result = run_cfd_backtest(
@@ -203,6 +208,7 @@ def run_cfd_walk_forward(
             stop_loss_pct=stop,
             trail_activation_pct=trail_activation,
             trail_pct=trail,
+            giveback_frac=giveback,
             lots=lots,
             starting_equity=starting_equity,
         )

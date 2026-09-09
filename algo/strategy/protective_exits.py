@@ -16,12 +16,30 @@ module deletes the second copy.
 
 ## The order is fixed here, not per-strategy
 
-The flat stop is tested before the trail, so a bar that crosses both is
+The flat stop is tested before the trails, so a bar that crosses both is
 reported as the stop - the same pessimistic reading `algo/risk/exits.py`
 already states for the MCX path ("if a bar moved far enough to touch both ...
-the stop went first"). The trail's peak advances *before* either test, because
+the stop went first"). The trail's peak advances *before* any test, because
 a real trailing-stop order moves the instant a new best price prints; see
 `trailing_profit_stop.py`'s docstring on that convention.
+
+## The two profit trails are ordered by level, not by a fixed precedence
+
+The flat stop wins ties by fiat because a bar's OHLC genuinely does not say
+whether its high or its low printed first, so something has to break the tie and
+pessimism is the safe direction.
+
+Between the percentage trail and the give-back trail there is no such ambiguity.
+Both are armed only once the peak has moved, both therefore sit at or above
+entry for a long, and price reaching either of them is price *retreating from
+the peak* - which passes through the nearer level first, whichever that is. So
+when both fire on one bar the nearer one is reported: it is the one that
+actually filled, and it is the one `algo/backtest/cfd_runner.py` will price the
+exit at. A fixed precedence would let the reported kind name one level while the
+fill came from the other, and every P&L figure downstream would inherit that.
+
+Which of the two is nearer depends on the parameters, not on the code, which is
+why this is a comparison rather than an `if` in a fixed order.
 
 ## What the caller still owns
 
@@ -46,12 +64,20 @@ from algo.strategy.price_stop import stop_touched
 from algo.strategy.trailing_profit_stop import (
     TrailState,
     advance_trail,
+    giveback_level,
+    giveback_touched,
     start_trail,
+    trail_level,
     trail_touched,
 )
 
-ExitKind = Literal["stop", "trail"]
+ExitKind = Literal["stop", "trail", "giveback"]
 """Which protective exit fired.
+
+`"giveback"` is the trail sized as a fraction of the banked move rather than as
+a percentage of the peak price; the two are separate kinds rather than one
+`"trail"` with a flag because they fill at different levels, and a consumer
+pricing an exit has to know which level to use.
 
 Travels into `Signal.context["exit"]`, so a consumer can branch on it without
 parsing the human-readable `reason`. `scripts/measure_macd_xauusd.py` needs
@@ -85,6 +111,7 @@ class ProtectiveExits:
         stop_loss_pct: Decimal,
         trail_activation_pct: Decimal,
         trail_pct: Decimal,
+        giveback_frac: Decimal = Decimal("0"),
     ) -> None:
         if stop_loss_pct < 0:
             raise DomainError(f"stop_loss_pct cannot be negative, got {stop_loss_pct}")
@@ -94,22 +121,43 @@ class ProtectiveExits:
             )
         if trail_pct < 0:
             raise DomainError(f"trail_pct cannot be negative, got {trail_pct}")
+        if giveback_frac < 0:
+            raise DomainError(f"giveback_frac cannot be negative, got {giveback_frac}")
+        if giveback_frac > 1:
+            # A fraction above 1 would surrender more than the entire banked
+            # move. `giveback_level`'s clamp would silently hold the level at
+            # entry, so the position would still never close worse than a
+            # scratch - but every value above 1 would behave identically to 1,
+            # and a caller who typed 50 meaning "50%" would get a trail that
+            # exits at cost and no indication of why. Rejected instead.
+            raise DomainError(
+                f"giveback_frac is a fraction of the banked move, not a percentage - "
+                f"pass 0.5 for half, not 50. Got {giveback_frac}"
+            )
         self._stop_loss_pct = stop_loss_pct
         self._trail_activation_pct = trail_activation_pct
         self._trail_pct = trail_pct
+        self._giveback_frac = giveback_frac
         self._trail: TrailState | None = None
 
     def params(self) -> dict[str, str]:
-        """The three tunables, in the exact keys both strategies already publish.
+        """The four tunables, in the exact keys both strategies already publish.
 
         These feed `Strategy.params_hash()` and from there every `signal_id`, so
         renaming a key here silently renumbers history. Merged into each
         strategy's own `params()` rather than replacing it.
+
+        `giveback_frac` was added after the first three, which does renumber the
+        ids of every strategy that carries these exits - unavoidably so, and
+        correctly: two configurations that exit at different levels must not
+        share a `signal_id`, which is exactly what omitting the key to preserve
+        the old hashes would have produced.
         """
         return {
             "stop_loss_pct": str(self._stop_loss_pct),
             "trail_activation_pct": str(self._trail_activation_pct),
             "trail_pct": str(self._trail_pct),
+            "giveback_frac": str(self._giveback_frac),
         }
 
     # ------------------------------------------------------------ persistence
@@ -193,7 +241,26 @@ class ProtectiveExits:
                 ),
             )
 
-        if trail_touched(self._trail, bar, self._trail_activation_pct, self._trail_pct):
+        hit_trail = trail_touched(
+            self._trail, bar, self._trail_activation_pct, self._trail_pct
+        )
+        hit_giveback = giveback_touched(
+            self._trail, bar, self._trail_activation_pct, self._giveback_frac
+        )
+
+        if hit_trail and hit_giveback:
+            # Both armed trails sit at or above entry for a long, and price only
+            # reaches either by retreating from the peak - so the nearer level
+            # filled first. Report that one; see the module docstring on why
+            # this is a comparison and not a fixed precedence.
+            pct_level = trail_level(self._trail, self._trail_pct)
+            give_level = giveback_level(self._trail, self._giveback_frac)
+            hit_trail = (
+                pct_level >= give_level if side is Side.BUY else pct_level <= give_level
+            )
+            hit_giveback = not hit_trail
+
+        if hit_trail:
             return ExitDecision(
                 kind="trail",
                 side=closing_side,
@@ -202,6 +269,20 @@ class ProtectiveExits:
                     f"{self._trail.peak:.2f} (armed at {self._trail_activation_pct}% "
                     f"profit) on a {held.side} position of {held.lots} lot(s), "
                     f"entry {held.average_price:.2f}"
+                ),
+            )
+
+        if hit_giveback:
+            return ExitDecision(
+                kind="giveback",
+                side=closing_side,
+                reason=(
+                    f"give-back stop: handed back {self._giveback_frac} of the move "
+                    f"banked from {held.average_price:.2f} to a peak of "
+                    f"{self._trail.peak:.2f}, closing at "
+                    f"{giveback_level(self._trail, self._giveback_frac):.2f} "
+                    f"(armed at {self._trail_activation_pct}% profit) on a "
+                    f"{held.side} position of {held.lots} lot(s)"
                 ),
             )
 

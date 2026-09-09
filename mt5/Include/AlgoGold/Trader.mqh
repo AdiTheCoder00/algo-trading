@@ -562,7 +562,8 @@ void RebuildTrail(TrailState &st,const string symbol,const ENUM_TIMEFRAMES tf,
 //| Shared preflight. Returns false with a stated reason.             |
 //+------------------------------------------------------------------+
 bool GoldPreflight(const long magic,const double stopPct,
-                   const double activationPct,const double trailPct)
+                   const double activationPct,const double trailPct,
+                   const double givebackFrac=0.0)
   {
    if(magic==ALGOGOLD_PYTHON_MAGIC)
      {
@@ -584,6 +585,22 @@ bool GoldPreflight(const long magic,const double stopPct,
    if(trailPct<0.0)
      {
       Print("FATAL: TrailPct cannot be negative");
+      return false;
+     }
+   if(givebackFrac<0.0)
+     {
+      Print("FATAL: GivebackFrac cannot be negative");
+      return false;
+     }
+   if(givebackFrac>1.0)
+     {
+      //--- Above 1.0 would surrender more than the entire banked move.
+      //--- GivebackLevel's clamp would silently hold the level at entry, so
+      //--- every value above 1.0 would behave identically to 1.0 - and someone
+      //--- who typed 50 meaning "50%" would get a trail that exits at cost with
+      //--- nothing in the log to say why. Rejected instead of clamped quietly.
+      PrintFormat("FATAL: GivebackFrac is a FRACTION of the banked move, not a percent - "
+                  "enter 0.5 for half, not 50. Got %.4f",givebackFrac);
       return false;
      }
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))

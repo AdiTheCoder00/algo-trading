@@ -128,6 +128,12 @@ def run_cell(bars: list[Bar], tf: Timeframe, mode: str) -> CfdResult:
             stop_loss_pct=STOP_LOSS_PCT,
             trail_activation_pct=TRAIL_ACTIVATION_PCT,
             trail_pct=TRAIL_PCT,
+            # Pinned OFF. D-152 and D-153 were run before the give-back
+            # trail existed, and `EmaBollinger` now defaults it to 0.5 - so
+            # leaving this implicit would silently re-run a different strategy
+            # under the decision entries' names. A study of that trail is a new
+            # entry, not an edit to these.
+            giveback_frac=Decimal("0"),
         ),
         stop_loss_pct=STOP_LOSS_PCT,
         trail_activation_pct=TRAIL_ACTIVATION_PCT,

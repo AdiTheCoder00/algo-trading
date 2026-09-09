@@ -50,6 +50,7 @@ from algo.strategy.price_stop import stop_fill_price
 from algo.strategy.trailing_profit_stop import (
     TrailState,
     advance_trail,
+    giveback_fill_price,
     start_trail,
     trail_fill_price,
 )
@@ -183,6 +184,7 @@ def run_cfd_backtest(
     stop_loss_pct: Decimal,
     trail_activation_pct: Decimal,
     trail_pct: Decimal,
+    giveback_frac: Decimal = Decimal("0"),
     lots: int = 100,
     starting_equity: Decimal = Decimal("100000"),
     costs: CfdCosts | None = None,
@@ -197,6 +199,11 @@ def run_cfd_backtest(
     strategy, because this function computes the fill price for a stop-triggered
     exit and must use the same level the strategy triggered on. A caller that
     let those disagree would report a fill at a level nothing crossed.
+
+    `giveback_frac` is here for that same reason and defaults to off, so every
+    study written before the give-back trail existed keeps reporting exactly
+    what it reported. A caller that enables it on the strategy must pass the
+    same fraction here or the give-back exits will be priced at the bar close.
     """
     charged = costs or CfdCosts()
     calendar = ForexCalendar()
@@ -275,12 +282,16 @@ def run_cfd_backtest(
             closing = signal.action is SignalAction.CLOSE
             is_stop = closing and signal.reason.startswith("stop loss")
             is_trail = closing and signal.reason.startswith("trailing stop")
+            is_giveback = closing and signal.reason.startswith("give-back stop")
 
             if is_stop and held is not None:
                 fill = stop_fill_price(bar, held, stop_loss_pct)
                 extra_spread = Decimal("0")
             elif is_trail and trail_state is not None:
                 fill = trail_fill_price(trail_state, bar, trail_pct)
+                extra_spread = Decimal("0")
+            elif is_giveback and trail_state is not None:
+                fill = giveback_fill_price(trail_state, bar, giveback_frac)
                 extra_spread = Decimal("0")
             else:
                 # Measured at this bar's own instant when tick history supplied

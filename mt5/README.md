@@ -130,6 +130,38 @@ The scalper's inputs have no Python counterpart and are documented
 On XAUUSD near 4,600 a 0.5% stop is about $23, i.e. about 2,300 points. Do not read these
 as pips.
 
+`InpGivebackFrac` is the exception: it is a **fraction of the banked move**, not a percent
+of anything. At 0.5 the position closes once it has handed back half of the best
+unrealised profit it ever showed — the level sits midway between entry and peak and rises
+with the peak. `InpTrailPct` gives back a slice of the *price*, so it scales with gold;
+this gives back a slice of the *profit*, so it scales with how well the trade went. They
+are separate rules and either, both, or neither may be on. Entering `50` meaning "50%" is
+rejected at init rather than clamped.
+
+**It defaults to 0 — off — on every expert, and that is a measured decision (D-154), not
+caution.**
+`GoldFairValueGap` and `GoldIntradayScalper` have no such input at all: neither calls
+`ProtectiveExitsCheck` (the scalper runs its own R-multiple ATR trail), so one there would
+be dead.
+
+`scripts/measure_ema_bb_giveback_xauusd.py` ran `EmaBollinger` in both modes across three
+timeframes, three windows and four activation gates, each cell against its own
+giveback-off baseline. The trail beat that baseline in **3 of 72 cells**, and all three are
+degenerate — two are +$556 and +$806 where it fired three or four times out of 245 trades,
+and the third merely loses less (−$17,309 against −$21,912) where both readings are heavy
+losses. Everywhere else it is worse, often badly: H1 breakout over 2026.06-08 goes from
+**+$37,725 at PF 1.54** to **−$70,636 at PF 0.10**.
+
+The cause is arithmetic rather than fit. At `frac` 0.5 a trail armed at `a` first fires at
+`a/2` of profit while the flat stop still lets a loser run to `InpStopLossPct` — at a 0.25%
+gate against a 0.5% stop, a 1:4 reward-to-risk floor on every trade it touches. The results
+are monotone in the gate for that reason: the wider it is set the closer to baseline it
+lands, because it fires less. **Its best measured behaviour is not firing at all.**
+
+The input is kept rather than removed so the falsification stays attached to the fix. A
+give-back trail is only coherent when it arms well *above* the stop distance — and this
+data says even then the middle band was already the better exit.
+
 ### Execution
 
 `InpLots` is in **MT5 lots**, which is what the terminal shows. The Python engine sizes in
@@ -197,10 +229,18 @@ than by approximation. The bar-close check is kept as a backstop for the bar whe
 stop could not be placed (freeze band, rejected modify, a position adopted at init); it
 closes at market instead.
 
-One SL slot has to express two levels, so it carries whichever is nearer to price. Once
-armed, the trail is always the nearer one — the cost-to-cost clamp puts it at or above
-entry for a long, while the flat stop is always below — which is the same ordering
-`ProtectiveExitsCheck` enforces.
+One SL slot has to express up to three levels, so it carries whichever is nearest to
+price. Once armed, a trail is always nearer than the flat stop — the cost-to-cost clamp
+puts it at or above entry for a long, while the flat stop is always below — which is the
+same ordering `ProtectiveExitsCheck` enforces.
+
+Between the two trails the ordering is by level and not by precedence. The flat stop wins
+ties by fiat, because a bar's OHLC does not say whether its high or its low printed first
+and pessimism is the safe tie-break. The trails have no such ambiguity: both sit at or
+above entry once armed, and price reaches either only by retreating from the peak, so it
+crosses the nearer one first. That is the one reported — and the reported kind is what
+`algo/backtest/cfd_runner.py` prices the exit from, so naming the wrong one would be a
+wrong P&L figure rather than a wrong label.
 
 **Hedging accounts are netted.** `positions_get()` returns an independent ticket per
 trade while both strategies reason about one signed net position, so tickets are

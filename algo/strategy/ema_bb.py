@@ -52,6 +52,41 @@ The EMA is stepped at the very top of `on_bar`, before the exit check and
 before the warmup gate, so a bar on which a stop fires still advances it. An
 indicator that skips bars is not the indicator it claims to be.
 
+## `giveback_frac` was added, measured, and switched back off
+
+Every exit this strategy had was a give-up: the flat stop, or the middle band.
+The percentage trail existed but shipped at `trail_pct = 0`, so a winner ran to
+the middle band and handed back whatever it had made on the way. `giveback_frac`
+was added to close that gap - it exits once the position has surrendered that
+fraction of the best unrealised profit it ever showed.
+
+**It was measured and it failed (D-154).**
+`scripts/measure_ema_bb_giveback_xauusd.py` ran both modes across three
+timeframes, three windows and four activation gates, each cell against its own
+`giveback_frac = 0` baseline. The trail beat that baseline in **3 of 72 cells**,
+and all three are degenerate: two are +$556 and +$806 in cells where it fired
+three or four times out of 245 trades, and the third merely loses less
+(-$17,309 against -$21,912) in a cell where both readings are heavy losses.
+Everywhere else it is worse, often catastrophically - H1 breakout over
+2026.06-08 goes from +$37,725 at PF 1.54 to **-$70,636 at PF 0.10**.
+
+The reason is arithmetic, not fit. With `frac = 0.5` a trail armed at `a` first
+becomes able to fire at `a/2` of profit, while the flat stop still lets a loser
+run to `stop_loss_pct`. At the 0.25% gate that is a 1:4 reward-to-risk floor on
+every trade the trail touches, and no entry rule survives it. The results are
+monotone in the gate for exactly that reason: the wider it is set, the closer to
+baseline it lands, because it fires less. **Its best measured behaviour is not
+firing at all**, which is the clearest possible statement that it should not.
+
+So it defaults to 0 - off - and the parameter is kept rather than deleted, for
+the reason `long_only` above it is kept: the next person to notice that this
+strategy hands its winners back should find the falsification attached to the
+fix, instead of rediscovering it.
+
+A give-back trail is only coherent when it arms well ABOVE the stop distance.
+That is the shape any future attempt has to start from, and this data says even
+then the middle band was already the better exit.
+
 ## Not registered in `strategy_for`, and now for a measured reason
 
 Deliberately. D-151 is the entry recording an expert built from published rules
@@ -124,8 +159,9 @@ class EmaBollinger(Strategy):
         bb_period: int = 20,
         bb_stdev: float = 2.0,
         stop_loss_pct: Decimal = Decimal("0.5"),
-        trail_activation_pct: Decimal = Decimal("2"),
+        trail_activation_pct: Decimal = Decimal("0.25"),
         trail_pct: Decimal = Decimal("0"),
+        giveback_frac: Decimal = Decimal("0"),
         config_hash: str = "",
     ) -> None:
         super().__init__()
@@ -149,6 +185,7 @@ class EmaBollinger(Strategy):
             stop_loss_pct=stop_loss_pct,
             trail_activation_pct=trail_activation_pct,
             trail_pct=trail_pct,
+            giveback_frac=giveback_frac,
         )
         self._ema: float | None = None
         self._bars_seen = 0

@@ -12,8 +12,35 @@
 //|                                                                  |
 //| THE ORDER IS FIXED HERE, NOT PER-EXPERT                          |
 //| Advance the trail peak first, then test the flat stop, then test |
-//| the trail. A bar that crosses both is reported as the stop - the |
+//| the trails. A bar that crosses both is reported as the stop - the|
 //| pessimistic reading algo/risk/exits.py already states.           |
+//|                                                                  |
+//| TWO PROFIT TRAILS, ORDERED BY LEVEL AND NOT BY PRECEDENCE        |
+//| trailPct gives back a percentage of the PEAK PRICE. givebackFrac |
+//| gives back a fraction of the BANKED MOVE: at 0.5 the level sits  |
+//| exactly halfway between entry and peak, so the position closes   |
+//| having handed back half of the best unrealised profit it ever    |
+//| showed. Different rules, not one rule in two units - the first   |
+//| scales with the instrument, the second with how well the trade   |
+//| went - so both exist and a caller may run either or both.        |
+//|                                                                  |
+//| The flat stop wins ties by fiat, because a bar OHLC does not say |
+//| whether its high or its low printed first. Between the two       |
+//| trails there is no such ambiguity: both sit at or above entry    |
+//| for a long once armed, and price reaches either only by          |
+//| retreating from the peak - so it crosses the NEARER one first.   |
+//| That is the one reported, and the one ProtectiveStopPrice places.|
+//| Which is nearer depends on the inputs, so it is a comparison     |
+//| rather than a fixed order.                                       |
+//|                                                                  |
+//| givebackFrac IS A FRACTION, NOT A PERCENT. 0.5 means half. It is |
+//| dimensionless on purpose, so nobody reads it as "0.5% behind the |
+//| peak" - which is what the same digits mean in trailPct, one      |
+//| argument away.                                                   |
+//|                                                                  |
+//| Both new arguments default to 0.0, so the experts that took this |
+//| module before the give-back trail existed compile and behave     |
+//| exactly as they did.                                             |
 //|                                                                  |
 //| PERCENTAGES, NOT POINTS                                          |
 //| Every level here is a percentage of a price, matching the Python |
@@ -29,9 +56,10 @@
 //--- to parse a human-readable reason string to learn what happened.
 enum ExitKind
   {
-   EXIT_NONE  = 0,
-   EXIT_STOP  = 1,   // the flat, entry-anchored percentage stop
-   EXIT_TRAIL = 2    // the armed trailing profit stop
+   EXIT_NONE     = 0,
+   EXIT_STOP     = 1,   // the flat, entry-anchored percentage stop
+   EXIT_TRAIL    = 2,   // the armed trailing profit stop, % of the peak PRICE
+   EXIT_GIVEBACK = 3    // the armed give-back trail, fraction of the BANKED MOVE
   };
 
 //--- The running state a trailing stop needs: which side, what it entered at,
@@ -141,6 +169,66 @@ bool TrailTouched(const TrailState &st,const double high,const double low,
   }
 
 //+------------------------------------------------------------------+
+//| Where the give-back trail sits: givebackFrac of the BANKED MOVE    |
+//| behind the peak, clamped so it never sits worse than entry.        |
+//|                                                                    |
+//| For a long: peak - frac*(peak - entry), which is the same number as |
+//| entry + (1-frac)*(peak - entry). At frac = 0.5 those readings - give |
+//| back half, keep half - coincide, and at every other value they do   |
+//| not. This argument is the GIVE-BACK, so 0.25 surrenders a quarter   |
+//| of the banked move and locks in three quarters of it.               |
+//|                                                                    |
+//| The clamp never actually binds for 0 <= frac <= 1; it is applied    |
+//| anyway so the cost-to-cost invariant holds here for the same reason |
+//| it holds in TrailLevel, and not because the caller passed a         |
+//| fraction that happened to be in range.                              |
+//+------------------------------------------------------------------+
+double GivebackLevel(const TrailState &st,const double givebackFrac)
+  {
+   const double banked = (st.side==POSITION_TYPE_BUY)
+                         ? (st.peak - st.entry)
+                         : (st.entry - st.peak);
+   const double giveBack = banked*givebackFrac;
+   if(st.side==POSITION_TYPE_BUY)
+      return MathMax(st.peak - giveBack, st.entry);
+   return MathMin(st.peak + giveBack, st.entry);
+  }
+
+//+------------------------------------------------------------------+
+//| Whether the give-back trail is armed AND this bar range crossed it.|
+//|                                                                    |
+//| Arms on the SAME activationPct gate as the percentage trail, and   |
+//| that gate is not optional: without one, a position a dollar into   |
+//| profit that gives back fifty cents has satisfied "handed back half |
+//| its peak profit" and would close on its first bar of noise. The    |
+//| fraction says how much of a banked move to surrender; activationPct |
+//| says how much has to be banked before the question is worth asking. |
+//|                                                                    |
+//| givebackFrac <= 0 means no give-back trail is configured; always    |
+//| false, mirroring TrailTouched so a caller need not branch first.    |
+//+------------------------------------------------------------------+
+bool GivebackTouched(const TrailState &st,const double high,const double low,
+                     const double activationPct,const double givebackFrac)
+  {
+   if(givebackFrac<=0.0 || !TrailIsArmed(st,activationPct))
+      return false;
+   const double level = GivebackLevel(st,givebackFrac);
+   if(st.side==POSITION_TYPE_BUY)
+      return low <= level;
+   return high >= level;
+  }
+
+//+------------------------------------------------------------------+
+//| Whichever of two protective levels sits NEARER to price for `side`.|
+//| For a long that is the higher one - price falling from the peak    |
+//| reaches it first.                                                  |
+//+------------------------------------------------------------------+
+double NearerLevel(const ENUM_POSITION_TYPE side,const double a,const double b)
+  {
+   return (side==POSITION_TYPE_BUY) ? MathMax(a,b) : MathMin(a,b);
+  }
+
+//+------------------------------------------------------------------+
 //| The absolute price at which a stopPct adverse move from entry sits.|
 //| A long stop sits below entry, a short one above it - the move is    |
 //| against the position, not against the market own direction.         |
@@ -191,7 +279,8 @@ ExitKind ProtectiveExitsCheck(TrailState &st,
                               const double             low,
                               const double             stopPct,
                               const double             activationPct,
-                              const double             trailPct)
+                              const double             trailPct,
+                              const double             givebackFrac=0.0)
   {
    if(!hasPosition)
      {
@@ -212,8 +301,25 @@ ExitKind ProtectiveExitsCheck(TrailState &st,
    if(StopTouched(high,low,entry,side,stopPct))
       return EXIT_STOP;
 
-   if(TrailTouched(st,high,low,activationPct,trailPct))
+   bool hitTrail    = TrailTouched(st,high,low,activationPct,trailPct);
+   bool hitGiveback = GivebackTouched(st,high,low,activationPct,givebackFrac);
+
+//--- Both armed trails sit at or above entry for a long, and price only
+//--- reaches either by retreating from the peak - so the NEARER level filled
+//--- first. Report that one. See the header on why this is a comparison and
+//--- not a fixed precedence.
+   if(hitTrail && hitGiveback)
+     {
+      const double pctLevel  = TrailLevel(st,trailPct);
+      const double giveLevel = GivebackLevel(st,givebackFrac);
+      hitTrail    = (NearerLevel(side,pctLevel,giveLevel) == pctLevel);
+      hitGiveback = !hitTrail;
+     }
+
+   if(hitTrail)
       return EXIT_TRAIL;
+   if(hitGiveback)
+      return EXIT_GIVEBACK;
 
    return EXIT_NONE;
   }
@@ -226,11 +332,13 @@ ExitKind ProtectiveExitsCheck(TrailState &st,
 //| can simply place that order, so the two agree by construction       |
 //| rather than by approximation.                                      |
 //|                                                                    |
-//| One SL slot, two levels: take whichever is nearer to price. For a   |
-//| long the armed trail always sits at or above entry (the cost-to-    |
-//| cost clamp) and the flat stop always below it, so an armed trail is |
-//| always the nearer one - which is also the ordering                  |
-//| ProtectiveExitsCheck enforces.                                     |
+//| One SL slot, up to three levels: take whichever is nearest to      |
+//| price. For a long both armed trails sit at or above entry (the      |
+//| cost-to-cost clamp) and the flat stop always below it, so an armed  |
+//| trail is always nearer than the flat stop - which is also the       |
+//| ordering ProtectiveExitsCheck enforces. Between the two trails the  |
+//| nearer one is likewise the one that fills first, and the same       |
+//| comparison picks it in both functions.                              |
 //|                                                                    |
 //| Returns 0.0 when no protective exit is configured, meaning "no SL". |
 //+------------------------------------------------------------------+
@@ -239,22 +347,40 @@ double ProtectiveStopPrice(const TrailState &st,
                            const double entry,
                            const double stopPct,
                            const double activationPct,
-                           const double trailPct)
+                           const double trailPct,
+                           const double givebackFrac=0.0)
   {
-   const bool haveStop  = (stopPct>0.0);
-   const bool haveTrail = (trailPct>0.0 && TrailIsArmed(st,activationPct));
+   const bool armed        = TrailIsArmed(st,activationPct);
+   const bool haveStop     = (stopPct>0.0);
+   const bool haveTrail    = (trailPct>0.0 && armed);
+   const bool haveGiveback = (givebackFrac>0.0 && armed);
 
-   if(!haveStop && !haveTrail)
+   if(!haveStop && !haveTrail && !haveGiveback)
       return 0.0;
-   if(!haveTrail)
-      return StopLossLevel(entry,side,stopPct);
 
-   const double trail = TrailLevel(st,trailPct);
-   if(!haveStop)
-      return trail;
-
-   const double flat = StopLossLevel(entry,side,stopPct);
-   return (side==POSITION_TYPE_BUY) ? MathMax(flat,trail) : MathMin(flat,trail);
+//--- Fold the configured levels together, keeping the nearest. Written as a
+//--- fold rather than as a branch per combination so adding a fourth level
+//--- later cannot reintroduce a case nobody covered.
+   double level = 0.0;
+   bool   have  = false;
+   if(haveStop)
+     {
+      level = StopLossLevel(entry,side,stopPct);
+      have  = true;
+     }
+   if(haveTrail)
+     {
+      const double t = TrailLevel(st,trailPct);
+      level = have ? NearerLevel(side,level,t) : t;
+      have  = true;
+     }
+   if(haveGiveback)
+     {
+      const double g = GivebackLevel(st,givebackFrac);
+      level = have ? NearerLevel(side,level,g) : g;
+      have  = true;
+     }
+   return level;
   }
 
 //+------------------------------------------------------------------+
@@ -266,6 +392,8 @@ string ExitKindName(const ExitKind kind)
       return "stop loss";
    if(kind==EXIT_TRAIL)
       return "trailing stop";
+   if(kind==EXIT_GIVEBACK)
+      return "give-back stop";
    return "none";
   }
 
