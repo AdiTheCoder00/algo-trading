@@ -17,7 +17,7 @@ import random
 import pytest
 
 from algo.core.errors import DomainError
-from algo.pricing.indicators import Macd, bollinger, ema, macd, warmup_bars
+from algo.pricing.indicators import Macd, bollinger, ema, fib_pivots, macd, warmup_bars
 
 pd = pytest.importorskip("pandas")
 
@@ -260,3 +260,56 @@ class TestBollinger:
     def test_it_rejects_a_non_positive_width(self) -> None:
         with pytest.raises(DomainError, match="must be positive"):
             bollinger([1.0, 2.0, 3.0], period=2, num_stdev=0.0)
+
+
+class TestFibPivots:
+    """The Fibonacci type of TradingView's "Pivot Points Standard".
+
+    The reference numbers are computed by hand from the published formula
+    rather than copied from a chart: `P = (H + L + C) / 3`, then
+    `P +/- ratio * (H - L)` for 0.382, 0.618 and 1.0. A round 100-point range
+    makes each ratio readable in the expected value.
+    """
+
+    def test_the_levels_match_the_published_formula(self) -> None:
+        pivots = fib_pivots(high=4100.0, low=4000.0, close=4060.0)
+        assert pivots.p == pytest.approx(4053.3333333)
+        assert pivots.r1 == pytest.approx(4053.3333333 + 38.2)
+        assert pivots.r2 == pytest.approx(4053.3333333 + 61.8)
+        assert pivots.r3 == pytest.approx(4053.3333333 + 100.0)
+        assert pivots.s1 == pytest.approx(4053.3333333 - 38.2)
+        assert pivots.s2 == pytest.approx(4053.3333333 - 61.8)
+        assert pivots.s3 == pytest.approx(4053.3333333 - 100.0)
+
+    def test_it_is_not_the_classic_type(self) -> None:
+        """The shared name is the trap: `R1` differs between the two types.
+
+        Classic (`Standard`) puts R1 at `2P - L`; Fibonacci puts it at
+        `P + 0.382 * (H - L)`. A study that reported one while the chart drew
+        the other would be describing lines nobody was looking at.
+        """
+        pivots = fib_pivots(high=4100.0, low=4000.0, close=4060.0)
+        classic_r1 = 2 * pivots.p - 4000.0
+        assert pivots.r1 != pytest.approx(classic_r1)
+
+    def test_the_levels_come_back_sorted_by_price(self) -> None:
+        pivots = fib_pivots(high=4100.0, low=4000.0, close=4060.0)
+        assert list(pivots.levels()) == sorted(pivots.levels())
+        assert len(pivots.levels()) == 7
+
+    def test_nearest_names_the_closest_line(self) -> None:
+        pivots = fib_pivots(high=4100.0, low=4000.0, close=4060.0)
+        assert pivots.nearest(pivots.r2 + 0.4) == ("R2", pivots.r2)
+        assert pivots.nearest(pivots.p)[0] == "P"
+
+    def test_a_zero_range_session_collapses_every_level_onto_the_pivot(self) -> None:
+        """Real data produces these - a holiday stub with one price. It is
+        arithmetically correct and is left to say so rather than raising."""
+        pivots = fib_pivots(high=4000.0, low=4000.0, close=4000.0)
+        assert set(pivots.levels()) == {4000.0}
+
+    def test_it_rejects_an_inconsistent_session(self) -> None:
+        with pytest.raises(DomainError, match="above pivot high"):
+            fib_pivots(high=4000.0, low=4100.0, close=4050.0)
+        with pytest.raises(DomainError, match="outside"):
+            fib_pivots(high=4100.0, low=4000.0, close=4200.0)
