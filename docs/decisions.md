@@ -4047,3 +4047,63 @@ a different strategy than the one it scored.
 trade-management rule rejected too.** The pattern holds: the thing that was
 obviously going to help did not, and the twenty minutes of measurement that
 established it is cheaper than the demo account that would have.
+
+---
+
+### D-155 - The pivot/EMA cascade is built and testable; it is not yet measured, and that is stated rather than papered over
+
+You described a fifth strategy: **Pivot Points Standard with the type set to
+Fibonacci**, plus the 10, 20, 50, 100 and 200 EMAs, on M5. A short is armed when
+a candle closes down through any pivot line and completes when price closes down
+through each EMA in turn - after, or on the same candle - with the close below
+the 200 EMA as the entry, and the exit on the first candle that closes back
+above both the 10 and the 20. Long is the mirror.
+
+**What was built.** `algo/pricing/indicators.py` gained `fib_pivots`, which is
+the Fibonacci *type* of the one indicator ("Pivot Points Standard" is one
+indicator with several types, and its R1 is not the classic R1 - the test pins
+that difference). `algo/strategy/pivot_ema_cascade.py` is the strategy, with
+19 tests in `tests/test_pivot_ema_cascade.py` and six more on the indicator.
+`scripts/measure_pivot_ema_cascade_xauusd.py` is the study.
+
+**The judgement calls, all of them stated in the module docstring:**
+
+| question the rule did not answer | what was chosen | why |
+|---|---|---|
+| cross on the wick or the close? | close (`prev_close > level >= close`) | the rule's own last step is "jahan close ho wahan entry"; half one definition and half another would be worse than either |
+| same-bar steps allowed? | yes | "uske baad **ya saath mein hi**" says so, and on M5 price does slice several EMAs in one bar |
+| what breaks a half-built cascade? | a new session, or a close back through the last level crossed | both structural. A "must complete within N bars" cap is a tunable with no prior, and D-131 is the standing entry on what those are worth here |
+| which session draws the pivots? | the previous one, and only if it was watched end to end | a run that joins mid-session has half a session's high; the first session is discarded and pivots appear at the second rollover |
+| warmup for a 200 EMA | 285 bars, not 200 | the same 5.8% seed residue `indicators.warmup_bars()` accepts. `seed_shed_bars` generalises the arithmetic `ema_bb.py` did by hand, and reproduces its 72 for a 50 EMA |
+
+**What is NOT claimed.** No number. The measurement script needs MetaTrader 5,
+which is Windows-only and is where the real XAUUSD bars live, so it has not been
+run - the environment this was written in has neither the terminal nor any
+market data reachable from it. The tests prove the code implements the rule as
+described; they are not evidence about the rule.
+
+That distinction is the whole content of this entry. D-151 through D-154 are
+four strategies built from published rules that sounded sound, measured, and
+rejected - three with no edge and one (D-152's breakout) real but beaten by
+holding gold. The base rate for "a rule that looks right on a chart" in this
+repo is currently 0 for 4, and a fifth that has not been measured is not
+evidence against that; it is an untested fifth.
+
+**The plumbing was exercised, on bars that are not market data.** A seeded
+random walk in the shape of M5 XAUUSD bars was pushed through
+`--csv`, purely to prove the path runs end to end: entries fire, trades close,
+costs are charged, the tables render. Its P&L figures are meaningless and are
+not recorded here or anywhere else. One structural thing it did surface, which
+is arithmetic rather than data: **every trade in every window exited on the
+10/20 EMA rule and not one on the flat stop.** That is what the geometry
+predicts - on M5 the 10 EMA sits a few dollars from the close while a 0.5% stop
+on gold is roughly twenty - so the stop this study configures is close to inert,
+and the exit rule is carrying the entire trade-management load. Worth confirming
+on real bars, because if it holds, `stop_loss_pct` is not the knob anyone should
+reach for here.
+
+So it is **not registered in `strategy_for`**, on D-151's precedent: registering
+makes a strategy reachable by the live loop and the dashboard, and that follows
+a measurement rather than precedes one. Run the script on the machine with the
+terminal; the entry that reports its numbers will be D-156, and it may well say
+the same thing the last four said.

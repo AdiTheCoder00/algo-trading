@@ -182,3 +182,72 @@ def bollinger(
         upper.append(mean + num_stdev * sd)
         lower.append(mean - num_stdev * sd)
     return Bollinger(middle=middle, upper=upper, lower=lower)
+
+
+@dataclass(frozen=True, slots=True)
+class FibPivots:
+    """One session's pivot levels, in the Fibonacci form.
+
+    Named for the setting rather than the author: TradingView's "Pivot Points
+    Standard" indicator offers several types under one name, and "Fibonacci" is
+    a *type* of that indicator, not a different one. The levels are the classic
+    pivot `P` with the ratios laid over the previous session's range instead of
+    the classic doubling formula.
+    """
+
+    p: float
+    r1: float
+    r2: float
+    r3: float
+    s1: float
+    s2: float
+    s3: float
+
+    def levels(self) -> tuple[float, ...]:
+        """Every line, ascending. Order is by price, not by name.
+
+        A strategy asking "did this bar cross a pivot line" does not care which
+        line it was, and sorting here means the caller never has to assume that
+        `s3 < s2 < s1 < p`. It is true for a positive range, but it is true
+        because of the arithmetic, not by construction.
+        """
+        return tuple(sorted((self.s3, self.s2, self.s1, self.p, self.r1, self.r2, self.r3)))
+
+    def nearest(self, price: float) -> tuple[str, float]:
+        """The line closest to `price`, as `(name, level)` - for the log line."""
+        named = (
+            ("S3", self.s3), ("S2", self.s2), ("S1", self.s1), ("P", self.p),
+            ("R1", self.r1), ("R2", self.r2), ("R3", self.r3),
+        )
+        return min(named, key=lambda item: abs(item[1] - price))
+
+
+#: The three ratios TradingView's Fibonacci pivots lay over the previous
+#: session's range. 1.0 rather than 1.618 for the third: the indicator's default
+#: shows three levels a side, and the third of those is the full range.
+FIB_RATIOS = (0.382, 0.618, 1.000)
+
+
+def fib_pivots(*, high: float, low: float, close: float) -> FibPivots:
+    """Fibonacci pivots from one completed session's high, low and close.
+
+    `P = (H + L + C) / 3` - the same pivot every type of this indicator shares -
+    then each level is `P +/- ratio * (H - L)`. The range is the PREVIOUS
+    session's, which is what makes these levels usable: they are fixed before
+    the session they are drawn on opens, so a strategy reading them is reading
+    something it could genuinely have known.
+
+    A zero-range session (`high == low`, which real data does produce on a
+    holiday stub) collapses every level onto `P`. That is arithmetically correct
+    and is left to say so rather than being special-cased into an error - a
+    strategy that requires a crossing simply will not find one.
+    """
+    if low > high:
+        raise DomainError(f"pivot low {low} is above pivot high {high}")
+    if not (low <= close <= high):
+        raise DomainError(f"pivot close {close} is outside [{low}, {high}]")
+    pivot = (high + low + close) / 3.0
+    span = high - low
+    r1, r2, r3 = (pivot + ratio * span for ratio in FIB_RATIOS)
+    s1, s2, s3 = (pivot - ratio * span for ratio in FIB_RATIOS)
+    return FibPivots(p=pivot, r1=r1, r2=r2, r3=r3, s1=s1, s2=s2, s3=s3)
