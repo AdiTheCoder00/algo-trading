@@ -114,7 +114,24 @@ strict = true
 warn_unreachable = true
 disallow_any_explicit = false
 show_error_codes = true
-files = ["algo", "tests"]
+# `tools/pivot_ema_telegram_alert` is in scope and the older `tools/macd_...`
+# is not, deliberately: the cascade alert drives the engine's own strategy and
+# decides whether a message is sent, so it is engine-adjacent code that a type
+# error can break silently. It was added AFTER being written without this, and
+# the first run found three real defects - a credential field that does not
+# exist (`totp`, for `totp_seed`), an untyped transport and an uninferrable
+# lambda. The MACD tool is a standalone script over pandas/ccxt with its own
+# venv, and pulling it in would be a separate piece of work.
+# `scripts/` is not a package, so `mypy_path` is what lets `tests/` import the
+# study the same way it imports the alert tool. The study itself is checked
+# because a test now depends on its funnel; the other scripts are not in scope.
+mypy_path = "scripts"
+files = [
+    "algo",
+    "tests",
+    "tools/pivot_ema_telegram_alert",
+    "scripts/measure_pivot_ema_cascade_xauusd.py",
+]
 
 [[tool.mypy.overrides]]
 module = ["pyarrow.*", "openpyxl.*"]
@@ -206,5 +223,13 @@ ignore = [
 # there is no engine here to keep clean, and routing a chat reply through a
 # structlog line would make it unreadable.
 "scripts/ask_nemotron.py" = ["T201"]
+# And the pivot/EMA cascade study: a matrix, a falsification table and an
+# exit-reason breakdown written to stdout for a human, imported by nothing.
+"scripts/measure_pivot_ema_cascade_xauusd.py" = ["T201"]
 "scripts/measure_stop_trail_matrix_xauusd.py" = ["T201"]
+# And the MT5 exporter: it runs on the broker's machine, where stdout is the
+# only channel back to the person running it - there is no log to read there.
+"scripts/export_mt5_bars.py" = ["T201"]
+# And the BTCUSD cascade study: the same stdout report as its XAUUSD sibling.
+"scripts/measure_pivot_ema_cascade_btcusd.py" = ["T201"]
 "scripts/measure_window_sensitivity_xauusd.py" = ["T201"]

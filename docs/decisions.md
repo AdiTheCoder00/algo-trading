@@ -4047,3 +4047,336 @@ a different strategy than the one it scored.
 trade-management rule rejected too.** The pattern holds: the thing that was
 obviously going to help did not, and the twenty minutes of measurement that
 established it is cheaper than the demo account that would have.
+
+---
+
+### D-155 - The pivot/EMA cascade is built and testable; it is not yet measured, and that is stated rather than papered over
+
+You described a fifth strategy: **Pivot Points Standard with the type set to
+Fibonacci**, plus the 10, 20, 50, 100 and 200 EMAs, on M5. A short is armed when
+a candle closes down through any pivot line and completes when price closes down
+through each EMA in turn - after, or on the same candle - with the close below
+the 200 EMA as the entry, and the exit on the first candle that closes back
+above both the 10 and the 20. Long is the mirror.
+
+> **Superseded in part by D-156.** "Any pivot line" was the wrong reading: the
+> short arms only on R3, R2, R1 or the pivot, and the long only on S3, S2, S1 or
+> the pivot. Everything else in this entry stands. The text is left as written
+> rather than corrected in place, because the point of the log is what was
+> believed when, and D-156 is where the correction and its reasoning live.
+
+**What was built.** `algo/pricing/indicators.py` gained `fib_pivots`, which is
+the Fibonacci *type* of the one indicator ("Pivot Points Standard" is one
+indicator with several types, and its R1 is not the classic R1 - the test pins
+that difference). `algo/strategy/pivot_ema_cascade.py` is the strategy, with
+19 tests in `tests/test_pivot_ema_cascade.py` and six more on the indicator.
+`scripts/measure_pivot_ema_cascade_xauusd.py` is the study.
+
+**The judgement calls, all of them stated in the module docstring:**
+
+| question the rule did not answer | what was chosen | why |
+|---|---|---|
+| cross on the wick or the close? | close (`prev_close > level >= close`) | the rule's own last step is "jahan close ho wahan entry"; half one definition and half another would be worse than either |
+| same-bar steps allowed? | yes | "uske baad **ya saath mein hi**" says so, and on M5 price does slice several EMAs in one bar |
+| what breaks a half-built cascade? | a new session, or a close back through the last level crossed | both structural. A "must complete within N bars" cap is a tunable with no prior, and D-131 is the standing entry on what those are worth here |
+| which session draws the pivots? | the previous one, and only if it was watched end to end | a run that joins mid-session has half a session's high; the first session is discarded and pivots appear at the second rollover |
+| warmup for a 200 EMA | 285 bars, not 200 | the same 5.8% seed residue `indicators.warmup_bars()` accepts. `seed_shed_bars` generalises the arithmetic `ema_bb.py` did by hand, and reproduces its 72 for a 50 EMA |
+
+**What is NOT claimed.** No number. The measurement script needs MetaTrader 5,
+which is Windows-only and is where the real XAUUSD bars live, so it has not been
+run - the environment this was written in has neither the terminal nor any
+market data reachable from it. The tests prove the code implements the rule as
+described; they are not evidence about the rule.
+
+That distinction is the whole content of this entry. D-151 through D-154 are
+four strategies built from published rules that sounded sound, measured, and
+rejected - three with no edge and one (D-152's breakout) real but beaten by
+holding gold. The base rate for "a rule that looks right on a chart" in this
+repo is currently 0 for 4, and a fifth that has not been measured is not
+evidence against that; it is an untested fifth.
+
+**The plumbing was exercised, on bars that are not market data.** A seeded
+random walk in the shape of M5 XAUUSD bars was pushed through
+`--csv`, purely to prove the path runs end to end: entries fire, trades close,
+costs are charged, the tables render. Its P&L figures are meaningless and are
+not recorded here or anywhere else. One structural thing it did surface, which
+is arithmetic rather than data: **every trade in every window exited on the
+10/20 EMA rule and not one on the flat stop.** That is what the geometry
+predicts - on M5 the 10 EMA sits a few dollars from the close while a 0.5% stop
+on gold is roughly twenty - so the stop this study configures is close to inert,
+and the exit rule is carrying the entire trade-management load. Worth confirming
+on real bars, because if it holds, `stop_loss_pct` is not the knob anyone should
+reach for here.
+
+So it is **not registered in `strategy_for`**, on D-151's precedent: registering
+makes a strategy reachable by the live loop and the dashboard, and that follows
+a measurement rather than precedes one. Run the script on the machine with the
+terminal; the entry that reports its numbers will be D-156, and it may well say
+the same thing the last four said.
+
+---
+
+### D-156 - The cascade's pivot sides are not interchangeable, and the alert runs the strategy rather than a copy of it
+
+Two changes to D-155's rule, both from the same clarification: **the short arms
+on R3, R2, R1 or the pivot, and the long on S3, S2, S1 or the pivot.**
+
+**What was wrong.** D-155 read "kisi pivot line" as *any* pivot line and armed
+either direction on any of the seven. That is a materially looser rule. A short
+armed on an S-line is price reaching support inside a fall it has *already*
+made, not price breaking the resistance the fall began at - the same six
+subsequent EMA crossings, but starting from a point that says something
+different about the move. `FibPivots.resistances`/`supports` now split the
+levels, they share exactly `P` (which the rule names on both sides), and
+`tests/test_pivot_ema_cascade.py` falsifies both wrong-side armings directly
+rather than through a signal, because arming is stage 1 and emits nothing.
+
+**No numbers changed, because there are still none.** D-155's entry stands: the
+measurement script has not been run. This tightens the rule *before* it is
+measured, which is the right order - measuring the loose reading and then
+narrowing it would have made the first measurement describe a strategy nobody
+asked for.
+
+### The alert tool, and why it is not a second implementation
+
+`tools/pivot_ema_telegram_alert/` sends a Telegram message when the rule fires
+on M5, across the MT5 symbols (XAUUSD, BTCUSD, the broker's volatility index)
+and, with `--nifty50`, the NIFTY 50 constituents over Angel One's SmartAPI.
+
+**The failure mode this design exists to prevent** is an alert that disagrees
+with the backtest. A monitor with its own copy of the rule drifts from the
+studied one on the first edit to either, and the person acting on the messages
+is then trading something no measurement covers - strictly worse than having no
+alert. So the tool reimplements nothing: `algo/backtest/signal_replay.py` walks
+bars into the same `BarContext` `cfd_runner` builds and returns what the real
+`PivotEmaCascade` said, and `tests/test_signal_replay.py` runs both paths over
+one series and asserts the same entry bars and sides.
+
+`signal_replay` is deliberately not `run_cfd_backtest`. That function answers
+"what did this earn after costs" and must fill and charge to do it; a monitor
+asks "what did the rule say" and must **not** invent a fill to find out. Its
+`PaperBook` carries a side and an entry price and nothing else, because
+`ProtectiveExits` needs something to measure a stop against - it reports no P&L,
+and anything wanting one uses the runner.
+
+**Two smaller decisions worth the ink.** Each poll re-derives everything from
+~574 bars rather than carrying strategy state between polls: a sleeping laptop,
+a restarted terminal or a failed poll then cannot leave the tool believing
+something the bars do not say, and the only thing persisted is which bar each
+symbol was last alerted on. And an NSE equity rides as a `CfdId` on
+`Exchange.NSE`, stated as the compromise it is in `instrument_for` - the alert
+path never prices, sizes, fills or charges anything, so the instrument is a
+lookup key, and adding a fourth member to the engine's discriminated
+`InstrumentId` union (which the specs, position and costs layers all match on)
+to satisfy a read-only monitor would be a far larger change with far more to get
+wrong.
+
+**It is still an alert on an unmeasured rule**, and every message says so. D-155's
+closing point is unchanged: four rules were measured across D-151 to D-154 and
+none of them had an edge, so the honest reading of a fifth that has only been
+built is that it has only been built.
+
+### D-157 - The cascade measured: no edge, and the numbers move when the session boundary does
+
+D-155 and D-156 built the rule and left it unmeasured. It has now been run on
+real XAUUSD M5 bars. **It does not show an edge, and the per-window figures are
+not stable enough to be worth a second look.**
+
+**The data, and what it is worth.** No MetaTrader 5 terminal is reachable from
+this environment and the egress proxy refuses every market-data host (checked
+again, not assumed: Yahoo, Stooq, Binance, Alpha Vantage, Twelve Data,
+Dukascopy - all `000`). GitHub is reachable, so the bars come from the public
+`Sai310421/xauusd-data` dataset: mid-quote M1/M5, 2026-02-25 to 2026-05-26.
+That source names no provider, so it was audited before anything was measured
+rather than trusted: no out-of-order or duplicated stamps, no OHLC
+inconsistency, no off-grid stamps, 13 gaps over four hours of which 12 run
+Friday to Sunday, a median 276 of a possible 288 M5 bars per trading day, and
+no adjacent closes more than 5% apart. Two independent price checks landed on
+it: the dataset's 2026-03-02 high of 5418.9 against the reported early-March
+test of $5,400, and its 2026-04-30 close of 4626 against the reported $4,642
+that morning. M15 and M30 were aggregated from the M1 file rather than from M5,
+and re-aggregating M1 to M5 reproduced the source's own M5 high and low on
+17,370 of 17,371 buckets.
+
+**The windows are not D-140's.** The data covers three months, so `--window`
+names three one-month windows inside it. These numbers therefore do **not** sit
+beside the rest of this repo's studies, and the script prints which windows
+produced them. It also now warns when a window is fed less history than the
+warmup wants - M15 and M30 over 2026.03 are under-warmed and their rows say so.
+
+**M5, the rule as asked:**
+
+| window | trades | win% | PF | net $ | maxDD% |
+|---|---|---|---|---|---|
+| 2026.03 | 16 | 37.5 | 0.96 | -418 | 7.2 |
+| 2026.04 | 17 | 11.8 | 0.13 | -9,081 | 10.5 |
+| 2026.05 | 22 | 36.4 | 1.89 | +6,100 | 5.6 |
+
+Net over the three: **-3,399** on 55 trades, against $1,566 of spread. One
+window positive, one flat, one badly negative. D-131's warning is the whole
+reading here: 2026.05's 1.89 is the cell to ignore, not the cell to keep.
+
+**The falsification table says the sign is not the interesting part.** Gold fell
+hard over all three windows (buy-and-hold -80,522, -13,962, -7,721 per 100
+lots), so beating buy-and-hold is not evidence of anything - the strategy is not
+obliged to be long. The long/short split is less kind: the rule took 40 longs
+and 15 shorts over the three M5 windows *in a falling market*, and 2026.04's
+loss is both sides losing at once (-4,985 long, -4,096 short).
+
+**The finding that settles it.** The dataset stamps its bars with no timezone,
+and read as UTC its week closes Friday 21:55 and reopens Sunday 23:00 - an hour
+later than usual, so UTC+1 is at least as plausible. Re-running M5 with the
+series shifted one hour changes every window's sign:
+
+| window | as UTC | shifted -1h |
+|---|---|---|
+| 2026.03 | -418 (PF 0.96) | -16,428 (PF 0.13) |
+| 2026.04 | -9,081 (PF 0.13) | +1,077 (PF 1.18) |
+| 2026.05 | +6,100 (PF 1.89) | -1,898 (PF 0.81) |
+
+The pivots are drawn per session, so an hour's shift moves where the day is cut
+and every R and S line with it. A rule whose every window flips sign under that
+shift is reporting where the day was cut, not an edge. This is worth more than
+the table above it: it is the same conclusion D-151 through D-154 reached, by a
+route that does not depend on the dataset being the right one.
+
+**The funnel works and says the rule is not starving.** Attempts reaching each
+step on M5, both sides summed over the three windows: 713 armed on a pivot line,
+434 through the 10 EMA, 293 the 20, 154 the 50, 91 the 100, and 56 completed.
+Every step removes between a third and a half of what reached it and nothing
+collapses at one place - the pattern is common, the chain is simply long, and
+the answer is not "a step of the rule is wrong". D-131 applies to what is done
+next with that: it is a description of where attempts stop, not licence to tune
+the step that stops most of them.
+
+56 completed cascades against 55 trades is not a miscount: `cfd_runner` records
+a trade when it *closes*, and one 2026.05 entry had not exited when the data
+ran out. The funnel counts signals, the trade table counts round trips, and at
+the right-hand edge of a series those differ by at most one.
+
+**The exits are the rule's, not the stop's.** 53 of the 55 M5 trades exited on
+the 10/20 EMA rule and 2 on the flat stop, confirming as measurement what D-155
+noted as arithmetic: on M5 the 10 EMA sits a few dollars from the close while a
+0.5% stop on gold is roughly twenty.
+
+**Two defects the real bars found**, both in code that passed every gate:
+
+* The funnel was not a funnel. A cascade that arms and completes inside one bar
+  - the rule's own "or on the same candle" case - is never observed in a
+  non-zero stage, so it was credited as an entry having never been credited as
+  an attempt, and the first run printed 12 attempts reaching the 100 EMA beside
+  15 entries past the 200. The stage series and the entries are now walked
+  together so each attempt is scored once at one depth, and
+  `tests/test_cascade_funnel.py` fails on any funnel that rises to the right.
+  It also scored the warmup bars a window is fed, so it counted attempts the
+  trade table beside it does not; it now takes the window start.
+* `scripts/measure_pivot_ema_cascade_xauusd.py` had two locals named `counts`,
+  one a `list[int]` and one a `str`. Harmless at runtime, and the reason it
+  survived is that `scripts/` was outside mypy's scope; the study is now in
+  `files` and `mypy_path` lets a test import it.
+
+**The strategy stays out of `strategy_for`**, on D-151's precedent and now with
+a measurement behind it rather than in front of it. The alert tool keeps
+working - it reports what the chart did, which is what its messages claim - but
+its README's warning is now stronger than "unmeasured": the rule *has* been
+measured, on three months of one dataset, and showed nothing.
+
+**What would change this.** A run on the broker's own MT5 bars over D-140's
+three windows, where the timezone is known rather than inferred and the sample
+is years rather than three months. The script does that unchanged:
+`python scripts/measure_pivot_ema_cascade_xauusd.py`. If those numbers disagree
+with these, the timezone finding above says which to believe: neither, until
+the session boundary is pinned to the broker's.
+
+### D-158 - The cascade on BTCUSD: no edge either, and the same fragility decides it
+
+The rule was measured on bitcoin because gold's answer (D-157) rested on three
+months of one dataset with an inferred timezone, and the obvious objection was
+that the instrument or the sample was wrong rather than the rule. It is not the
+instrument. **BTCUSD over D-140's own three windows gives the same answer, and
+the finding that settles it is the same one.**
+
+**The data is better than gold's in every way that mattered there.** Bitstamp
+BTC/USD 1-minute candles from `ff137/bitstamp-btcusd-minute-data`, a repository
+that ships its own provenance and validation scripts. Timestamps are UTC unix
+seconds, so the one-hour ambiguity that decided D-157 cannot arise. Over
+2025-05-01 to 2026-08-31: 702,720 minute bars, no duplicates, no out-of-order
+stamps, no OHLC inconsistency, not one missing bucket on the minute grid, and
+no adjacent closes more than 5% apart. The publisher fills unreported minutes
+with flat zero-volume candles - 4.02% of minutes, but only 0.03% of M5 bars,
+because a flat minute rarely survives aggregation. Two price cross-checks:
+the series peaks at 126,272 on 2025-10-06 against the reported record above
+$126,000 that October, and closes 2026-08-26 at 79,022 against a reported
+$78,746. Crucially the range covers **D-140's actual windows**, so unlike D-157
+these numbers sit beside every other study here.
+
+**M5, forex session cut (the same 17:00 New York the gold study uses):**
+
+| window | trades | win% | PF | net $ |
+|---|---|---|---|---|
+| 2026.06-08 | 69 | 24.6 | 0.57 | -3,743 |
+| 2026.01-05 | 110 | 32.7 | 1.13 | +1,726 |
+| 2025.06-12 | 160 | 35.0 | 1.27 | +6,555 |
+
+**+4,538** over 339 trades, per 1 BTC. That looks like the first positive
+headline any of these five rules has produced. It does not survive either of
+the two things done to it next.
+
+**First: the session boundary, again.** Bitcoin trades continuously, so "which
+day" is a choice rather than a fact, and the pivots are drawn per session. Re-cut
+on the plain UTC calendar day - what an exchange chart shows - and:
+
+| window | forex cut | UTC cut |
+|---|---|---|
+| 2026.06-08 | -3,743 (PF 0.57) | -4,040 (PF 0.57) |
+| 2026.01-05 | +1,726 (PF 1.13) | -1,928 (PF 0.88) |
+| 2025.06-12 | +6,555 (PF 1.27) | -1,110 (PF 0.96) |
+
+**+4,538 becomes -7,078**, and two of three windows change sign. Neither cut is
+more correct than the other; that is exactly the problem. D-157 found the same
+thing on gold by shifting the boundary one hour, and the two studies now agree
+on a mechanism rather than only on a verdict: what the rule is reading is where
+the day was cut.
+
+**Second: the spread, which is assumed here rather than measured.** No Vantage
+crypto dealing history exists to do for BTCUSD what D-121 did for XAUUSD, so the
+study prints a sweep instead of one number. M5 net, forex cut:
+
+| window | half $2 | half $10 | half $25 | half $50 |
+|---|---|---|---|---|
+| 2026.06-08 | -1,727 | -3,743 | -9,035 | -14,805 |
+| 2026.01-05 | +4,913 | +1,726 | -6,073 | -15,798 |
+| 2025.06-12 | +11,363 | +6,555 | -2,461 | -17,395 |
+
+The whole headline lives between a $2 and a $25 half-spread on a $70-120k
+instrument. A retail crypto CFD is not quoted at $4 round trip. Whatever this
+rule finds is smaller than the cost of trading it, which is D-124's finding
+about the bar interval arriving by a different road.
+
+Swap was set to **zero**, deliberately and optimistically: inventing a financing
+rate would put a made-up number into every overnight trade, and an optimistic
+cost model that still loses is the stronger result. Commission zero and
+unverified, the posture `CfdChargeModel` already takes.
+
+**Everything else repeats gold's pattern.** Win rate 22-35% with PF near 1. The
+exits are the rule's own: 303 of 339 M5 trades closed on the 10/20 EMA cross and
+36 on the flat stop. Longs and shorts are balanced (157 long, 182 short) and
+both lose in the bad window, so this is not a disguised directional bet - the
+falsification split that rejected D-152 finds nothing to reject here because
+there is nothing there.
+
+**Two changes to shared code, both small and both defaulted off.**
+`run_cfd_backtest` takes an optional `session_of`; without it the forex calendar
+decides the day exactly as before, so every existing study reports what it
+reported. It exists because a continuously traded instrument has no session
+close to inherit, and the choice must be visible. And
+`scripts/export_mt5_bars.py` writes a terminal's bars as CSV in
+`read_csv_bars`'s format, converting MT5's server time to UTC via
+`measure_server_offset` and taking position 1 so the forming bar is excluded -
+the one step that has to happen on the broker's machine before any of this can
+be checked against the account that would actually trade it.
+
+**Five rules, five measurements, no edge** (D-151 to D-154, D-157, and this).
+The strategy remains out of `strategy_for`. What would still change the picture
+for either instrument is the broker's own bars with the broker's own measured
+costs, which is what the exporter is for.
