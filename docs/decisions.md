@@ -4107,3 +4107,65 @@ makes a strategy reachable by the live loop and the dashboard, and that follows
 a measurement rather than precedes one. Run the script on the machine with the
 terminal; the entry that reports its numbers will be D-156, and it may well say
 the same thing the last four said.
+
+---
+
+### D-156 - The cascade's pivot sides are not interchangeable, and the alert runs the strategy rather than a copy of it
+
+Two changes to D-155's rule, both from the same clarification: **the short arms
+on R3, R2, R1 or the pivot, and the long on S3, S2, S1 or the pivot.**
+
+**What was wrong.** D-155 read "kisi pivot line" as *any* pivot line and armed
+either direction on any of the seven. That is a materially looser rule. A short
+armed on an S-line is price reaching support inside a fall it has *already*
+made, not price breaking the resistance the fall began at - the same six
+subsequent EMA crossings, but starting from a point that says something
+different about the move. `FibPivots.resistances`/`supports` now split the
+levels, they share exactly `P` (which the rule names on both sides), and
+`tests/test_pivot_ema_cascade.py` falsifies both wrong-side armings directly
+rather than through a signal, because arming is stage 1 and emits nothing.
+
+**No numbers changed, because there are still none.** D-155's entry stands: the
+measurement script has not been run. This tightens the rule *before* it is
+measured, which is the right order - measuring the loose reading and then
+narrowing it would have made the first measurement describe a strategy nobody
+asked for.
+
+### The alert tool, and why it is not a second implementation
+
+`tools/pivot_ema_telegram_alert/` sends a Telegram message when the rule fires
+on M5, across the MT5 symbols (XAUUSD, BTCUSD, the broker's volatility index)
+and, with `--nifty50`, the NIFTY 50 constituents over Angel One's SmartAPI.
+
+**The failure mode this design exists to prevent** is an alert that disagrees
+with the backtest. A monitor with its own copy of the rule drifts from the
+studied one on the first edit to either, and the person acting on the messages
+is then trading something no measurement covers - strictly worse than having no
+alert. So the tool reimplements nothing: `algo/backtest/signal_replay.py` walks
+bars into the same `BarContext` `cfd_runner` builds and returns what the real
+`PivotEmaCascade` said, and `tests/test_signal_replay.py` runs both paths over
+one series and asserts the same entry bars and sides.
+
+`signal_replay` is deliberately not `run_cfd_backtest`. That function answers
+"what did this earn after costs" and must fill and charge to do it; a monitor
+asks "what did the rule say" and must **not** invent a fill to find out. Its
+`PaperBook` carries a side and an entry price and nothing else, because
+`ProtectiveExits` needs something to measure a stop against - it reports no P&L,
+and anything wanting one uses the runner.
+
+**Two smaller decisions worth the ink.** Each poll re-derives everything from
+~574 bars rather than carrying strategy state between polls: a sleeping laptop,
+a restarted terminal or a failed poll then cannot leave the tool believing
+something the bars do not say, and the only thing persisted is which bar each
+symbol was last alerted on. And an NSE equity rides as a `CfdId` on
+`Exchange.NSE`, stated as the compromise it is in `instrument_for` - the alert
+path never prices, sizes, fills or charges anything, so the instrument is a
+lookup key, and adding a fourth member to the engine's discriminated
+`InstrumentId` union (which the specs, position and costs layers all match on)
+to satisfy a read-only monitor would be a far larger change with far more to get
+wrong.
+
+**It is still an alert on an unmeasured rule**, and every message says so. D-155's
+closing point is unchanged: four rules were measured across D-151 to D-154 and
+none of them had an edge, so the honest reading of a fifth that has only been
+built is that it has only been built.

@@ -213,6 +213,24 @@ class FibPivots:
         """
         return tuple(sorted((self.s3, self.s2, self.s1, self.p, self.r1, self.r2, self.r3)))
 
+    def resistances(self) -> tuple[float, ...]:
+        """The lines a falling candle may break to arm a short: P, R1, R2, R3.
+
+        The rule names one side per direction - "r3 r2 r1, pivot" going down -
+        and that asymmetry is the whole content of the signal. A short armed on
+        an S-line is price breaking *support* it had already fallen to, which is
+        a later and weaker moment in the same move; counting it would let the
+        cascade start almost anywhere below the day's pivot.
+
+        `P` appears in both this and `supports()`, exactly as the rule states
+        it: the pivot is the line either side can break.
+        """
+        return tuple(sorted((self.p, self.r1, self.r2, self.r3)))
+
+    def supports(self) -> tuple[float, ...]:
+        """The lines a rising candle may break to arm a long: S3, S2, S1, P."""
+        return tuple(sorted((self.s3, self.s2, self.s1, self.p)))
+
     def nearest(self, price: float) -> tuple[str, float]:
         """The line closest to `price`, as `(name, level)` - for the log line."""
         named = (

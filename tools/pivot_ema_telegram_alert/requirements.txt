@@ -1,0 +1,12 @@
+# This tool is NOT standalone, unlike tools/macd_telegram_alert: it drives the
+# repo's own `PivotEmaCascade` so that the alert and the backtest can never
+# disagree, which means the `algo` package (and its dependencies) must be
+# importable. Install the repo instead:
+#
+#     pip install -e ".[dev,mt5]"
+#
+# What that has to cover, beyond the engine itself:
+requests>=2.31          # Telegram Bot API
+MetaTrader5>=5.0.45     # Windows only - the XAUUSD / BTCUSD / volatility bars
+pyotp>=2.9              # SmartAPI login, only needed for the NIFTY 50 list
+smartapi-python>=1.5.5  # the NSE candle API

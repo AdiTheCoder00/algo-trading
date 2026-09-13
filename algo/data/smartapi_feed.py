@@ -246,12 +246,70 @@ def fetch_bar_history(
         row = master.row_for(instrument)
     except DataError as exc:
         raise DataError(f"bar history: {exc}") from exc
+    return _candles_over(
+        transport,
+        symboltoken=row.symboltoken,
+        timeframe=timeframe,
+        since=since,
+        until=until,
+        exchange=exchange,
+    )
 
+
+def fetch_equity_bars(
+    transport: CandleTransport,
+    master: InstrumentMaster,
+    tradingsymbol: str,
+    *,
+    timeframe: Timeframe,
+    since: datetime,
+    until: datetime,
+    exchange: Exchange = Exchange.NSE,
+) -> list[Bar]:
+    """Closed bars for a cash equity, resolved by its trading symbol.
+
+    `fetch_bar_history` takes an `InstrumentId`, which the engine's discriminated
+    union defines for futures, options and CFDs - a cash equity is none of those,
+    and adding a fourth member so that a bar fetch can name one would ripple
+    through the specs, position and costs layers for no gain to them.
+
+    A trading symbol is what the caller has for an equity anyway (`RELIANCE-EQ`,
+    Angel One's spelling), and `row_by_symbol` is the master lookup that takes
+    one. Everything after the lookup - the IST window, the ordering check, the
+    candle conversion - is `_candles_over`, shared with `fetch_bar_history` so
+    the two cannot drift into disagreeing about what a bar is.
+    """
+    row = master.row_by_symbol(tradingsymbol)
+    if row is None:
+        raise DataError(
+            f"bar history: the instrument master lists no {tradingsymbol!r}. "
+            "Angel One spells cash equities with a -EQ suffix."
+        )
+    return _candles_over(
+        transport,
+        symboltoken=row.symboltoken,
+        timeframe=timeframe,
+        since=since,
+        until=until,
+        exchange=exchange,
+    )
+
+
+def _candles_over(
+    transport: CandleTransport,
+    *,
+    symboltoken: str,
+    timeframe: Timeframe,
+    since: datetime,
+    until: datetime,
+    exchange: Exchange,
+) -> list[Bar]:
+    """The candle call itself, from a resolved token. See both callers above."""
     try:
         response = transport.candles(
             {
                 "exchange": exchange.value,
-                "symboltoken": row.symboltoken,
+                "symboltoken": symboltoken,
                 "interval": f"{timeframe.minutes}_MINUTE",
                 # `since`/`until` are UTC (the engine's convention throughout);
                 # the candle API's request window, like its response rows

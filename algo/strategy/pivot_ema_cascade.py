@@ -4,12 +4,18 @@
 
 Two things are on the chart: **Pivot Points Standard with the type set to
 Fibonacci**, and the five EMAs 10, 20, 50, 100 and 200. On the 5-minute bars, a
-short is armed when a candle closes down through *any* pivot line, and then
-completes when price closes down through the 10, the 20, the 50, the 100 and
-finally the 200 EMA **in that order**. The candle that closes below the 200 is
-the entry. The exit is the mirror of the start of the cascade: the first candle
-that closes back above *both* the 10 and the 20 EMA. A long is the same rule
-with every comparison flipped.
+short is armed when a candle closes down through one of the **resistance-side**
+lines - R3, R2, R1 or the pivot - and then completes when price closes down
+through the 10, the 20, the 50, the 100 and finally the 200 EMA **in that
+order**. The candle that closes below the 200 is the entry. The exit is the
+mirror of the start of the cascade: the first candle that closes back above
+*both* the 10 and the 20 EMA.
+
+A long is the same rule with every comparison flipped, **including the pivot
+side**: it arms on a close up through S3, S2, S1 or the pivot. The sides are not
+interchangeable - see `FibPivots.resistances` for why arming a short on an
+S-line would be a different and much looser rule - and the pivot itself belongs
+to both lists, as the rule states it.
 
 "After, or on the same candle" is part of the rule, not a liberty taken with it:
 on a fast 5-minute bar price can slice several EMAs at once, and requiring one
@@ -40,7 +46,7 @@ bars.
 It is reset by two things and only two:
 
 *   **A new session.** The pivot lines are redrawn from the session that just
-    finished, so a cascade armed against yesterday's S1 is armed against a line
+    finished, so a cascade armed against yesterday's R1 is armed against a line
     that no longer exists. Nothing intraday is carried across the boundary.
 *   **Price closing back above the last level it crossed** (below, for a long).
     A cascade is a claim that price is leaving these levels behind; a close back
@@ -431,7 +437,12 @@ class PivotEmaCascade(Strategy):
                 cascade.reset()
 
         if cascade.stage == 0:
-            for level in pivots.levels():
+            # Resistance side going down, support side going up. The rule names
+            # the sides explicitly - "r3 r2 r1, pivot" for the short and "s3,
+            # s2, s1, pivot" for the long - and `FibPivots.resistances` records
+            # why that asymmetry is the signal rather than a detail.
+            candidates = pivots.resistances() if short else pivots.supports()
+            for level in candidates:
                 if crossed(level):
                     cascade.stage = 1
                     cascade.last = level

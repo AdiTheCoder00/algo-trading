@@ -313,3 +313,21 @@ class TestFibPivots:
             fib_pivots(high=4000.0, low=4100.0, close=4050.0)
         with pytest.raises(DomainError, match="outside"):
             fib_pivots(high=4100.0, low=4000.0, close=4200.0)
+
+    def test_the_two_sides_are_disjoint_apart_from_the_pivot(self) -> None:
+        """`resistances` and `supports` are what makes the strategy directional.
+
+        They must share exactly one line - P, which the rule names on both
+        sides - and between them cover every level, or a line would be
+        unreachable from either direction.
+        """
+        pivots = fib_pivots(high=4100.0, low=4000.0, close=4060.0)
+        resistances, supports = set(pivots.resistances()), set(pivots.supports())
+        assert resistances & supports == {pivots.p}
+        assert resistances | supports == set(pivots.levels())
+        assert list(pivots.resistances()) == sorted(pivots.resistances())
+        assert list(pivots.supports()) == sorted(pivots.supports())
+
+    def test_every_resistance_is_at_or_above_every_support(self) -> None:
+        pivots = fib_pivots(high=4100.0, low=4000.0, close=4060.0)
+        assert min(pivots.resistances()) >= max(pivots.supports())

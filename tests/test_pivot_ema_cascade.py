@@ -395,3 +395,65 @@ def test_state_survives_a_restart_mid_cascade() -> None:
     from_scratch = stopped.on_bar(ctx)
     assert [s.signal_id for s in from_restart] == [s.signal_id for s in from_scratch]
     assert from_restart and from_restart[0].legs[0].direction is Side.SELL
+
+
+# ------------------------------------------------- the pivot sides are not the same
+#: A session that closes BELOW its own midpoint, so the next session opens below
+#: the pivot it draws: high 4000, low 3800, close 3850, giving P 3883.33 and S1
+#: 3806.93. That is the only shape on which a falling candle can reach an
+#: S-line without having crossed a resistance line on the way.
+_SESSION_CLOSING_LOW = [4000.0, 3950.0, 3900.0, 3850.0, 3800.0, 3820.0, 3850.0]
+
+#: From 3850, down through S1 at 3806.93 and nothing else.
+_BREAK_S1 = [3840.0, 3800.0]
+
+
+def _sided_run(
+    session_two: list[float], tail: list[float]
+) -> tuple[PivotEmaCascade, list[list[Signal]]]:
+    closes = _SESSION_ONE + session_two + tail
+    days = _days(
+        (DAY_ONE, len(_SESSION_ONE)),
+        (DAY_TWO, len(session_two)),
+        (DAY_THREE, len(tail)),
+    )
+    strategy = _strategy()
+    return strategy, _feed(strategy, closes, days)
+
+
+def test_a_short_does_not_arm_on_a_support_line() -> None:
+    """"r3 r2 r1, pivot" going down - S1 is not on that list.
+
+    Under the earlier reading, where any pivot line armed either direction,
+    this close through S1 started a cascade. It is a different and much looser
+    rule: price reaching support inside a fall it has already made, rather than
+    breaking the resistance that fall began at.
+
+    Asserted on the persisted cascade rather than on a signal, because arming
+    is stage 1 and emits nothing - a test that only watched signals could not
+    tell "never armed" from "armed and did not complete".
+    """
+    strategy, signals = _sided_run(_SESSION_CLOSING_LOW, _BREAK_S1)
+    assert all(s == [] for s in signals)
+    assert "short_stage" not in strategy.state(), "a short armed on an S-line"
+
+
+def test_a_long_does_not_arm_on_a_resistance_line() -> None:
+    """The mirror: R1 is not on the long's list either."""
+    strategy, signals = _sided_run(_mirror(_SESSION_CLOSING_LOW), _mirror(_BREAK_S1))
+    assert all(s == [] for s in signals)
+    assert "long_stage" not in strategy.state(), "a long armed on an R-line"
+
+
+def test_the_pivot_itself_arms_both_directions() -> None:
+    """P is on both lists, exactly as the rule states it.
+
+    The falsifications above would also pass if the sides had been split so
+    tightly that nothing could arm at all; this is the control that says the
+    shared line still works from either direction.
+    """
+    strategy, _ = _sided_run(_SESSION_CLOSING_LOW, [3890.0, 3870.0])
+    assert strategy.state().get("short_pivot") == "P"
+
+    mirrored, _ = _sided_run(_mirror(_SESSION_CLOSING_LOW), _mirror([3890.0, 3870.0]))
+    assert mirrored.state().get("long_pivot") == "P"
