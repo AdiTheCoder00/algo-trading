@@ -15,11 +15,19 @@ The pivots are TradingView's *Pivot Points Standard* with the type set to
 
 ## Read this before you trade off it
 
-The rule this alerts on **has never been measured on real bars**. `docs/decisions.md`
-D-155 records why that matters here: four strategies were built from
-published rules in this repo before it, all four were measured, and none of them
-had an edge. A message from this tool means *the chart did this*, not *take this
-trade*. Run `scripts/measure_pivot_ema_cascade_xauusd.py` first.
+The rule this alerts on **has been measured, and showed no edge.**
+`docs/decisions.md` D-157 has the numbers: three one-month windows of real
+XAUUSD M5 bars, 55 trades, **-3,399 net** per 1.00 MT5 lot, one window positive
+and one badly negative. Worse than the sign, every window's sign *flips* when
+the bar series is shifted by one hour — the pivots are drawn per session, so
+that shift moves where the trading day is cut, and a result that moves with it
+is a result about the session boundary rather than about the pattern.
+
+That measurement used a public dataset over three months, not your broker's own
+bars over D-140's windows. Run `scripts/measure_pivot_ema_cascade_xauusd.py` on
+the MT5 machine before you rely on either answer.
+
+A message from this tool means *the chart did this*, not *take this trade*.
 
 ## What it watches
 

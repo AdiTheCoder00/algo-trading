@@ -122,7 +122,16 @@ show_error_codes = true
 # exist (`totp`, for `totp_seed`), an untyped transport and an uninferrable
 # lambda. The MACD tool is a standalone script over pandas/ccxt with its own
 # venv, and pulling it in would be a separate piece of work.
-files = ["algo", "tests", "tools/pivot_ema_telegram_alert"]
+# `scripts/` is not a package, so `mypy_path` is what lets `tests/` import the
+# study the same way it imports the alert tool. The study itself is checked
+# because a test now depends on its funnel; the other scripts are not in scope.
+mypy_path = "scripts"
+files = [
+    "algo",
+    "tests",
+    "tools/pivot_ema_telegram_alert",
+    "scripts/measure_pivot_ema_cascade_xauusd.py",
+]
 
 [[tool.mypy.overrides]]
 module = ["pyarrow.*", "openpyxl.*"]

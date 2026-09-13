@@ -89,13 +89,20 @@ close rather than the average.
 reachable by the live loop and the dashboard, and that should follow a
 measurement rather than precede one.
 
-`scripts/measure_pivot_ema_cascade_xauusd.py` is the measurement, and it needs
-MetaTrader 5 - which means real XAUUSD bars from the user's own terminal. **It
-has not been run.** Nothing in this module or its tests is evidence that this
-rule makes money; they are evidence that the code implements the rule that was
-described. The four strategies measured across D-151 to D-154 were all built
-from published rules that sounded sound and none of them survived contact with
-the data, so the honest reading of an unmeasured fifth is that it is unmeasured.
+`scripts/measure_pivot_ema_cascade_xauusd.py` is the measurement, and **D-157 is
+what it found: no edge.** Three one-month windows of real XAUUSD M5 bars, 55
+trades, -3,399 net, and - the part that settles it - every window's sign flips
+when the series is shifted by one hour, which is a result about where the
+session was cut rather than about the pattern. That run used a public dataset
+over three months rather than a broker's own bars over D-140's windows, so it
+is a strong negative rather than a final one; the script run against MetaTrader
+5 is still the better answer, and unchanged.
+
+Nothing in this module or its tests was ever evidence that this rule makes
+money; they are evidence that the code implements the rule that was described.
+The four strategies measured across D-151 to D-154 were all built from published
+rules that sounded sound and none survived contact with the data. This is the
+fifth.
 """
 
 from __future__ import annotations

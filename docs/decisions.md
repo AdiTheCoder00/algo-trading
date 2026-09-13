@@ -4175,3 +4175,115 @@ wrong.
 closing point is unchanged: four rules were measured across D-151 to D-154 and
 none of them had an edge, so the honest reading of a fifth that has only been
 built is that it has only been built.
+
+### D-157 - The cascade measured: no edge, and the numbers move when the session boundary does
+
+D-155 and D-156 built the rule and left it unmeasured. It has now been run on
+real XAUUSD M5 bars. **It does not show an edge, and the per-window figures are
+not stable enough to be worth a second look.**
+
+**The data, and what it is worth.** No MetaTrader 5 terminal is reachable from
+this environment and the egress proxy refuses every market-data host (checked
+again, not assumed: Yahoo, Stooq, Binance, Alpha Vantage, Twelve Data,
+Dukascopy - all `000`). GitHub is reachable, so the bars come from the public
+`Sai310421/xauusd-data` dataset: mid-quote M1/M5, 2026-02-25 to 2026-05-26.
+That source names no provider, so it was audited before anything was measured
+rather than trusted: no out-of-order or duplicated stamps, no OHLC
+inconsistency, no off-grid stamps, 13 gaps over four hours of which 12 run
+Friday to Sunday, a median 276 of a possible 288 M5 bars per trading day, and
+no adjacent closes more than 5% apart. Two independent price checks landed on
+it: the dataset's 2026-03-02 high of 5418.9 against the reported early-March
+test of $5,400, and its 2026-04-30 close of 4626 against the reported $4,642
+that morning. M15 and M30 were aggregated from the M1 file rather than from M5,
+and re-aggregating M1 to M5 reproduced the source's own M5 high and low on
+17,370 of 17,371 buckets.
+
+**The windows are not D-140's.** The data covers three months, so `--window`
+names three one-month windows inside it. These numbers therefore do **not** sit
+beside the rest of this repo's studies, and the script prints which windows
+produced them. It also now warns when a window is fed less history than the
+warmup wants - M15 and M30 over 2026.03 are under-warmed and their rows say so.
+
+**M5, the rule as asked:**
+
+| window | trades | win% | PF | net $ | maxDD% |
+|---|---|---|---|---|---|
+| 2026.03 | 16 | 37.5 | 0.96 | -418 | 7.2 |
+| 2026.04 | 17 | 11.8 | 0.13 | -9,081 | 10.5 |
+| 2026.05 | 22 | 36.4 | 1.89 | +6,100 | 5.6 |
+
+Net over the three: **-3,399** on 55 trades, against $1,566 of spread. One
+window positive, one flat, one badly negative. D-131's warning is the whole
+reading here: 2026.05's 1.89 is the cell to ignore, not the cell to keep.
+
+**The falsification table says the sign is not the interesting part.** Gold fell
+hard over all three windows (buy-and-hold -80,522, -13,962, -7,721 per 100
+lots), so beating buy-and-hold is not evidence of anything - the strategy is not
+obliged to be long. The long/short split is less kind: the rule took 40 longs
+and 15 shorts over the three M5 windows *in a falling market*, and 2026.04's
+loss is both sides losing at once (-4,985 long, -4,096 short).
+
+**The finding that settles it.** The dataset stamps its bars with no timezone,
+and read as UTC its week closes Friday 21:55 and reopens Sunday 23:00 - an hour
+later than usual, so UTC+1 is at least as plausible. Re-running M5 with the
+series shifted one hour changes every window's sign:
+
+| window | as UTC | shifted -1h |
+|---|---|---|
+| 2026.03 | -418 (PF 0.96) | -16,428 (PF 0.13) |
+| 2026.04 | -9,081 (PF 0.13) | +1,077 (PF 1.18) |
+| 2026.05 | +6,100 (PF 1.89) | -1,898 (PF 0.81) |
+
+The pivots are drawn per session, so an hour's shift moves where the day is cut
+and every R and S line with it. A rule whose every window flips sign under that
+shift is reporting where the day was cut, not an edge. This is worth more than
+the table above it: it is the same conclusion D-151 through D-154 reached, by a
+route that does not depend on the dataset being the right one.
+
+**The funnel works and says the rule is not starving.** Attempts reaching each
+step on M5, both sides summed over the three windows: 713 armed on a pivot line,
+434 through the 10 EMA, 293 the 20, 154 the 50, 91 the 100, and 56 completed.
+Every step removes between a third and a half of what reached it and nothing
+collapses at one place - the pattern is common, the chain is simply long, and
+the answer is not "a step of the rule is wrong". D-131 applies to what is done
+next with that: it is a description of where attempts stop, not licence to tune
+the step that stops most of them.
+
+56 completed cascades against 55 trades is not a miscount: `cfd_runner` records
+a trade when it *closes*, and one 2026.05 entry had not exited when the data
+ran out. The funnel counts signals, the trade table counts round trips, and at
+the right-hand edge of a series those differ by at most one.
+
+**The exits are the rule's, not the stop's.** 53 of the 55 M5 trades exited on
+the 10/20 EMA rule and 2 on the flat stop, confirming as measurement what D-155
+noted as arithmetic: on M5 the 10 EMA sits a few dollars from the close while a
+0.5% stop on gold is roughly twenty.
+
+**Two defects the real bars found**, both in code that passed every gate:
+
+* The funnel was not a funnel. A cascade that arms and completes inside one bar
+  - the rule's own "or on the same candle" case - is never observed in a
+  non-zero stage, so it was credited as an entry having never been credited as
+  an attempt, and the first run printed 12 attempts reaching the 100 EMA beside
+  15 entries past the 200. The stage series and the entries are now walked
+  together so each attempt is scored once at one depth, and
+  `tests/test_cascade_funnel.py` fails on any funnel that rises to the right.
+  It also scored the warmup bars a window is fed, so it counted attempts the
+  trade table beside it does not; it now takes the window start.
+* `scripts/measure_pivot_ema_cascade_xauusd.py` had two locals named `counts`,
+  one a `list[int]` and one a `str`. Harmless at runtime, and the reason it
+  survived is that `scripts/` was outside mypy's scope; the study is now in
+  `files` and `mypy_path` lets a test import it.
+
+**The strategy stays out of `strategy_for`**, on D-151's precedent and now with
+a measurement behind it rather than in front of it. The alert tool keeps
+working - it reports what the chart did, which is what its messages claim - but
+its README's warning is now stronger than "unmeasured": the rule *has* been
+measured, on three months of one dataset, and showed nothing.
+
+**What would change this.** A run on the broker's own MT5 bars over D-140's
+three windows, where the timezone is known rather than inferred and the sample
+is years rather than three months. The script does that unchanged:
+`python scripts/measure_pivot_ema_cascade_xauusd.py`. If those numbers disagree
+with these, the timezone finding above says which to believe: neither, until
+the session boundary is pinned to the broker's.

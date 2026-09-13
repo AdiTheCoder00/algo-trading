@@ -55,9 +55,15 @@ reachable from it - so `--csv` takes the same bars from a file instead, through
 the engine's own `read_csv_bars`. Same runner, same costs, same tables; only the
 source differs, and the header says which one produced the numbers.
 
+A CSV source may not reach back over D-140's windows, and silently scoring a
+window the data only partly covers would report a short sample as a full one.
+`--window` names the windows explicitly instead, and the header prints them.
+
 Usage:
     python scripts/measure_pivot_ema_cascade_xauusd.py
     python scripts/measure_pivot_ema_cascade_xauusd.py --csv M5=bars/xauusd_m5.csv
+    python scripts/measure_pivot_ema_cascade_xauusd.py \\
+        --csv M5=bars/xauusd_m5.csv --window 2026.03=2026-03-01:2026-03-31
 """
 
 from __future__ import annotations
@@ -94,7 +100,10 @@ TIMEFRAMES = {
     "M30": (Timeframe(minutes=30), "TIMEFRAME_M30"),
 }
 
-#: D-140's three windows.
+#: D-140's three windows - the default, and the only ones whose numbers are
+#: comparable with the rest of this repo's studies. `--window` replaces them for
+#: a source that does not reach back this far; a run that uses it says so in its
+#: header, because a table headed by different windows is a different table.
 WINDOWS = [
     ("2026.06-08", datetime(2026, 6, 1, tzinfo=UTC), datetime(2026, 8, 31, tzinfo=UTC)),
     ("2026.01-05", datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 5, 31, tzinfo=UTC)),
@@ -189,7 +198,9 @@ def slice_for(bars: list[Bar], start: datetime, end: datetime) -> list[Bar]:
 FUNNEL_STEPS = ("pivot line", "10 EMA", "20 EMA", "50 EMA", "100 EMA", "200 EMA")
 
 
-def cascade_funnel(bars: list[Bar], tf: Timeframe) -> dict[str, list[int]]:
+def cascade_funnel(
+    bars: list[Bar], tf: Timeframe, *, since: datetime | None = None
+) -> dict[str, list[int]]:
     """How far every armed cascade got before it died, per direction.
 
     A trade count on its own cannot distinguish "the pattern is rare" from "the
@@ -206,30 +217,37 @@ def cascade_funnel(bars: list[Bar], tf: Timeframe) -> dict[str, list[int]]:
     bars on which the stage never returned to zero, and its deepest stage is
     what it is credited with.
 
-    The last step is counted from the SIGNALS, not from the stage, and that is
-    not a shortcut: a cascade that completes is reset inside the same `on_bar`
-    that emits the entry, so the final stage is never observable from outside.
-    Reading it from the stage reported zero entries in every window while the
-    trade table showed dozens - a funnel that contradicts the table beside it
-    is worse than no funnel.
+    An entry is an attempt that reached EVERY step, and it has to be credited
+    to all of them from the signal rather than from the stage: a cascade that
+    completes is reset inside the same `on_bar` that emits the entry, so its
+    final stage is never observable from outside. Reading the last step from
+    the stage reported zero entries in every window while the trade table
+    showed dozens.
+
+    Crediting the entry to the last column ALONE is the same bug one column to
+    the right, and real bars are what showed it: a cascade that opens and
+    completes within one bar - the rule's own "ya saath mein hi" case - is never
+    seen in a non-zero stage at all, so it was counted as an entry having never
+    been counted as an attempt, and the funnel printed 12 attempts reaching the
+    100 EMA and 15 entries past the 200. A funnel that rises to the right is
+    not describing a funnel.
+
+    `since` scores only attempts that END on or after it, so the warmup bars a
+    window is fed do not contribute attempts the trade table beside this one
+    does not count. Without it the funnel reported 56 entries against 55
+    trades - one entry inside the warmup - and a reader checking the two
+    tables against each other would find them off by one with nothing saying
+    why.
     """
     reached = {"short": [0] * (len(FUNNEL_STEPS) + 1), "long": [0] * (len(FUNNEL_STEPS) + 1)}
-    deepest = {"short": 0, "long": 0}
+    stages: dict[str, list[int]] = {"short": [], "long": []}
+    order: list[Bar] = []
 
-    def credit(side: str) -> None:
-        for step in range(deepest[side] + 1):
-            reached[side][step] += 1
-        deepest[side] = 0
-
-    def observe(_bar: Bar, strategy: Strategy) -> None:
+    def observe(bar: Bar, strategy: Strategy) -> None:
         state = strategy.state()
+        order.append(bar)
         for side in ("short", "long"):
-            stage = int(state.get(f"{side}_stage", "0") or 0)
-            if stage == 0 and deepest[side] > 0:
-                # The attempt ended - reset, a new session, or the entry that
-                # completed it. Either way this is where it is scored.
-                credit(side)
-            deepest[side] = max(deepest[side], stage)
+            stages[side].append(int(state.get(f"{side}_stage", "0") or 0))
 
     fired = replay_signals(
         bars,
@@ -245,12 +263,36 @@ def cascade_funnel(bars: list[Bar], tf: Timeframe) -> dict[str, list[int]]:
         session_of=forex_session_of,
         observer=observe,
     )
+
+    entered = {
+        "short": {hit.bar.ts for hit in fired if hit.is_entry and hit.side is Side.SELL},
+        "long": {hit.bar.ts for hit in fired if hit.is_entry and hit.side is Side.BUY},
+    }
+
+    # The stage series and the entries are walked together rather than counted
+    # separately, so every attempt is scored exactly once and at one depth.
     for side in ("short", "long"):
-        if deepest[side] > 0:  # an attempt still open on the last bar
-            credit(side)
-    for hit in fired:
-        if hit.is_entry:
-            reached["short" if hit.side is Side.SELL else "long"][len(FUNNEL_STEPS)] += 1
+        deepest = 0
+
+        def credit(depth: int, at: datetime, side: str = side) -> None:
+            if since is not None and at < since:
+                return
+            for step in range(depth + 1):
+                reached[side][step] += 1
+
+        for bar, stage in zip(order, stages[side], strict=True):
+            if bar.ts in entered[side]:
+                # Completed here, whatever the stage says: the reset already
+                # happened inside this bar's `on_bar`.
+                credit(len(FUNNEL_STEPS), bar.ts)
+                deepest = 0
+                continue
+            if stage == 0 and deepest > 0:
+                credit(deepest, bar.ts)  # died here - a reset, or a new session
+                deepest = 0
+            deepest = max(deepest, stage)
+        if deepest > 0 and order:  # an attempt still open on the last bar
+            credit(deepest, order[-1].ts)
     return reached
 
 
@@ -281,7 +323,39 @@ def parse_args() -> argparse.Namespace:
             "Repeatable. Given at all, MT5 is not opened."
         ),
     )
+    parser.add_argument(
+        "--window",
+        action="append",
+        default=[],
+        metavar="LABEL=START:END",
+        help=(
+            "replace D-140's windows, as LABEL=YYYY-MM-DD:YYYY-MM-DD. Repeatable. "
+            "For a source that does not cover them - the numbers then stand on "
+            "their own rather than beside this repo's other studies."
+        ),
+    )
     return parser.parse_args()
+
+
+def parse_windows(entries: list[str]) -> list[tuple[str, datetime, datetime]]:
+    """`--window` values, or D-140's three when none were given."""
+    if not entries:
+        return WINDOWS
+    windows: list[tuple[str, datetime, datetime]] = []
+    for entry in entries:
+        label, _, span = entry.partition("=")
+        start, _, end = span.partition(":")
+        if not (label and start and end):
+            raise SystemExit(f"--window wants LABEL=START:END, got {entry!r}")
+        try:
+            first = datetime.fromisoformat(start).replace(tzinfo=UTC)
+            last = datetime.fromisoformat(end).replace(tzinfo=UTC)
+        except ValueError as exc:
+            raise SystemExit(f"--window {entry!r} has an unparseable date: {exc}") from exc
+        if last <= first:
+            raise SystemExit(f"--window {entry!r} ends before it starts")
+        windows.append((label, first, last))
+    return windows
 
 
 def main() -> int:
@@ -292,6 +366,7 @@ def main() -> int:
         if name not in TIMEFRAMES or not raw:
             raise SystemExit(f"--csv wants TF=PATH with TF in {list(TIMEFRAMES)}, got {entry!r}")
         csv_paths[name] = Path(raw)
+    windows = parse_windows(args.window)
 
     print("Fibonacci pivots + 10/20/50/100/200 EMA cascade on XAUUSD")
     print(
@@ -308,6 +383,20 @@ def main() -> int:
     print(f"Source: {'CSV' if csv_paths else 'MetaTrader 5'}")
     for name, bars in series.items():
         print(f"  {name}: {len(bars)} bars, {bars[0].ts:%Y-%m-%d} -> {bars[-1].ts:%Y-%m-%d}")
+    print(
+        f"Windows: {'D-140' if windows is WINDOWS else 'given on the command line'} - "
+        + ", ".join(f"{label} ({s:%Y-%m-%d}..{e:%Y-%m-%d})" for label, s, e in windows)
+    )
+    # A window fed less history than the warmup asks for is scored on indicators
+    # that never finished warming, and the table cannot show that by itself.
+    for name, bars in series.items():
+        for label, start, _end in windows:
+            before = sum(1 for b in bars if b.ts < start)
+            if before < warmup_for():
+                print(
+                    f"  ! {name} {label}: only {before} bars before the window, "
+                    f"{warmup_for()} wanted - under-warmed, read that row with care"
+                )
 
     header = (
         f"\n{'window':<12} {'tf':<4} {'trades':>7} {'win%':>6} "
@@ -316,7 +405,7 @@ def main() -> int:
     print(header)
     print("-" * len(header))
 
-    for label, start, end in WINDOWS:
+    for label, start, end in windows:
         for tf_name, (tf, _const) in TIMEFRAMES.items():
             if tf_name not in series:
                 continue
@@ -361,7 +450,7 @@ def main() -> int:
     )
     print(head)
     print("-" * len(head))
-    for label, start, end in WINDOWS:
+    for label, start, end in windows:
         for tf_name, (tf, _const) in TIMEFRAMES.items():
             if tf_name not in series:
                 continue
@@ -399,13 +488,13 @@ def main() -> int:
     )
     print(funnel_head)
     print("-" * len(funnel_head))
-    for label, start, end in WINDOWS:
+    for label, start, end in windows:
         if "M5" not in series:
             continue
         sliced = slice_for(series["M5"], start, end)
         if not sliced:
             continue
-        reached = cascade_funnel(sliced, TIMEFRAMES["M5"][0])
+        reached = cascade_funnel(sliced, TIMEFRAMES["M5"][0], since=start)
         for side in ("short", "long"):
             counts = reached[side][1:]
             print(f"{label:<12} {side:<6} " + " ".join(f"{n:>11,}" for n in counts))
@@ -419,7 +508,7 @@ def main() -> int:
     print()
     print("### How trades ended (M5 only) ###")
     tf, _const = TIMEFRAMES["M5"]
-    for label, start, end in WINDOWS if "M5" in series else []:
+    for label, start, end in windows if "M5" in series else []:
         sliced = slice_for(series["M5"], start, end)
         if not sliced:
             continue
@@ -436,8 +525,10 @@ def main() -> int:
                 else "open at end"
             )
             by_kind[kind] = by_kind.get(kind, 0) + 1
-        counts = ", ".join(f"{kind} {count}" for kind, count in sorted(by_kind.items()))
-        print(f"{label:<12} {len(scored):>5} trades: {counts or '-'}")
+        # Not `counts`: that name is the funnel's row of ints earlier in this
+        # function, and reusing it here is what put a str into a list[int].
+        breakdown = ", ".join(f"{kind} {count}" for kind, count in sorted(by_kind.items()))
+        print(f"{label:<12} {len(scored):>5} trades: {breakdown or '-'}")
     return 0
 
 
