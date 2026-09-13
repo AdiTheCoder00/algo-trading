@@ -4059,6 +4059,12 @@ through each EMA in turn - after, or on the same candle - with the close below
 the 200 EMA as the entry, and the exit on the first candle that closes back
 above both the 10 and the 20. Long is the mirror.
 
+> **Superseded in part by D-156.** "Any pivot line" was the wrong reading: the
+> short arms only on R3, R2, R1 or the pivot, and the long only on S3, S2, S1 or
+> the pivot. Everything else in this entry stands. The text is left as written
+> rather than corrected in place, because the point of the log is what was
+> believed when, and D-156 is where the correction and its reasoning live.
+
 **What was built.** `algo/pricing/indicators.py` gained `fib_pivots`, which is
 the Fibonacci *type* of the one indicator ("Pivot Points Standard" is one
 indicator with several types, and its R1 is not the classic R1 - the test pins

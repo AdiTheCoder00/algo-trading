@@ -1,10 +1,14 @@
 """Shape test: the Fibonacci-pivot / five-EMA cascade on real XAUUSD bars.
 
 `algo/strategy/pivot_ema_cascade.py` implements the rule exactly as it was
-described: a candle closes through a pivot line, then through the 10, 20, 50,
-100 and 200 EMAs in order, and the close beyond the 200 is the entry. This
+described: a candle closes down through R3, R2, R1 or the pivot, then down
+through the 10, 20, 50, 100 and 200 EMAs in order, and the close beyond the 200
+is the entry. A long is the mirror, arming on S3, S2, S1 or the pivot. This
 measures it, because a rule that has not been measured is a hypothesis with a
 chart attached.
+
+The sides are not interchangeable and D-156 says why; a run of this script
+scores the directional rule, not D-155's looser first reading.
 
 ## What is swept, and what that is worth
 
