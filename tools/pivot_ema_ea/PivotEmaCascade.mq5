@@ -85,6 +85,7 @@ datetime g_pivot_day     = 0;   // the D1 bar the current pivots came from
 
 double   g_p, g_r1, g_r2, g_r3, g_s1, g_s2, g_s3;
 bool     g_pivots_ready = false;
+bool     g_warned_no_daily = false;
 
 // One cascade per direction. `stage` is how many of the six steps are done:
 // 0 = not armed, 1 = a pivot line is broken, 2..6 = through that many EMAs.
@@ -193,6 +194,8 @@ void OnDeinit(const int reason)
 void ReportFunnel()
 {
    Print("PivotEmaCascade ---- where the cascades got to ----");
+   Print("  (in the Strategy Tester this prints to the tester's Journal tab, "
+         "not Experts; Alert() does nothing there)");
    PrintFormat("  armed on a pivot line : %d", g_reached[1]);
    for(int i = 0; i < EMA_COUNT; i++)
       PrintFormat("  through the %3d EMA   : %d", EmaPeriods[i], g_reached[i + 2]);
@@ -221,7 +224,20 @@ bool RefreshPivots()
 {
    datetime day = iTime(_Symbol, PERIOD_D1, 1);
    if(day == 0)
-      return(false);                 // history not loaded yet
+   {
+      // Said ONCE, loudly. Without a previous daily bar there are no pivot
+      // lines, so nothing can ever arm and the EA is inert with nothing in the
+      // log to explain it - which is exactly how a working rule looks broken.
+      if(!g_warned_no_daily)
+      {
+         g_warned_no_daily = true;
+         Print("PivotEmaCascade: NO PREVIOUS DAILY BAR for ", _Symbol,
+               " - no pivot lines can be drawn, so this run will take no trades. "
+               "Open a D1 chart of this symbol to download that history "
+               "(Tools > Options > Charts > Max bars in chart), then re-run.");
+      }
+      return(false);
+   }
    if(day == g_pivot_day && g_pivots_ready)
       return(true);                  // same session, same lines
 
