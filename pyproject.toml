@@ -230,4 +230,6 @@ ignore = [
 # And the MT5 exporter: it runs on the broker's machine, where stdout is the
 # only channel back to the person running it - there is no log to read there.
 "scripts/export_mt5_bars.py" = ["T201"]
+# And the BTCUSD cascade study: the same stdout report as its XAUUSD sibling.
+"scripts/measure_pivot_ema_cascade_btcusd.py" = ["T201"]
 "scripts/measure_window_sensitivity_xauusd.py" = ["T201"]

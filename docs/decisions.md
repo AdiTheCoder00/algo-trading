@@ -4287,3 +4287,96 @@ is years rather than three months. The script does that unchanged:
 `python scripts/measure_pivot_ema_cascade_xauusd.py`. If those numbers disagree
 with these, the timezone finding above says which to believe: neither, until
 the session boundary is pinned to the broker's.
+
+### D-158 - The cascade on BTCUSD: no edge either, and the same fragility decides it
+
+The rule was measured on bitcoin because gold's answer (D-157) rested on three
+months of one dataset with an inferred timezone, and the obvious objection was
+that the instrument or the sample was wrong rather than the rule. It is not the
+instrument. **BTCUSD over D-140's own three windows gives the same answer, and
+the finding that settles it is the same one.**
+
+**The data is better than gold's in every way that mattered there.** Bitstamp
+BTC/USD 1-minute candles from `ff137/bitstamp-btcusd-minute-data`, a repository
+that ships its own provenance and validation scripts. Timestamps are UTC unix
+seconds, so the one-hour ambiguity that decided D-157 cannot arise. Over
+2025-05-01 to 2026-08-31: 702,720 minute bars, no duplicates, no out-of-order
+stamps, no OHLC inconsistency, not one missing bucket on the minute grid, and
+no adjacent closes more than 5% apart. The publisher fills unreported minutes
+with flat zero-volume candles - 4.02% of minutes, but only 0.03% of M5 bars,
+because a flat minute rarely survives aggregation. Two price cross-checks:
+the series peaks at 126,272 on 2025-10-06 against the reported record above
+$126,000 that October, and closes 2026-08-26 at 79,022 against a reported
+$78,746. Crucially the range covers **D-140's actual windows**, so unlike D-157
+these numbers sit beside every other study here.
+
+**M5, forex session cut (the same 17:00 New York the gold study uses):**
+
+| window | trades | win% | PF | net $ |
+|---|---|---|---|---|
+| 2026.06-08 | 69 | 24.6 | 0.57 | -3,743 |
+| 2026.01-05 | 110 | 32.7 | 1.13 | +1,726 |
+| 2025.06-12 | 160 | 35.0 | 1.27 | +6,555 |
+
+**+4,538** over 339 trades, per 1 BTC. That looks like the first positive
+headline any of these five rules has produced. It does not survive either of
+the two things done to it next.
+
+**First: the session boundary, again.** Bitcoin trades continuously, so "which
+day" is a choice rather than a fact, and the pivots are drawn per session. Re-cut
+on the plain UTC calendar day - what an exchange chart shows - and:
+
+| window | forex cut | UTC cut |
+|---|---|---|
+| 2026.06-08 | -3,743 (PF 0.57) | -4,040 (PF 0.57) |
+| 2026.01-05 | +1,726 (PF 1.13) | -1,928 (PF 0.88) |
+| 2025.06-12 | +6,555 (PF 1.27) | -1,110 (PF 0.96) |
+
+**+4,538 becomes -7,078**, and two of three windows change sign. Neither cut is
+more correct than the other; that is exactly the problem. D-157 found the same
+thing on gold by shifting the boundary one hour, and the two studies now agree
+on a mechanism rather than only on a verdict: what the rule is reading is where
+the day was cut.
+
+**Second: the spread, which is assumed here rather than measured.** No Vantage
+crypto dealing history exists to do for BTCUSD what D-121 did for XAUUSD, so the
+study prints a sweep instead of one number. M5 net, forex cut:
+
+| window | half $2 | half $10 | half $25 | half $50 |
+|---|---|---|---|---|
+| 2026.06-08 | -1,727 | -3,743 | -9,035 | -14,805 |
+| 2026.01-05 | +4,913 | +1,726 | -6,073 | -15,798 |
+| 2025.06-12 | +11,363 | +6,555 | -2,461 | -17,395 |
+
+The whole headline lives between a $2 and a $25 half-spread on a $70-120k
+instrument. A retail crypto CFD is not quoted at $4 round trip. Whatever this
+rule finds is smaller than the cost of trading it, which is D-124's finding
+about the bar interval arriving by a different road.
+
+Swap was set to **zero**, deliberately and optimistically: inventing a financing
+rate would put a made-up number into every overnight trade, and an optimistic
+cost model that still loses is the stronger result. Commission zero and
+unverified, the posture `CfdChargeModel` already takes.
+
+**Everything else repeats gold's pattern.** Win rate 22-35% with PF near 1. The
+exits are the rule's own: 303 of 339 M5 trades closed on the 10/20 EMA cross and
+36 on the flat stop. Longs and shorts are balanced (157 long, 182 short) and
+both lose in the bad window, so this is not a disguised directional bet - the
+falsification split that rejected D-152 finds nothing to reject here because
+there is nothing there.
+
+**Two changes to shared code, both small and both defaulted off.**
+`run_cfd_backtest` takes an optional `session_of`; without it the forex calendar
+decides the day exactly as before, so every existing study reports what it
+reported. It exists because a continuously traded instrument has no session
+close to inherit, and the choice must be visible. And
+`scripts/export_mt5_bars.py` writes a terminal's bars as CSV in
+`read_csv_bars`'s format, converting MT5's server time to UTC via
+`measure_server_offset` and taking position 1 so the forming bar is excluded -
+the one step that has to happen on the broker's machine before any of this can
+be checked against the account that would actually trade it.
+
+**Five rules, five measurements, no edge** (D-151 to D-154, D-157, and this).
+The strategy remains out of `strategy_for`. What would still change the picture
+for either instrument is the broker's own bars with the broker's own measured
+costs, which is what the exporter is for.

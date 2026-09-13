@@ -188,6 +188,7 @@ def run_cfd_backtest(
     lots: int = 100,
     starting_equity: Decimal = Decimal("100000"),
     costs: CfdCosts | None = None,
+    session_of: Callable[[datetime], date] | None = None,
 ) -> CfdResult:
     """Feed `bars` through one strategy instance, charging real costs.
 
@@ -204,6 +205,15 @@ def run_cfd_backtest(
     study written before the give-back trail existed keeps reporting exactly
     what it reported. A caller that enables it on the strategy must pass the
     same fraction here or the give-back exits will be priced at the bar close.
+
+    `session_of` decides which trading day a bar belongs to, which sets both
+    when a swap is charged and where a session-scoped indicator rolls. It
+    defaults to the forex calendar's 17:00 New York cut, so every existing study
+    is unaffected. It exists because a continuously traded instrument has no
+    such cut to inherit: BTCUSD trades through the weekend, so borrowing forex's
+    boundary for it is a choice, and a rule that draws pivots per session is
+    sensitive to that choice - D-157 measured a sign flip on gold from moving
+    the same boundary by one hour.
     """
     charged = costs or CfdCosts()
     calendar = ForexCalendar()
@@ -247,7 +257,7 @@ def run_cfd_backtest(
         else:
             trail_state = None
 
-        session = session_date_for(calendar, bar.ts)
+        session = session_of(bar.ts) if session_of else session_date_for(calendar, bar.ts)
         # One night's financing each time a held position crosses into a new
         # session - the same instant the venue charges it. `carry_for` returns a
         # signed P&L contribution; `swap_paid` is a positive cost subtracted in
