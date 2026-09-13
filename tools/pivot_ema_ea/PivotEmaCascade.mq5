@@ -31,8 +31,18 @@
 //    lines from the same market and can flip the result's sign. Nothing in this
 //    file is wrong about that; it is a property of the rule.
 //
-//    So InpEnableTrading defaults to FALSE. It runs, prints and alerts exactly
-//    as it would trade, and places nothing until you set it to true.
+//    So InpEnableTrading defaults to FALSE on a live or demo chart: it runs,
+//    prints and alerts exactly as it would trade, and places nothing until you
+//    set it to true.
+//
+//    The STRATEGY TESTER ignores that switch and always trades. The switch is
+//    there to keep an unmeasured rule off a real account, and the tester is not
+//    one - applying it there only produced a run with zero trades that read as
+//    a broken strategy rather than a switch left off.
+//
+//    Every run prints a funnel when it stops, saying how far each cascade got
+//    and how many orders were placed, so "no trades" always names its own
+//    cause. In the tester that lands in the tester's Journal tab, not Experts.
 //
 //  MATCHING THE BACKTEST
 //
