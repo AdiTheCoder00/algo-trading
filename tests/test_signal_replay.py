@@ -189,3 +189,57 @@ def test_the_paper_book_signs_the_quantity_by_side() -> None:
 
 def test_forex_session_of_places_a_mid_session_bar_on_its_own_date() -> None:
     assert forex_session_of(FIRST_BAR) == date(2026, 8, 24)
+
+
+# ---------------------------------------------------------------------- observer
+def test_the_observer_sees_every_bar_and_the_live_strategy() -> None:
+    """The hook a diagnostic reads the cascade's stage through.
+
+    It exists so a study can ask "how far did the attempts that never became
+    trades get" without writing a second copy of the rule, so what it must
+    guarantee is that the strategy it hands over is the live one, mid-replay.
+    """
+    bars = _series()
+    seen: list[tuple[datetime, str]] = []
+
+    def observe(bar: Bar, strategy: PivotEmaCascade) -> None:
+        seen.append((bar.ts, strategy.state().get("short_stage", "0")))
+
+    replay_signals(
+        bars,
+        strategy_factory=_factory,
+        instrument=XAUUSD,
+        timeframe=TF,
+        session_of=forex_session_of,
+        observer=observe,  # type: ignore[arg-type]
+    )
+    assert [ts for ts, _ in seen] == [bar.ts for bar in bars]
+    assert any(stage != "0" for _, stage in seen), "the cascade never armed"
+
+
+def test_a_completed_cascade_is_not_visible_as_a_stage() -> None:
+    """Why the funnel's last column is counted from the signals.
+
+    The strategy resets the cascade inside the same `on_bar` that emits the
+    entry, so no observer can ever see the final stage. A diagnostic that read
+    the last step from `state()` would report zero entries while the trade
+    table beside it showed dozens - which is how it was first written, and what
+    this test now prevents from coming back.
+    """
+    bars = _series()
+    stages: list[int] = []
+
+    def observe(_bar: Bar, strategy: PivotEmaCascade) -> None:
+        stages.append(int(strategy.state().get("short_stage", "0") or 0))
+
+    fired = replay_signals(
+        bars,
+        strategy_factory=_factory,
+        instrument=XAUUSD,
+        timeframe=TF,
+        session_of=forex_session_of,
+        observer=observe,  # type: ignore[arg-type]
+    )
+    #: Three EMAs in the test set, so a completed cascade is stage 4.
+    assert max(stages) < 4
+    assert [f for f in fired if f.is_entry], "but the entry did happen"

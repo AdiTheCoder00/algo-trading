@@ -124,6 +124,7 @@ def replay_signals(
     timeframe: Timeframe,
     session_of: Callable[[datetime], date],
     exchange: Exchange = Exchange.OTC,
+    observer: Callable[[Bar, Strategy], None] | None = None,
 ) -> list[Fired]:
     """Feed `bars` through one fresh strategy and collect every signal.
 
@@ -136,6 +137,14 @@ def replay_signals(
     The window is bounded to the strategy's own warmup, so a caller passing
     years of history pays O(warmup) per bar rather than O(n) - the same bound,
     and the same reason, as `cfd_runner`'s sliding window.
+
+    `observer` is called after every bar with that bar and the live strategy,
+    for a caller that needs to see more than the signals - a study asking not
+    just "how many trades" but "how far did the ones that never became trades
+    get". It reads the strategy through `state()`, which every `Strategy`
+    already publishes, so a diagnostic cannot become a second copy of the rule
+    it is diagnosing. It must not mutate anything; nothing here defends against
+    a caller that does, because the alternative is a deep copy per bar.
     """
     strategy = strategy_factory()
     book = PaperBook(instrument)
@@ -170,6 +179,8 @@ def replay_signals(
                 book.open(signal.legs[0].direction, bar.close)
             else:
                 book.close()
+        if observer is not None:
+            observer(bar, strategy)
         # Drained and dropped: the notes explain why a bar produced nothing,
         # which is a debugging aid for a study and noise for a monitor. Leaving
         # them to accumulate would grow the strategy's list for the whole replay.

@@ -64,10 +64,12 @@ from decimal import Decimal
 from pathlib import Path
 
 from algo.backtest.cfd_runner import CfdCosts, CfdResult, run_cfd_backtest
+from algo.backtest.signal_replay import forex_session_of, replay_signals
 from algo.core.bar import Bar, Timeframe
 from algo.core.enums import Side
 from algo.core.instrument import CfdId
 from algo.data.csv_feed import read_csv_bars
+from algo.strategy.base import Strategy
 from algo.strategy.pivot_ema_cascade import PivotEmaCascade
 
 XAUUSD = CfdId(symbol="XAUUSD")
@@ -174,6 +176,78 @@ def slice_for(bars: list[Bar], start: datetime, end: datetime) -> list[Bar]:
     if first is None:
         return []
     return [b for b in bars[max(0, first - warmup_for()) :] if b.ts <= end]
+
+
+#: The cascade's steps, in the order it walks them. `PivotEmaCascade.state()`
+#: publishes the stage a live cascade has reached, and stage N means the first
+#: N of these are done - so the funnel needs no knowledge of the rule beyond
+#: this list's length.
+FUNNEL_STEPS = ("pivot line", "10 EMA", "20 EMA", "50 EMA", "100 EMA", "200 EMA")
+
+
+def cascade_funnel(bars: list[Bar], tf: Timeframe) -> dict[str, list[int]]:
+    """How far every armed cascade got before it died, per direction.
+
+    A trade count on its own cannot distinguish "the pattern is rare" from "the
+    pattern is common and something later in the chain kills it", and those
+    call for opposite responses - the first says the rule is fine and the
+    market is not offering it, the second says a step of the rule is wrong.
+    D-131's warning applies to what you do NEXT with this: it is a description
+    of where attempts stop, not licence to tune the step that stops most of
+    them.
+
+    Read through `state()`, the strategy's own published stage, so this cannot
+    become a second implementation of the cascade it is measuring. Counted as
+    "how many attempts reached at least step k": an attempt is a stretch of
+    bars on which the stage never returned to zero, and its deepest stage is
+    what it is credited with.
+
+    The last step is counted from the SIGNALS, not from the stage, and that is
+    not a shortcut: a cascade that completes is reset inside the same `on_bar`
+    that emits the entry, so the final stage is never observable from outside.
+    Reading it from the stage reported zero entries in every window while the
+    trade table showed dozens - a funnel that contradicts the table beside it
+    is worse than no funnel.
+    """
+    reached = {"short": [0] * (len(FUNNEL_STEPS) + 1), "long": [0] * (len(FUNNEL_STEPS) + 1)}
+    deepest = {"short": 0, "long": 0}
+
+    def credit(side: str) -> None:
+        for step in range(deepest[side] + 1):
+            reached[side][step] += 1
+        deepest[side] = 0
+
+    def observe(_bar: Bar, strategy: Strategy) -> None:
+        state = strategy.state()
+        for side in ("short", "long"):
+            stage = int(state.get(f"{side}_stage", "0") or 0)
+            if stage == 0 and deepest[side] > 0:
+                # The attempt ended - reset, a new session, or the entry that
+                # completed it. Either way this is where it is scored.
+                credit(side)
+            deepest[side] = max(deepest[side], stage)
+
+    fired = replay_signals(
+        bars,
+        strategy_factory=lambda: PivotEmaCascade(
+            instrument=XAUUSD,
+            stop_loss_pct=STOP_LOSS_PCT,
+            trail_activation_pct=TRAIL_ACTIVATION_PCT,
+            trail_pct=TRAIL_PCT,
+            giveback_frac=Decimal("0"),
+        ),
+        instrument=XAUUSD,
+        timeframe=tf,
+        session_of=forex_session_of,
+        observer=observe,
+    )
+    for side in ("short", "long"):
+        if deepest[side] > 0:  # an attempt still open on the last bar
+            credit(side)
+    for hit in fired:
+        if hit.is_entry:
+            reached["short" if hit.side is Side.SELL else "long"][len(FUNNEL_STEPS)] += 1
+    return reached
 
 
 def load_series(csv_paths: dict[str, Path]) -> dict[str, list[Bar]]:
@@ -309,6 +383,35 @@ def main() -> int:
     # before the 10/20 EMA exit ever gets a say, and the exit rule would
     # then be untested however good the net figure looked.
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Where the cascade dies. A bare trade count cannot separate "the
+    # market never offered this" from "a step of the rule is wrong", and
+    # those want opposite responses.
+    # ------------------------------------------------------------------
+    print()
+    print("### Where the cascade died (M5, per window): attempts reaching each step ###")
+    funnel_head = f"{'window':<12} {'side':<6} " + " ".join(
+        f"{step:>11}" for step in FUNNEL_STEPS
+    )
+    print(funnel_head)
+    print("-" * len(funnel_head))
+    for label, start, end in WINDOWS:
+        if "M5" not in series:
+            continue
+        sliced = slice_for(series["M5"], start, end)
+        if not sliced:
+            continue
+        reached = cascade_funnel(sliced, TIMEFRAMES["M5"][0])
+        for side in ("short", "long"):
+            counts = reached[side][1:]
+            print(f"{label:<12} {side:<6} " + " ".join(f"{n:>11,}" for n in counts))
+    print()
+    print(
+        "An attempt is a stretch of bars on which the cascade stage never fell "
+        "back to zero;\nthe last column is the entries. A steep drop between two "
+        "columns is where the rule stops."
+    )
+
     print()
     print("### How trades ended (M5 only) ###")
     tf, _const = TIMEFRAMES["M5"]
