@@ -60,7 +60,8 @@
 #include <Trade/Trade.mqh>
 
 //--- inputs -------------------------------------------------------------------
-input bool   InpEnableTrading   = false;  // place real orders (default: alert only)
+input bool   InpEnableTrading   = false;  // place real orders on a LIVE chart
+                                          // (the Strategy Tester always trades)
 input double InpLots            = 0.01;   // volume per trade
 input double InpStopLossPct     = 0.5;    // protective stop, % of entry (0 = none)
 input long   InpMagic           = 20260913;
@@ -97,6 +98,34 @@ struct Cascade
 Cascade g_short;
 Cascade g_long;
 
+//+------------------------------------------------------------------+
+//| May this run place orders?                                        |
+//|                                                                   |
+//| InpEnableTrading exists to stop an unmeasured rule reaching a real |
+//| account by accident. The Strategy Tester is not a real account, so |
+//| applying it there bought nothing and cost everything: the first    |
+//| tester run of this EA produced ZERO trades and looked like a       |
+//| broken strategy rather than a switch left off. A backtest that     |
+//| cannot trade is not a safer backtest, it is a useless one.         |
+//+------------------------------------------------------------------+
+bool TradingAllowed()
+{
+   return(InpEnableTrading || (bool)MQLInfoInteger(MQL_TESTER));
+}
+
+//--- diagnostics: how far every armed cascade got before it died.
+//--- Counted so that "no trades" always says WHICH step stopped them,
+//--- mirroring the funnel the Python study prints (see D-157).
+int  g_reached[EMA_COUNT + 2];   // [1]=pivot break .. [6]=through the 200 EMA
+int  g_signals = 0;              // cascades completed
+int  g_orders  = 0;              // orders actually placed
+
+void CreditAttempt(const int depth)
+{
+   for(int s = 1; s <= depth && s <= EMA_COUNT + 1; s++)
+      g_reached[s]++;
+}
+
 void ResetCascade(Cascade &c)
 {
    c.stage      = 0;
@@ -132,7 +161,12 @@ int OnInit()
 
    Print("PivotEmaCascade started on ", _Symbol, " ",
          EnumToString((ENUM_TIMEFRAMES)Period()),
-         ". Trading is ", (InpEnableTrading ? "ENABLED" : "OFF (alert only)"), ".");
+         ". Trading is ",
+         (MQLInfoInteger(MQL_TESTER) ? "ENABLED (Strategy Tester)"
+                                     : (InpEnableTrading ? "ENABLED"
+                                                         : "OFF - alert only, set "
+                                                           "InpEnableTrading=true to place orders")),
+         ".");
    Print("PivotEmaCascade: this rule measured NO EDGE on XAUUSD (D-157) and ",
          "BTCUSD (D-158), and its result flips when the broker's day boundary ",
          "moves. Treat every signal as information, not advice.");
@@ -146,6 +180,35 @@ void OnDeinit(const int reason)
       if(g_ema_handle[i] != INVALID_HANDLE)
          IndicatorRelease(g_ema_handle[i]);
    ObjectsDeleteAll(0, "PEC_");
+   ReportFunnel();
+}
+
+//+------------------------------------------------------------------+
+//| Where the cascades died. Printed at the end of every run.         |
+//|                                                                   |
+//| A bare trade count cannot tell "the market never offered this"     |
+//| from "a later step killed them all" from "the switch was off", and |
+//| those want completely different responses. This says which.        |
+//+------------------------------------------------------------------+
+void ReportFunnel()
+{
+   Print("PivotEmaCascade ---- where the cascades got to ----");
+   PrintFormat("  armed on a pivot line : %d", g_reached[1]);
+   for(int i = 0; i < EMA_COUNT; i++)
+      PrintFormat("  through the %3d EMA   : %d", EmaPeriods[i], g_reached[i + 2]);
+   PrintFormat("  signals               : %d", g_signals);
+   PrintFormat("  orders placed         : %d", g_orders);
+
+   if(g_signals == 0 && g_reached[1] == 0)
+      Print("  -> nothing ever armed. Either no pivot line was closed through in "
+            "this range, or the previous DAILY bar was missing so no lines were "
+            "drawn. Check the journal for a 'pivots from ...' line.");
+   else if(g_signals == 0)
+      Print("  -> cascades armed but none completed. The step where the numbers "
+            "collapse above is the one the market did not deliver.");
+   else if(g_orders == 0)
+      Print("  -> signals fired but NO order was placed. On a live chart that is "
+            "InpEnableTrading=false; otherwise check the journal for REJECTED.");
 }
 
 //+------------------------------------------------------------------+
@@ -182,6 +245,8 @@ bool RefreshPivots()
 
    // A new session is a new set of lines, so a cascade counted against the old
    // ones is no longer making a claim about anything.
+   CreditAttempt(g_short.stage);
+   CreditAttempt(g_long.stage);
    ResetCascade(g_short);
    ResetCascade(g_long);
 
@@ -276,7 +341,10 @@ bool Advance(const bool is_short, const double close, const double prev_close,
       // break on this very bar, which the block below still allows.
       bool retraced = (is_short ? (close > c.last) : (close < c.last));
       if(retraced)
+      {
+         CreditAttempt(c.stage);   // this attempt died here, at this depth
          ResetCascade(c);
+      }
    }
 
    if(c.stage == 0)
@@ -309,7 +377,10 @@ bool Advance(const bool is_short, const double close, const double prev_close,
    bool completed = (c.stage == EMA_COUNT + 1);
    string began_at = c.pivot_name;
    if(completed)
+   {
+      CreditAttempt(EMA_COUNT + 1);   // reached every step, by definition
       ResetCascade(c);
+   }
 
    if(is_short) g_short = c; else g_long = c;
 
@@ -353,7 +424,8 @@ void Announce(const string text)
 void OpenTrade(const bool is_short, const double close)
 {
    const string what = (is_short ? "SELL" : "BUY");
-   if(!InpEnableTrading)
+   g_signals++;
+   if(!TradingAllowed())
    {
       Announce(what + " signal at " + DoubleToString(close, _Digits) +
                " - not placed, InpEnableTrading is false");
@@ -373,8 +445,11 @@ void OpenTrade(const bool is_short, const double close)
    bool ok = (is_short ? g_trade.Sell(InpLots, _Symbol, 0.0, sl, 0.0, "pivot/EMA cascade")
                        : g_trade.Buy(InpLots, _Symbol, 0.0, sl, 0.0, "pivot/EMA cascade"));
    if(ok)
+   {
+      g_orders++;
       Announce(what + " " + DoubleToString(InpLots, 2) + " at " +
                DoubleToString(price, _Digits));
+   }
    else
       Print("PivotEmaCascade: ", what, " REJECTED - retcode ", g_trade.ResultRetcode(),
             " ", g_trade.ResultRetcodeDescription());
@@ -382,7 +457,7 @@ void OpenTrade(const bool is_short, const double close)
 
 void CloseTrade(const string why)
 {
-   if(!InpEnableTrading)
+   if(!TradingAllowed())
    {
       Announce("EXIT signal (" + why + ") - nothing to close, trading is off");
       return;
@@ -431,6 +506,8 @@ void OnTick()
    if(HasPosition(held))
    {
       // No cascade is counted while a position is open.
+      CreditAttempt(g_short.stage);
+      CreditAttempt(g_long.stage);
       ResetCascade(g_short);
       ResetCascade(g_long);
 
