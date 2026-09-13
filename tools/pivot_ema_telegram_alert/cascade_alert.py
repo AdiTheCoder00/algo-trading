@@ -67,7 +67,9 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import requests
 
@@ -85,6 +87,10 @@ from algo.core.enums import Exchange, Side  # noqa: E402
 from algo.core.instrument import CfdId, InstrumentId  # noqa: E402
 from algo.core.timeutil import ist_date  # noqa: E402
 from algo.strategy.pivot_ema_cascade import PivotEmaCascade  # noqa: E402
+
+if TYPE_CHECKING:  # the SmartAPI path is imported lazily; its types are not
+    from algo.data.smartapi_feed import CandleTransport
+    from algo.exchange.master import InstrumentMaster
 
 LOG = logging.getLogger("cascade_alert")
 
@@ -232,10 +238,10 @@ class NseBars:
     """
 
     def __init__(self) -> None:
-        self._transport: object | None = None
-        self._master: object | None = None
+        self._transport: CandleTransport | None = None
+        self._master: InstrumentMaster | None = None
 
-    def _connect(self) -> tuple[object, object]:
+    def _connect(self) -> tuple[CandleTransport, InstrumentMaster]:
         if self._transport is not None and self._master is not None:
             return self._transport, self._master
 
@@ -254,7 +260,11 @@ class NseBars:
                 f"{', '.join(creds.missing())}. NSE symbols cannot be polled."
             )
         transport = SmartConnectTransport(creds.api_key)
-        transport.connect(creds.client_id, creds.password, pyotp.TOTP(creds.totp).now())
+        # `totp_seed`, not a six-digit code: the seed is what generates one,
+        # and a code copied into the environment would be stale within 30s.
+        transport.connect(
+            creds.client_id, creds.password, pyotp.TOTP(creds.totp_seed).now()
+        )
         rows = HttpMasterSource().fetch_master()
         master = InstrumentMaster(rows, fetched_at=datetime.now(UTC))
         self._transport, self._master = transport, master
@@ -272,7 +282,7 @@ class NseBars:
         since = until - timedelta(days=max(7, count // 60))
         return fetch_equity_bars(
             transport,
-            master,  # type: ignore[arg-type]
+            master,
             symbol,
             timeframe=TIMEFRAME,
             since=since,
@@ -475,7 +485,7 @@ class Monitor:
             instrument = market.instrument
             fired = replay_signals(
                 bars,
-                strategy_factory=lambda inst=instrument: PivotEmaCascade(instrument=inst),
+                strategy_factory=partial(PivotEmaCascade, instrument=instrument),
                 instrument=instrument,
                 timeframe=TIMEFRAME,
                 session_of=market.session_of,

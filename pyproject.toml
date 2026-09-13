@@ -114,7 +114,15 @@ strict = true
 warn_unreachable = true
 disallow_any_explicit = false
 show_error_codes = true
-files = ["algo", "tests"]
+# `tools/pivot_ema_telegram_alert` is in scope and the older `tools/macd_...`
+# is not, deliberately: the cascade alert drives the engine's own strategy and
+# decides whether a message is sent, so it is engine-adjacent code that a type
+# error can break silently. It was added AFTER being written without this, and
+# the first run found three real defects - a credential field that does not
+# exist (`totp`, for `totp_seed`), an untyped transport and an uninferrable
+# lambda. The MACD tool is a standalone script over pandas/ccxt with its own
+# venv, and pulling it in would be a separate piece of work.
+files = ["algo", "tests", "tools/pivot_ema_telegram_alert"]
 
 [[tool.mypy.overrides]]
 module = ["pyarrow.*", "openpyxl.*"]
